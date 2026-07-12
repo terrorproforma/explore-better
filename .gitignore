@@ -1,0 +1,27 @@
+# Installed dependencies and package output
+node_modules/
+dist/
+
+# Electron download/build caches
+.electron-cache/
+.electron-builder-cache/
+
+# Test and runtime state
+.runtime-*/
+artifacts/
+logs/
+
+# Local server/process logs
+*.log
+*.pid
+
+# Generated release feeds and temporary transaction fixtures
+release-feed/
+*.partial
+*.tmp
+
+# Editor and operating-system noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

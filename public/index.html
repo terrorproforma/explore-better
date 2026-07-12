@@ -1,0 +1,2495 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Explore Better</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23202322'/%3E%3Ctext x='32' y='39' text-anchor='middle' font-family='Segoe UI,Arial,sans-serif' font-size='22' font-weight='800' fill='%23f9faf8'%3EEB%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand" title="Explore Better">
+          <div class="brand-mark">EB</div>
+          <div class="brand-copy">
+            <strong>Explore Better</strong>
+            <span id="session-root">Starting</span>
+          </div>
+        </div>
+        <div class="root-strip" id="root-strip" aria-label="Roots"></div>
+        <div class="status-pill" id="status-pill">Ready</div>
+      </header>
+
+      <main class="workbench">
+        <nav class="nav-rail" aria-label="Navigation">
+          <div class="nav-rail-head">
+            <strong>Navigator</strong>
+            <div class="nav-title-actions">
+              <button data-nav-action="manage-favorites" title="Manage favorites">Edit</button>
+              <button class="icon-button" data-nav-action="favorite-active" title="Favorite active path">+</button>
+            </div>
+          </div>
+          <section class="nav-section" aria-labelledby="nav-favorites-title">
+            <div class="nav-section-title" id="nav-favorites-title">Favorites</div>
+            <div class="nav-list" id="nav-favorites"></div>
+          </section>
+          <section class="nav-section" aria-labelledby="nav-aliases-title">
+            <div class="nav-section-title" id="nav-aliases-title">Aliases</div>
+            <div class="nav-list" id="nav-aliases"></div>
+          </section>
+          <section class="nav-section" aria-labelledby="nav-shortcuts-title">
+            <div class="nav-section-title" id="nav-shortcuts-title">Quick Access</div>
+            <div class="nav-list" id="nav-shortcuts"></div>
+          </section>
+          <section class="nav-section" aria-labelledby="nav-shell-title">
+            <div class="nav-section-title nav-section-title-row" id="nav-shell-title">
+              <span>Shell</span>
+              <button type="button" data-shell-namespace-open="thisPc" title="Browse Windows shell namespaces">Browse</button>
+            </div>
+            <div class="nav-list" id="nav-shell"></div>
+          </section>
+          <section class="nav-section" aria-labelledby="nav-drives-title">
+            <div class="nav-section-title" id="nav-drives-title">Drives</div>
+            <div class="nav-list" id="nav-drives"></div>
+          </section>
+          <section class="nav-section tree-section" aria-labelledby="folder-tree-title">
+            <div class="nav-section-title nav-section-title-row" id="folder-tree-title">
+              <span>Folder Tree</span>
+              <span class="nav-title-actions">
+                <button data-nav-action="reveal-tree" title="Reveal active pane folder">Reveal</button>
+                <button data-nav-action="refresh-tree" title="Refresh folder tree">R</button>
+              </span>
+            </div>
+            <div class="folder-tree" id="folder-tree"></div>
+          </section>
+          <section class="nav-section recent-section" aria-labelledby="nav-recents-title">
+            <div class="nav-section-title nav-section-title-row" id="nav-recents-title">
+              <span>Recent</span>
+              <button data-nav-action="clear-recents" title="Clear recent locations">Clear</button>
+            </div>
+            <div class="nav-list" id="nav-recents"></div>
+          </section>
+        </nav>
+        <div class="layout-resizer nav-resizer" data-layout-resize="nav" role="separator" aria-label="Resize navigator"></div>
+
+        <section class="pane active" data-pane="left" aria-label="Left pane">
+          <div class="tabbar" data-tabs="left"></div>
+          <div class="pathbar">
+            <button class="icon-button" data-action="back" data-pane="left" title="Back">&lt;</button>
+            <button class="icon-button" data-action="forward" data-pane="left" title="Forward">&gt;</button>
+            <button class="icon-button" data-action="history" data-pane="left" title="Pane history">H</button>
+            <button class="icon-button" data-action="up" data-pane="left" title="Up">..</button>
+            <input class="path-input" data-path-input="left" aria-label="Left path" />
+            <button class="icon-button" data-action="refresh" data-pane="left" title="Refresh">R</button>
+            <div class="path-suggest" data-path-suggest="left" hidden></div>
+            <div class="breadcrumb-strip" data-breadcrumbs="left" aria-label="Left breadcrumbs"></div>
+          </div>
+          <div class="toolbar">
+            <input class="filter-input" data-filter="left" placeholder="Filter" aria-label="Filter left pane" />
+            <select class="kind-filter" data-kind-filter="left" aria-label="Kind filter left pane"></select>
+            <select class="label-filter" data-label-filter="left" aria-label="Label filter left pane"></select>
+            <div class="view-toggle" aria-label="Left view mode">
+              <button data-view-mode="details" data-pane="left" title="Details view">D</button>
+              <button data-view-mode="compact" data-pane="left" title="Compact view">C</button>
+              <button data-view-mode="tiles" data-pane="left" title="Tiles view">T</button>
+            </div>
+            <button data-action="new-folder" data-pane="left">Folder</button>
+            <button data-action="new-file" data-pane="left">File</button>
+            <button data-action="rename" data-pane="left">Rename</button>
+            <button data-action="bulk-rename" data-pane="left">Bulk</button>
+            <button data-action="columns" data-pane="left">Cols</button>
+            <button data-action="folder-sizes" data-pane="left" title="Calculate recursive sizes for selected or visible folders">Sizes</button>
+            <button data-action="format" data-pane="left">Fmt</button>
+            <button data-action="label" data-pane="left">Label</button>
+            <button data-action="copy-other" data-pane="left">Copy</button>
+            <button data-action="move-other" data-pane="left">Move</button>
+            <button data-action="trash" data-pane="left">Trash</button>
+            <button data-action="recycle" data-pane="left">Recycle</button>
+            <button data-action="delete" data-pane="left">Delete</button>
+          </div>
+          <div class="quick-search" data-quick-search-panel="left" hidden>
+            <div class="quick-search-tabs" aria-label="Left quick search mode">
+              <button type="button" data-quick-search-mode="filter" data-pane="left">Filter</button>
+              <button type="button" data-quick-search-mode="jump" data-pane="left">Jump</button>
+            </div>
+            <input data-quick-search-input="left" aria-label="Quick search left pane" placeholder="Quick search" />
+            <span data-quick-search-count="left">Ready</span>
+            <button type="button" class="icon-button" data-quick-search-step="previous" data-pane="left" title="Previous match">^</button>
+            <button type="button" class="icon-button" data-quick-search-step="next" data-pane="left" title="Next match">v</button>
+            <button type="button" class="icon-button" data-quick-search-close="left" title="Close quick search">X</button>
+          </div>
+          <div class="file-head">
+            <button data-sort="name" data-pane="left">Name</button>
+            <button data-sort="kind" data-pane="left">Kind</button>
+            <button data-sort="size" data-pane="left">Size</button>
+            <button data-sort="modified" data-pane="left">Modified</button>
+          </div>
+          <div class="file-list" data-list="left" tabindex="0"></div>
+        </section>
+        <div class="layout-resizer pane-resizer" data-layout-resize="panes" role="separator" aria-label="Resize panes"></div>
+        <div class="layout-resizer pane-row-resizer" data-layout-resize="paneRows" role="separator" aria-label="Resize horizontal panes"></div>
+
+        <section class="pane" data-pane="right" aria-label="Right pane">
+          <div class="tabbar" data-tabs="right"></div>
+          <div class="pathbar">
+            <button class="icon-button" data-action="back" data-pane="right" title="Back">&lt;</button>
+            <button class="icon-button" data-action="forward" data-pane="right" title="Forward">&gt;</button>
+            <button class="icon-button" data-action="history" data-pane="right" title="Pane history">H</button>
+            <button class="icon-button" data-action="up" data-pane="right" title="Up">..</button>
+            <input class="path-input" data-path-input="right" aria-label="Right path" />
+            <button class="icon-button" data-action="refresh" data-pane="right" title="Refresh">R</button>
+            <div class="path-suggest" data-path-suggest="right" hidden></div>
+            <div class="breadcrumb-strip" data-breadcrumbs="right" aria-label="Right breadcrumbs"></div>
+          </div>
+          <div class="toolbar">
+            <input class="filter-input" data-filter="right" placeholder="Filter" aria-label="Filter right pane" />
+            <select class="kind-filter" data-kind-filter="right" aria-label="Kind filter right pane"></select>
+            <select class="label-filter" data-label-filter="right" aria-label="Label filter right pane"></select>
+            <div class="view-toggle" aria-label="Right view mode">
+              <button data-view-mode="details" data-pane="right" title="Details view">D</button>
+              <button data-view-mode="compact" data-pane="right" title="Compact view">C</button>
+              <button data-view-mode="tiles" data-pane="right" title="Tiles view">T</button>
+            </div>
+            <button data-action="new-folder" data-pane="right">Folder</button>
+            <button data-action="new-file" data-pane="right">File</button>
+            <button data-action="rename" data-pane="right">Rename</button>
+            <button data-action="bulk-rename" data-pane="right">Bulk</button>
+            <button data-action="columns" data-pane="right">Cols</button>
+            <button data-action="folder-sizes" data-pane="right" title="Calculate recursive sizes for selected or visible folders">Sizes</button>
+            <button data-action="format" data-pane="right">Fmt</button>
+            <button data-action="label" data-pane="right">Label</button>
+            <button data-action="copy-other" data-pane="right">Copy</button>
+            <button data-action="move-other" data-pane="right">Move</button>
+            <button data-action="trash" data-pane="right">Trash</button>
+            <button data-action="recycle" data-pane="right">Recycle</button>
+            <button data-action="delete" data-pane="right">Delete</button>
+          </div>
+          <div class="quick-search" data-quick-search-panel="right" hidden>
+            <div class="quick-search-tabs" aria-label="Right quick search mode">
+              <button type="button" data-quick-search-mode="filter" data-pane="right">Filter</button>
+              <button type="button" data-quick-search-mode="jump" data-pane="right">Jump</button>
+            </div>
+            <input data-quick-search-input="right" aria-label="Quick search right pane" placeholder="Quick search" />
+            <span data-quick-search-count="right">Ready</span>
+            <button type="button" class="icon-button" data-quick-search-step="previous" data-pane="right" title="Previous match">^</button>
+            <button type="button" class="icon-button" data-quick-search-step="next" data-pane="right" title="Next match">v</button>
+            <button type="button" class="icon-button" data-quick-search-close="right" title="Close quick search">X</button>
+          </div>
+          <div class="file-head">
+            <button data-sort="name" data-pane="right">Name</button>
+            <button data-sort="kind" data-pane="right">Kind</button>
+            <button data-sort="size" data-pane="right">Size</button>
+            <button data-sort="modified" data-pane="right">Modified</button>
+          </div>
+          <div class="file-list" data-list="right" tabindex="0"></div>
+        </section>
+        <div class="layout-resizer inspector-resizer" data-layout-resize="inspector" role="separator" aria-label="Resize preview"></div>
+
+        <aside class="inspector" id="inspector" aria-label="Preview">
+          <div class="inspector-title">Preview</div>
+          <div class="inspector-body muted">Select an item</div>
+        </aside>
+      </main>
+
+      <div class="dock-resizer" data-layout-resize="dock" role="separator" aria-label="Resize command dock"></div>
+      <footer class="command-dock">
+        <div id="saved-command-strip" class="saved-command-strip"></div>
+        <button data-global-action="palette">Command</button>
+        <button data-global-action="manual">Manual</button>
+        <button data-global-action="speed" title="Build and search the active folder index">Speed</button>
+        <button data-global-action="commands">Tools</button>
+        <button data-global-action="hotkeys">Hotkeys</button>
+        <button data-global-action="backup">Backup</button>
+        <button data-global-action="preferences">Prefs</button>
+        <button data-global-action="toolbar">Toolbar</button>
+        <button data-global-action="layouts">Layouts</button>
+        <button data-global-action="tabGroups">Tab Groups</button>
+        <button data-global-action="aliases">Aliases</button>
+        <button data-global-action="collections">Collections</button>
+        <button data-global-action="basketAdd" title="Add selected items to the file basket">Add Basket</button>
+        <button data-global-action="basket" title="Open the file basket">Basket</button>
+        <button data-global-action="snapshots">Snapshots</button>
+        <button data-global-action="labels">Labels</button>
+        <button data-global-action="filters">Filters</button>
+        <button data-global-action="columns">Columns</button>
+        <button data-global-action="formats">Formats</button>
+        <button data-global-action="presets">Presets</button>
+        <button data-global-action="selectMask" title="Select visible items by wildcard mask">Select</button>
+        <button data-global-action="selectionSets" title="Save or restore exact item selections">Sets</button>
+        <button data-global-action="clipCut" title="Cut selected items to the app clipboard">Cut</button>
+        <button data-global-action="clipCopy" title="Copy selected items to the app clipboard">Copy</button>
+        <button data-global-action="copyNames" title="Copy selected paths or names to the Windows clipboard">Names</button>
+        <button data-global-action="checksums" title="Create checksum manifests for selected files">Hashes</button>
+        <button data-global-action="clipPaste" title="Paste the app clipboard into the active pane">Paste</button>
+        <button data-global-action="newFile" title="Create a file in the active pane">New File</button>
+        <select id="paste-conflict-mode" class="dock-select" aria-label="Paste conflict policy" title="Paste conflict policy">
+          <option value="unique">Rename</option>
+          <option value="overwrite">Overwrite</option>
+          <option value="skip">Skip</option>
+        </select>
+        <button data-global-action="script">Script</button>
+        <button data-global-action="flat">Flat</button>
+        <button data-global-action="duplicates">Dupes</button>
+        <button data-global-action="editText">Edit</button>
+        <button data-global-action="viewer" title="Open the selected previewable file in the large viewer">Viewer</button>
+        <button data-global-action="quickSearch" title="Filter or jump within the active folder">Quick</button>
+        <button data-global-action="search">Search</button>
+        <button data-global-action="properties">Properties</button>
+        <button data-global-action="folderSizes" title="Calculate recursive folder sizes in the active pane">Sizes</button>
+        <button data-global-action="sizeAnalysis" title="Analyze disk usage with folders, extensions, files, and a treemap">Analyzer</button>
+        <button data-global-action="archive">Archive</button>
+        <button data-global-action="compare">Compare</button>
+        <button data-global-action="destination">Send To</button>
+        <button data-global-action="transfer">Transfer</button>
+        <button data-global-action="bulkRename">Bulk Rename</button>
+        <button data-global-action="openWith">Open With</button>
+        <button data-global-action="reveal">Reveal</button>
+        <button data-global-action="favorite">Favorite</button>
+        <button data-global-action="recycle">Recycle</button>
+        <button data-global-action="delete">Delete</button>
+        <button data-global-action="appTrash">Trash Bin</button>
+        <button data-global-action="ops">Ops</button>
+        <button data-global-action="integration">Integrate</button>
+        <label class="dock-toggle" title="Automatically refresh visible filesystem panes">
+          <input id="auto-refresh-toggle" type="checkbox" />
+          <span>Auto</span>
+        </label>
+        <label class="dock-toggle" title="Show hidden and system filesystem entries">
+          <input id="show-hidden-toggle" type="checkbox" />
+          <span>Hidden</span>
+        </label>
+        <label class="dock-toggle" title="Follow matching folder navigation in the other pane">
+          <input id="linked-navigation-toggle" type="checkbox" />
+          <span>Link</span>
+        </label>
+        <div class="layout-toggle" aria-label="Pane layout">
+          <button data-layout-mode="vertical" title="Vertical split (Ctrl+Shift+1)">V</button>
+          <button data-layout-mode="horizontal" title="Horizontal split (Ctrl+Shift+2)">H</button>
+          <button data-layout-mode="single" title="Single active pane (Ctrl+Shift+3)">1</button>
+        </div>
+        <div class="dock-spacer"></div>
+        <span id="clipboard-readout" class="clipboard-readout">Clipboard empty</span>
+        <span id="operation-readout">0 ops</span>
+        <span id="selection-readout">0 selected</span>
+      </footer>
+    </div>
+
+    <dialog class="command-dialog" id="command-dialog">
+      <div class="dialog-head">
+        <strong>Command</strong>
+        <button class="icon-button" data-close-dialog="command-dialog" title="Close">X</button>
+      </div>
+      <input id="command-input" class="command-input" placeholder="Type a command" />
+      <div id="command-results" class="command-results"></div>
+    </dialog>
+
+    <dialog class="manual-dialog" id="manual-dialog">
+      <div class="dialog-head">
+        <div class="dialog-title-block">
+          <strong>Manual</strong>
+          <span id="manual-summary">USER_MANUAL.md</span>
+        </div>
+        <div class="dialog-actions">
+          <input id="manual-search" aria-label="Search manual" placeholder="Find in manual" />
+          <button type="button" data-manual-action="clear-search">Clear</button>
+          <button type="button" data-manual-action="reload">Reload</button>
+          <button class="icon-button" data-close-dialog="manual-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <article id="manual-body" class="manual-body"></article>
+    </dialog>
+
+    <dialog class="speed-dialog" id="speed-dialog">
+      <div class="dialog-head">
+        <div class="dialog-title-block">
+          <strong>Speed Index</strong>
+          <span id="speed-path">Active folder</span>
+        </div>
+        <div class="dialog-actions">
+          <span id="speed-summary">Not indexed</span>
+          <button class="icon-button" data-close-dialog="speed-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="speed-panel">
+        <div class="speed-actions">
+          <button type="button" data-speed-action="refresh">Refresh</button>
+          <button type="button" data-speed-action="build">Index Active</button>
+          <button type="button" data-speed-action="search">Search Index</button>
+          <button type="button" data-speed-action="background-search">Search Background</button>
+        </div>
+        <div class="speed-options">
+          <label class="check-row compact-check">
+            <input id="speed-index-dimensions" type="checkbox" checked />
+            <span>Warm image metadata</span>
+          </label>
+          <label class="check-row compact-check">
+            <input id="speed-index-links" type="checkbox" />
+            <span>Warm link targets</span>
+          </label>
+          <label class="check-row compact-check">
+            <input id="speed-index-content" type="checkbox" />
+            <span>Index text content</span>
+          </label>
+          <label>
+            <span class="field-label">Folders</span>
+            <input id="speed-bg-max-folders" type="number" min="1" max="5000" step="1" value="500" />
+          </label>
+          <label>
+            <span class="field-label">Entries</span>
+            <input id="speed-bg-max-entries" type="number" min="100" max="500000" step="100" value="100000" />
+          </label>
+          <label>
+            <span class="field-label">Text KB</span>
+            <input id="speed-bg-content-kb" type="number" min="1" max="1024" step="1" value="128" />
+          </label>
+        </div>
+        <label>
+          <span class="field-label">Indexed Search</span>
+          <input id="speed-query" placeholder="Filename, kind, label, note, attribute" />
+        </label>
+        <div id="speed-metrics" class="speed-metrics"></div>
+        <div id="speed-results" class="speed-results"></div>
+        <div class="speed-background">
+          <div class="speed-section-head">
+            <strong>Background</strong>
+            <div>
+              <button type="button" data-speed-action="background-refresh">Refresh</button>
+              <button type="button" data-speed-action="background-add">Add Active</button>
+            </div>
+          </div>
+          <div id="speed-background-list" class="speed-background-list"></div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="size-analysis-dialog" id="size-analysis-dialog">
+      <div class="dialog-head">
+        <div class="dialog-title-block">
+          <strong>Size Analyzer</strong>
+          <span id="size-analysis-summary">Ready</span>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" data-size-analysis-action="active">Active</button>
+          <button type="button" data-size-analysis-action="scan">Scan</button>
+          <button type="button" data-size-analysis-action="cancel" id="size-analysis-cancel" disabled>Cancel</button>
+          <button class="icon-button" data-close-dialog="size-analysis-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="size-analysis-panel">
+        <div class="size-analysis-controls">
+          <label>
+            <span class="field-label">Path</span>
+            <input id="size-analysis-path" />
+          </label>
+          <label>
+            <span class="field-label">Entries</span>
+            <input id="size-analysis-max-entries" type="number" min="100" max="500000" step="1000" value="100000" />
+          </label>
+          <label class="check-row compact-check">
+            <input id="size-analysis-follow-links" type="checkbox" />
+            <span>Follow links</span>
+          </label>
+        </div>
+        <div id="size-analysis-scan-strip" class="size-analysis-scan-strip"></div>
+        <div id="size-analysis-metrics" class="size-analysis-metrics"></div>
+        <div class="size-analysis-main">
+          <section class="size-analysis-table-panel size-analysis-folder-panel">
+            <div class="size-analysis-section-head">
+              <strong>Folder Tree</strong>
+              <span id="size-analysis-folder-count">0</span>
+            </div>
+            <div class="size-analysis-table size-analysis-folder-table">
+              <div class="size-analysis-table-head" aria-hidden="true">
+                <span>Name</span>
+                <span>Parent %</span>
+                <span>Size</span>
+                <span>Allocated</span>
+                <span>Items</span>
+                <span>Files</span>
+                <span>Folders</span>
+                <span>Modified</span>
+              </div>
+              <div id="size-analysis-folders" class="size-analysis-table-body"></div>
+            </div>
+          </section>
+          <section class="size-analysis-table-panel size-analysis-extension-panel">
+            <div class="size-analysis-section-head">
+              <strong>File Types</strong>
+              <span id="size-analysis-extension-count">0</span>
+            </div>
+            <div class="size-analysis-table size-analysis-extension-table">
+              <div class="size-analysis-table-head" aria-hidden="true">
+                <span>Ext</span>
+                <span>Type</span>
+                <span>Percent</span>
+                <span>Size</span>
+                <span>Allocated</span>
+                <span>Files</span>
+              </div>
+              <div id="size-analysis-extensions" class="size-analysis-table-body"></div>
+            </div>
+          </section>
+        </div>
+        <div class="size-analysis-map-row">
+          <section class="size-analysis-treemap-panel">
+            <div class="size-analysis-section-head">
+              <strong>File Map</strong>
+              <div class="size-analysis-map-head-meta">
+                <span id="size-analysis-map-detail">Scan to map files</span>
+                <span id="size-analysis-map-count">0</span>
+              </div>
+            </div>
+            <canvas id="size-analysis-treemap" width="1080" height="430" tabindex="0" role="img" aria-label="File size treemap"></canvas>
+          </section>
+          <section class="size-analysis-table-panel size-analysis-file-panel">
+            <div class="size-analysis-section-head">
+              <strong>Top Files</strong>
+              <span id="size-analysis-file-count">0</span>
+            </div>
+            <div class="size-analysis-table size-analysis-file-table">
+              <div class="size-analysis-table-head" aria-hidden="true">
+                <span>Name</span>
+                <span>Type</span>
+                <span>Size</span>
+                <span>Allocated</span>
+                <span>Percent</span>
+                <span>Modified</span>
+              </div>
+              <div id="size-analysis-files" class="size-analysis-table-body"></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="history-dialog" id="history-dialog">
+      <div class="dialog-head">
+        <div class="dialog-title-block">
+          <strong>Pane History</strong>
+          <span id="history-summary">No history yet</span>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" data-history-switch="left">Left</button>
+          <button type="button" data-history-switch="right">Right</button>
+          <button class="icon-button" data-close-dialog="history-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div id="history-list" class="history-list"></div>
+    </dialog>
+
+    <dialog class="favorites-dialog" id="favorites-dialog">
+      <div class="dialog-head">
+        <strong>Favorites</strong>
+        <div class="dialog-actions">
+          <span id="favorite-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="favorites-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="favorites-grid">
+        <div id="favorite-list" class="favorite-list"></div>
+        <form id="favorite-form" class="favorite-form">
+          <input type="hidden" id="favorite-id" />
+          <label>
+            <span class="field-label">Name</span>
+            <input id="favorite-name" required />
+          </label>
+          <label class="favorite-path-field">
+            <span class="field-label">Path</span>
+            <input id="favorite-path" required />
+          </label>
+          <fieldset class="favorite-swatches" aria-label="Favorite color">
+            <label class="label-swatch label-teal" title="Teal">
+              <input type="radio" name="favorite-color" value="teal" />
+              <span>Teal</span>
+            </label>
+            <label class="label-swatch label-gold" title="Gold">
+              <input type="radio" name="favorite-color" value="gold" checked />
+              <span>Gold</span>
+            </label>
+            <label class="label-swatch label-ember" title="Ember">
+              <input type="radio" name="favorite-color" value="ember" />
+              <span>Ember</span>
+            </label>
+            <label class="label-swatch label-violet" title="Violet">
+              <input type="radio" name="favorite-color" value="violet" />
+              <span>Violet</span>
+            </label>
+            <label class="label-swatch label-green" title="Green">
+              <input type="radio" name="favorite-color" value="green" />
+              <span>Green</span>
+            </label>
+            <label class="label-swatch label-black" title="Black">
+              <input type="radio" name="favorite-color" value="black" />
+              <span>Black</span>
+            </label>
+          </fieldset>
+          <div class="favorite-preview" id="favorite-preview">
+            <span class="nav-code">FAV</span>
+            <span>
+              <strong>No favorite selected</strong>
+              <small>Select a saved row or add the active pane path.</small>
+            </span>
+          </div>
+          <div class="favorite-actions">
+            <button type="button" data-favorite-action="new">New</button>
+            <button type="button" data-favorite-action="add-active">Add Active</button>
+            <button type="submit">Save</button>
+            <button type="button" data-favorite-action="open">Open</button>
+            <button type="button" data-favorite-action="open-other">Other Pane</button>
+            <button type="button" data-favorite-action="up">Up</button>
+            <button type="button" data-favorite-action="down">Down</button>
+            <button type="button" data-favorite-action="delete">Delete</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="hotkeys-dialog" id="hotkeys-dialog">
+      <div class="dialog-head">
+        <strong>Hotkeys</strong>
+        <div class="dialog-actions">
+          <span id="hotkey-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="hotkeys-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="hotkeys-grid">
+        <div id="hotkey-list" class="hotkey-list"></div>
+        <form id="hotkey-form" class="hotkey-form">
+          <input type="hidden" id="hotkey-id" />
+          <label>
+            <span class="field-label">Shortcut</span>
+            <input id="hotkey-combo" readonly required placeholder="Press shortcut" />
+          </label>
+          <label>
+            <span class="field-label">Action</span>
+            <select id="hotkey-target"></select>
+          </label>
+          <div id="hotkey-conflict" class="hotkey-conflict">Press a shortcut, choose an action, then save.</div>
+          <div class="hotkey-actions">
+            <button type="button" data-hotkey-action="new">New</button>
+            <button type="submit">Save</button>
+            <button type="button" data-hotkey-action="clear">Clear</button>
+            <button type="button" data-hotkey-action="run">Run</button>
+            <button type="button" data-hotkey-action="delete">Delete</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="backup-dialog" id="backup-dialog">
+      <div class="dialog-head">
+        <strong>Config Backup</strong>
+        <div class="dialog-actions">
+          <span id="backup-summary">Ready</span>
+          <button class="icon-button" data-close-dialog="backup-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="backup-grid">
+        <section class="backup-panel">
+          <div class="backup-panel-copy">
+            <strong>Export Package</strong>
+            <small>Download layouts, tabs, aliases, labels, tools, scripts, hotkeys, and settings.</small>
+          </div>
+          <div id="backup-counts" class="backup-counts"></div>
+          <button type="button" data-backup-action="export">Export</button>
+        </section>
+        <section class="backup-panel">
+          <div class="backup-panel-copy">
+            <strong>Import Package</strong>
+            <small>Restore a saved package, either merging by id/path or replacing matching config sections.</small>
+          </div>
+          <label class="check-row backup-replace-row">
+            <input id="backup-import-replace" type="checkbox" />
+            <span>Replace</span>
+          </label>
+          <div class="backup-import-actions">
+            <button type="button" data-backup-action="import">Import</button>
+            <input id="backup-package-file" type="file" accept=".json,application/json" hidden />
+          </div>
+        </section>
+        <pre id="backup-output"></pre>
+      </div>
+    </dialog>
+
+    <dialog class="preferences-dialog" id="preferences-dialog">
+      <div class="dialog-head">
+        <strong>Preferences</strong>
+        <div class="dialog-actions">
+          <span id="preferences-summary">Ready</span>
+          <button class="icon-button" data-close-dialog="preferences-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="preferences-form" class="preferences-form">
+        <section class="preference-section">
+          <div class="preference-section-head">
+            <strong>Lister</strong>
+            <small>Daily pane behavior</small>
+          </div>
+          <label>
+            <span class="field-label">Density</span>
+            <select id="preference-density">
+              <option value="compact">Compact</option>
+              <option value="comfortable">Comfortable</option>
+              <option value="spacious">Spacious</option>
+            </select>
+          </label>
+          <label>
+            <span class="field-label">Open Items</span>
+            <select id="preference-open-gesture">
+              <option value="double">Double-click</option>
+              <option value="single">Single-click</option>
+            </select>
+          </label>
+          <label>
+            <span class="field-label">Startup</span>
+            <select id="preference-startup-mode">
+              <option value="last">Restore Last Lister</option>
+              <option value="homeDownloads">Home + Downloads</option>
+              <option value="workspaceHome">Workspace + Home</option>
+              <option value="documentsDownloads">Documents + Downloads</option>
+              <option value="savedLayout">Saved Layout</option>
+            </select>
+          </label>
+          <label id="preference-startup-layout-row" hidden>
+            <span class="field-label">Startup Layout</span>
+            <select id="preference-startup-layout"></select>
+          </label>
+          <label>
+            <span class="field-label">Paste Conflicts</span>
+            <select id="preference-paste-conflict">
+              <option value="unique">Rename</option>
+              <option value="overwrite">Overwrite</option>
+              <option value="skip">Skip</option>
+            </select>
+          </label>
+          <label class="check-row">
+            <input id="preference-inspector" type="checkbox" />
+            <span>Preview pane</span>
+          </label>
+          <label class="check-row">
+            <input id="preference-auto-refresh" type="checkbox" />
+            <span>Auto refresh</span>
+          </label>
+          <label class="check-row">
+            <input id="preference-show-hidden" type="checkbox" />
+            <span>Show hidden and system items</span>
+          </label>
+          <label class="check-row">
+            <input id="preference-linked-navigation" type="checkbox" />
+            <span>Linked pane navigation</span>
+          </label>
+          <label class="check-row">
+            <input id="preference-confirm-trash" type="checkbox" />
+            <span>Confirm app trash actions</span>
+          </label>
+        </section>
+        <section class="preference-section">
+          <div class="preference-section-head">
+            <strong>Replacement</strong>
+            <small>Default shell entry behavior</small>
+          </div>
+          <label>
+            <span class="field-label">Launch Mode</span>
+            <select id="preference-launch-mode">
+              <option value="native">Native Window</option>
+              <option value="appWindow">App Window</option>
+              <option value="browser">Browser Tab</option>
+            </select>
+          </label>
+          <label>
+            <span class="field-label">Shell Opens</span>
+            <select id="preference-shell-open-mode">
+              <option value="leftReplace">Replace Left</option>
+              <option value="rightReplace">Replace Right</option>
+              <option value="activeReplace">Replace Active</option>
+              <option value="activeNewTab">New Active Tab</option>
+            </select>
+          </label>
+          <div class="preferences-readout" id="preferences-readout"></div>
+          <div class="preferences-actions">
+            <button type="submit">Save</button>
+            <button type="button" data-preferences-action="reset">Defaults</button>
+            <button type="button" data-preferences-action="integration">Integration</button>
+          </div>
+        </section>
+      </form>
+    </dialog>
+
+    <dialog class="toolbar-dialog" id="toolbar-dialog">
+      <div class="dialog-head">
+        <strong>Toolbar</strong>
+        <div class="dialog-actions">
+          <span id="toolbar-summary">All buttons visible</span>
+          <button class="icon-button" data-close-dialog="toolbar-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="toolbar-customizer">
+        <div class="toolbar-presets" id="toolbar-presets"></div>
+        <form id="toolbar-form" class="toolbar-form">
+          <div id="toolbar-action-list" class="toolbar-action-list"></div>
+          <div class="toolbar-form-actions">
+            <button type="submit">Save</button>
+            <button type="button" data-toolbar-action="all">All</button>
+            <button type="button" data-toolbar-action="essentials">Essentials</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="select-dialog" id="select-dialog">
+      <div class="dialog-head">
+        <strong>Advanced Select</strong>
+        <button class="icon-button" data-close-dialog="select-dialog" title="Close">X</button>
+      </div>
+      <form id="select-form" class="select-form">
+        <label for="select-pattern" class="select-wide">
+          <span class="field-label">Mask</span>
+          <input id="select-pattern" aria-label="Selection mask" placeholder="*.jpg;*.png" />
+        </label>
+        <label for="select-mode">
+          <span class="field-label">Mode</span>
+          <select id="select-mode" aria-label="Selection mode">
+            <option value="replace">Replace</option>
+            <option value="add">Add</option>
+            <option value="remove">Remove</option>
+            <option value="keep">Keep</option>
+          </select>
+        </label>
+        <label for="select-scope">
+          <span class="field-label">Scope</span>
+          <select id="select-scope" aria-label="Selection scope">
+            <option value="all">Files and folders</option>
+            <option value="files">Files only</option>
+            <option value="folders">Folders only</option>
+          </select>
+        </label>
+        <label class="check-row">
+          <input id="select-case" type="checkbox" />
+          <span>Case</span>
+        </label>
+        <label for="select-size-op">
+          <span class="field-label">Size</span>
+          <select id="select-size-op" aria-label="Size rule">
+            <option value="any">Any size</option>
+            <option value="greater">Larger than</option>
+            <option value="less">Smaller than</option>
+            <option value="equal">Equal to</option>
+          </select>
+        </label>
+        <label for="select-size-value">
+          <span class="field-label">Bytes</span>
+          <input id="select-size-value" aria-label="Size value" placeholder="10 MB" />
+        </label>
+        <label for="select-date-field">
+          <span class="field-label">Date Field</span>
+          <select id="select-date-field" aria-label="Date field">
+            <option value="modified">Modified</option>
+            <option value="created">Created</option>
+          </select>
+        </label>
+        <label for="select-date-op">
+          <span class="field-label">Age</span>
+          <select id="select-date-op" aria-label="Date rule">
+            <option value="any">Any age</option>
+            <option value="newer">Newer than</option>
+            <option value="older">Older than</option>
+          </select>
+        </label>
+        <label for="select-date-days">
+          <span class="field-label">Days</span>
+          <input id="select-date-days" aria-label="Age in days" type="number" min="0" step="1" placeholder="7" />
+        </label>
+        <label for="select-attribute">
+          <span class="field-label">Attribute</span>
+          <select id="select-attribute" aria-label="Attribute rule">
+            <option value="any">Any attr</option>
+            <option value="readonly">Read-only</option>
+            <option value="hidden">Hidden</option>
+            <option value="system">System</option>
+            <option value="archive">Archive</option>
+            <option value="compressed">Compressed</option>
+            <option value="encrypted">Encrypted</option>
+            <option value="none">No attrs</option>
+          </select>
+        </label>
+        <div class="select-actions">
+          <button type="submit">Apply</button>
+          <button type="button" data-select-action="clear">Clear</button>
+        </div>
+      </form>
+      <div class="select-preset-strip">
+        <select id="select-preset-select" aria-label="Saved select preset"></select>
+        <input id="select-preset-name" aria-label="Select preset name" placeholder="Preset name" />
+        <button type="button" data-select-preset-action="save">Save</button>
+        <button type="button" data-select-preset-action="replace">Replace</button>
+        <button type="button" data-select-preset-action="apply">Apply</button>
+        <button type="button" data-select-preset-action="delete">Delete</button>
+        <span id="select-preset-summary">0 presets</span>
+      </div>
+      <div id="select-summary" class="select-summary">Enter a wildcard mask</div>
+      <div id="select-preview" class="select-preview"></div>
+    </dialog>
+
+    <dialog class="selection-sets-dialog" id="selection-sets-dialog">
+      <div class="dialog-head">
+        <strong>Selection Sets</strong>
+        <div class="dialog-actions">
+          <span id="selection-set-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="selection-sets-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="selection-sets-grid">
+        <div id="selection-set-list" class="selection-set-list"></div>
+        <div class="selection-set-workspace">
+          <form id="selection-set-form" class="selection-set-form">
+            <input type="hidden" id="selection-set-id" />
+            <label>
+              <span class="field-label">Name</span>
+              <input id="selection-set-name" required />
+            </label>
+            <label>
+              <span class="field-label">Notes</span>
+              <input id="selection-set-description" />
+            </label>
+            <label>
+              <span class="field-label">Restore</span>
+              <select id="selection-set-mode">
+                <option value="replace">Replace</option>
+                <option value="add">Add</option>
+                <option value="remove">Remove</option>
+                <option value="keep">Keep</option>
+              </select>
+            </label>
+            <div class="selection-set-actions">
+              <button type="button" data-selection-set-action="new">New</button>
+              <button type="submit">Save Current</button>
+              <button type="button" data-selection-set-action="replace">Replace</button>
+              <button type="button" data-selection-set-action="apply">Apply Here</button>
+              <button type="button" data-selection-set-action="open">Open + Select</button>
+              <button type="button" data-selection-set-action="delete">Delete</button>
+            </div>
+          </form>
+          <div id="selection-set-detail" class="selection-set-detail"></div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="copy-names-dialog" id="copy-names-dialog">
+      <div class="dialog-head">
+        <strong>Copy Names</strong>
+        <div class="dialog-actions">
+          <span id="copy-names-summary">No target</span>
+          <button class="icon-button" data-close-dialog="copy-names-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="copy-names-grid">
+        <section class="copy-names-options">
+          <label>
+            <span class="field-label">Source</span>
+            <select id="copy-names-format">
+              <option value="path">Full paths</option>
+              <option value="name">Names</option>
+              <option value="stem">Names without extensions</option>
+              <option value="parent">Parent folders</option>
+              <option value="json">JSON array</option>
+              <option value="csv">CSV</option>
+            </select>
+          </label>
+          <label>
+            <span class="field-label">Separator</span>
+            <select id="copy-names-separator">
+              <option value="newline">Newline</option>
+              <option value="space">Space</option>
+              <option value="comma">Comma</option>
+              <option value="tab">Tab</option>
+            </select>
+          </label>
+          <label>
+            <span class="field-label">Quote</span>
+            <select id="copy-names-quote">
+              <option value="none">None</option>
+              <option value="double">Double quotes</option>
+              <option value="single">Single quotes</option>
+            </select>
+          </label>
+          <div class="copy-names-actions">
+            <button type="button" data-copy-names-preset="path">Paths</button>
+            <button type="button" data-copy-names-preset="name">Names</button>
+            <button type="button" data-copy-names-preset="json">JSON</button>
+            <button type="button" data-copy-names-action="copy">Copy</button>
+          </div>
+        </section>
+        <section class="copy-names-targets">
+          <div class="copy-names-target-head">
+            <strong id="copy-names-target-title">Targets</strong>
+            <small id="copy-names-target-note">Uses selected items, or the active folder if nothing is selected.</small>
+          </div>
+          <div id="copy-names-target-list" class="copy-names-target-list"></div>
+        </section>
+        <textarea id="copy-names-preview" spellcheck="false" readonly></textarea>
+      </div>
+    </dialog>
+
+    <dialog class="checksums-dialog" id="checksums-dialog">
+      <div class="dialog-head">
+        <strong>Checksums</strong>
+        <div class="dialog-actions">
+          <span id="checksums-summary">No target</span>
+          <button class="icon-button" data-close-dialog="checksums-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="checksums-form" class="checksums-form">
+        <label>
+          <span class="field-label">Algorithm</span>
+          <select id="checksums-algorithm">
+            <option value="sha256">SHA-256</option>
+            <option value="sha1">SHA-1</option>
+            <option value="md5">MD5</option>
+          </select>
+        </label>
+        <label>
+          <span class="field-label">Format</span>
+          <select id="checksums-format">
+            <option value="manifest">Manifest</option>
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+        </label>
+        <label>
+          <span class="field-label">Max Hash MB</span>
+          <input id="checksums-max-hash" type="number" min="1" max="1024" value="128" />
+        </label>
+        <div class="checksums-actions">
+          <button type="submit">Generate</button>
+          <button type="button" data-checksums-action="verify">Verify</button>
+          <button type="button" data-checksums-action="copy">Copy</button>
+          <button type="button" data-checksums-action="download">Download</button>
+        </div>
+      </form>
+      <div class="checksums-grid">
+        <section class="checksums-targets">
+          <div class="checksums-target-head">
+            <strong>Targets</strong>
+            <small id="checksums-target-note">Uses selected files.</small>
+          </div>
+          <div id="checksums-target-list" class="checksums-target-list"></div>
+        </section>
+        <section class="checksums-output">
+          <div id="checksums-results" class="checksums-results"></div>
+          <textarea id="checksums-preview" spellcheck="false" readonly></textarea>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog class="script-dialog" id="script-dialog">
+      <div class="dialog-head">
+        <strong>Script</strong>
+        <div class="dialog-actions">
+          <span id="script-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="script-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="script-grid">
+        <div id="script-list" class="script-list"></div>
+        <form id="script-form" class="script-form">
+          <input type="hidden" id="script-id" />
+          <label>
+            <span class="field-label">Name</span>
+            <input id="script-name" required />
+          </label>
+          <label>
+            <span class="field-label">Description</span>
+            <input id="script-description" />
+          </label>
+          <label class="check-row script-toolbar-toggle">
+            <input id="script-toolbar" type="checkbox" />
+            <span>Toolbar</span>
+          </label>
+          <label class="script-code-field">
+            <span class="field-label">Code</span>
+            <textarea id="script-code" spellcheck="false"></textarea>
+          </label>
+          <section class="script-package-panel" aria-label="Script packages">
+            <div class="script-package-copy">
+              <strong>Script Package</strong>
+              <small id="script-package-summary">Export or import trusted scripts as JSON.</small>
+            </div>
+            <label class="check-row script-import-mode">
+              <input id="script-import-replace" type="checkbox" />
+              <span>Replace</span>
+            </label>
+            <div class="script-package-actions">
+              <button type="button" data-script-package-action="export">Export</button>
+              <button type="button" data-script-package-action="import">Import</button>
+              <input id="script-package-file" type="file" accept=".json,application/json" hidden />
+            </div>
+          </section>
+          <div class="script-actions">
+            <button type="button" data-script-action="new">New</button>
+            <button type="submit">Save</button>
+            <button type="button" id="run-script">Run</button>
+            <button type="button" data-script-action="delete">Delete</button>
+            <button type="button" id="clear-script-output">Clear</button>
+          </div>
+          <pre id="script-output"></pre>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="tools-dialog" id="tools-dialog">
+      <div class="dialog-head">
+        <strong>Tools</strong>
+        <button class="icon-button" data-close-dialog="tools-dialog" title="Close">X</button>
+      </div>
+      <div class="tools-grid">
+        <div id="tool-list" class="tool-list"></div>
+        <form id="tool-form" class="tool-form">
+          <input type="hidden" id="tool-id" />
+          <label>
+            <span class="field-label">Name</span>
+            <input id="tool-name" required />
+          </label>
+          <label>
+            <span class="field-label">Kind</span>
+            <select id="tool-kind">
+              <option value="powershell">PowerShell</option>
+              <option value="cmd">Command Prompt</option>
+            </select>
+          </label>
+          <label>
+            <span class="field-label">Description</span>
+            <input id="tool-description" />
+          </label>
+          <label class="check-row">
+            <input id="tool-toolbar" type="checkbox" />
+            <span>Toolbar</span>
+          </label>
+          <label class="tool-command-field">
+            <span class="field-label">Command</span>
+            <textarea id="tool-command" spellcheck="false"></textarea>
+          </label>
+          <div class="variable-strip">
+            <button type="button" data-insert-token="{active}">{active}</button>
+            <button type="button" data-insert-token="{other}">{other}</button>
+            <button type="button" data-insert-token="{first}">{first}</button>
+            <button type="button" data-insert-token="{selected}">{selected}</button>
+          </div>
+          <section class="tool-package-panel" aria-label="Tool packages">
+            <div class="tool-package-copy">
+              <strong>Tool Package</strong>
+              <small id="tool-package-summary">Export or import trusted tool buttons as JSON.</small>
+            </div>
+            <label class="check-row tool-import-mode">
+              <input id="tool-import-replace" type="checkbox" />
+              <span>Replace</span>
+            </label>
+            <div class="tool-package-actions">
+              <button type="button" data-tool-package-action="export">Export</button>
+              <button type="button" data-tool-package-action="import">Import</button>
+              <input id="tool-package-file" type="file" accept=".json,application/json" hidden />
+            </div>
+          </section>
+          <div class="tool-actions">
+            <button type="button" data-tool-action="new">New</button>
+            <button type="submit">Save</button>
+            <button type="button" data-tool-action="run">Run</button>
+            <button type="button" data-tool-action="delete">Delete</button>
+          </div>
+          <pre id="tool-output"></pre>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="layouts-dialog" id="layouts-dialog">
+      <div class="dialog-head">
+        <strong>Layouts</strong>
+        <div class="dialog-actions">
+          <span id="layout-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="layouts-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="layout-form" class="layout-form">
+        <input type="hidden" id="layout-id" />
+        <label>
+          <span class="field-label">Name</span>
+          <input id="layout-name" required />
+        </label>
+        <label>
+          <span class="field-label">Notes</span>
+          <input id="layout-description" />
+        </label>
+        <div class="layout-form-actions">
+          <button type="button" data-layout-new>New</button>
+          <button type="submit">Save Current</button>
+        </div>
+      </form>
+      <div id="layout-list" class="layout-list"></div>
+    </dialog>
+
+    <dialog class="tab-groups-dialog" id="tab-groups-dialog">
+      <div class="dialog-head">
+        <strong>Tab Groups</strong>
+        <div class="dialog-actions">
+          <span id="tab-group-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="tab-groups-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="tab-group-form" class="tab-group-form">
+        <input type="hidden" id="tab-group-id" />
+        <label>
+          <span class="field-label">Name</span>
+          <input id="tab-group-name" required />
+        </label>
+        <label>
+          <span class="field-label">Notes</span>
+          <input id="tab-group-description" />
+        </label>
+        <div class="tab-group-form-actions">
+          <button type="button" data-tab-group-new>New</button>
+          <button type="submit">Save Active Pane</button>
+        </div>
+      </form>
+      <div id="tab-group-list" class="tab-group-list"></div>
+    </dialog>
+
+    <dialog class="aliases-dialog" id="aliases-dialog">
+      <div class="dialog-head">
+        <strong>Folder Aliases</strong>
+        <div class="dialog-actions">
+          <span id="alias-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="aliases-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="aliases-grid">
+        <div id="alias-list" class="alias-list"></div>
+        <form id="alias-form" class="alias-form">
+          <input type="hidden" id="alias-id" />
+          <label>
+            <span class="field-label">Alias</span>
+            <input id="alias-name" required placeholder="proj" />
+          </label>
+          <label>
+            <span class="field-label">Path</span>
+            <input id="alias-path" required />
+          </label>
+          <label class="alias-description-field">
+            <span class="field-label">Notes</span>
+            <input id="alias-description" />
+          </label>
+          <div class="alias-hint">Use aliases in the path bar as <strong>name:</strong> or <strong>name:\child</strong>.</div>
+          <div class="alias-actions">
+            <button type="button" data-alias-action="new">New</button>
+            <button type="button" data-alias-action="active">Use Active</button>
+            <button type="submit">Save</button>
+            <button type="button" data-alias-action="open">Open</button>
+            <button type="button" data-alias-action="delete">Delete</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="collections-dialog" id="collections-dialog">
+      <div class="dialog-head">
+        <strong>Collections</strong>
+        <div class="dialog-actions">
+          <span id="collection-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="collections-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="collections-grid">
+        <div id="collection-list" class="collection-list"></div>
+        <div class="collection-workspace">
+          <form id="collection-form" class="collection-form">
+            <input type="hidden" id="collection-id" />
+            <label>
+              <span class="field-label">Name</span>
+              <input id="collection-name" required />
+            </label>
+            <label>
+              <span class="field-label">Notes</span>
+              <input id="collection-description" />
+            </label>
+            <div class="collection-actions">
+              <button type="button" data-collection-action="new">New</button>
+              <button type="submit">Save</button>
+              <button type="button" data-collection-action="add">Add Selection</button>
+              <button type="button" data-collection-action="open">Open</button>
+              <button type="button" data-collection-action="delete">Delete</button>
+            </div>
+          </form>
+          <div id="collection-items" class="collection-items"></div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="basket-dialog" id="basket-dialog">
+      <div class="dialog-head">
+        <strong>File Basket</strong>
+        <div class="dialog-actions">
+          <span id="basket-summary">0 items</span>
+          <button class="icon-button" data-close-dialog="basket-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="basket-toolbar">
+        <button type="button" data-basket-action="add">Add Selection</button>
+        <button type="button" data-basket-action="open">Open In Pane</button>
+        <button type="button" data-basket-action="copy">Copy Here</button>
+        <button type="button" data-basket-action="move">Move Here</button>
+        <button type="button" data-basket-action="archive">Archive</button>
+        <button type="button" data-basket-action="remove">Remove Selected</button>
+        <button type="button" data-basket-action="clear">Clear</button>
+      </div>
+      <div id="basket-results" class="basket-results"></div>
+    </dialog>
+
+    <dialog class="snapshots-dialog" id="snapshots-dialog">
+      <div class="dialog-head">
+        <strong>Pane Snapshots</strong>
+        <div class="dialog-actions">
+          <span id="snapshot-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="snapshots-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="snapshots-grid">
+        <div id="snapshot-list" class="snapshot-list"></div>
+        <div class="snapshot-workspace">
+          <form id="snapshot-form" class="snapshot-form">
+            <input type="hidden" id="snapshot-id" />
+            <label>
+              <span class="field-label">Name</span>
+              <input id="snapshot-name" required />
+            </label>
+            <label>
+              <span class="field-label">Notes</span>
+              <input id="snapshot-description" />
+            </label>
+            <div class="snapshot-actions">
+              <button type="button" data-snapshot-action="new">New</button>
+              <button type="submit">Save Pane</button>
+              <button type="button" data-snapshot-action="capture">Replace</button>
+              <button type="button" data-snapshot-action="open">Open</button>
+              <button type="button" data-snapshot-action="delete">Delete</button>
+            </div>
+          </form>
+          <div id="snapshot-items" class="snapshot-items"></div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="labels-dialog" id="labels-dialog">
+      <div class="dialog-head">
+        <strong>Labels</strong>
+        <div class="dialog-actions">
+          <span id="label-summary">0 labeled</span>
+          <button class="icon-button" data-close-dialog="labels-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="label-form" class="label-form">
+        <div class="label-target" id="label-target-summary">No selection</div>
+        <label>
+          <span class="field-label">Name</span>
+          <input id="label-name" required />
+        </label>
+        <fieldset class="label-swatches" aria-label="Label color">
+          <label class="label-swatch label-teal" title="Teal">
+            <input type="radio" name="label-color" value="teal" checked />
+            <span>Teal</span>
+          </label>
+          <label class="label-swatch label-gold" title="Gold">
+            <input type="radio" name="label-color" value="gold" />
+            <span>Gold</span>
+          </label>
+          <label class="label-swatch label-ember" title="Ember">
+            <input type="radio" name="label-color" value="ember" />
+            <span>Ember</span>
+          </label>
+          <label class="label-swatch label-violet" title="Violet">
+            <input type="radio" name="label-color" value="violet" />
+            <span>Violet</span>
+          </label>
+          <label class="label-swatch label-green" title="Green">
+            <input type="radio" name="label-color" value="green" />
+            <span>Green</span>
+          </label>
+          <label class="label-swatch label-black" title="Black">
+            <input type="radio" name="label-color" value="black" />
+            <span>Black</span>
+          </label>
+        </fieldset>
+        <label class="label-notes-field">
+          <span class="field-label">Notes</span>
+          <textarea id="label-notes"></textarea>
+        </label>
+        <div class="label-actions">
+          <button type="submit">Apply</button>
+          <button type="button" data-label-action="clear">Clear</button>
+        </div>
+      </form>
+      <div id="label-existing-list" class="label-existing-list"></div>
+    </dialog>
+
+    <dialog class="filters-dialog" id="filters-dialog">
+      <div class="dialog-head">
+        <strong>Filter Presets</strong>
+        <div class="dialog-actions">
+          <span id="filter-preset-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="filters-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="filter-presets-grid">
+        <div id="filter-preset-list" class="filter-preset-list"></div>
+        <form id="filter-preset-form" class="filter-preset-form">
+          <input type="hidden" id="filter-preset-id" />
+          <label>
+            <span class="field-label">Name</span>
+            <input id="filter-preset-name" required />
+          </label>
+          <label>
+            <span class="field-label">Text</span>
+            <input id="filter-preset-text" placeholder="report, .log, hidden" />
+          </label>
+          <label>
+            <span class="field-label">Kind</span>
+            <select id="filter-preset-kind"></select>
+          </label>
+          <label>
+            <span class="field-label">Label</span>
+            <select id="filter-preset-label"></select>
+          </label>
+          <label class="filter-preset-wide">
+            <span class="field-label">Notes</span>
+            <input id="filter-preset-description" />
+          </label>
+          <div id="filter-preset-capture-summary" class="filter-preset-capture-summary">Captures active pane filters</div>
+          <div class="filter-preset-actions">
+            <button type="button" data-filter-preset-action="new">New</button>
+            <button type="submit">Save</button>
+            <button type="button" data-filter-preset-action="capture">Capture</button>
+            <button type="button" data-filter-preset-action="apply">Apply</button>
+            <button type="button" data-filter-preset-action="clear-pane">Clear Pane</button>
+            <button type="button" data-filter-preset-action="delete">Delete</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="columns-dialog" id="columns-dialog">
+      <div class="dialog-head">
+        <strong>Columns</strong>
+        <div class="dialog-actions">
+          <span id="column-summary">4 columns</span>
+          <button class="icon-button" data-close-dialog="columns-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="columns-form" class="columns-form">
+        <div id="column-preset-strip" class="column-preset-strip" aria-label="Column presets"></div>
+        <div id="column-choice-list" class="column-choice-list"></div>
+        <div class="column-actions">
+          <button type="button" data-column-action="default">Default</button>
+          <button type="button" data-column-action="all">All</button>
+          <button type="button" data-column-action="autosize">Autosize</button>
+          <button type="button" data-column-action="reset-widths">Reset Widths</button>
+          <button type="submit">Apply</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="formats-dialog" id="formats-dialog">
+      <div class="dialog-head">
+        <strong>Folder Formats</strong>
+        <div class="dialog-actions">
+          <span id="format-summary">0 saved</span>
+          <button class="icon-button" data-close-dialog="formats-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="formats-grid">
+        <div id="format-list" class="format-list"></div>
+        <form id="format-form" class="format-form">
+          <input type="hidden" id="format-id" />
+          <label>
+            <span class="field-label">Name</span>
+            <input id="format-name" required />
+          </label>
+          <label>
+            <span class="field-label">Path</span>
+            <input id="format-path" required />
+          </label>
+          <label>
+            <span class="field-label">Match</span>
+            <select id="format-match">
+              <option value="exact">Exact folder</option>
+              <option value="subtree">Folder subtree</option>
+            </select>
+          </label>
+          <label>
+            <span class="field-label">Notes</span>
+            <input id="format-description" />
+          </label>
+          <div id="format-capture-summary" class="format-capture-summary">Captures current pane</div>
+          <div class="format-actions">
+            <button type="button" data-format-action="new">New</button>
+            <button type="submit">Save Current</button>
+            <button type="button" data-format-action="apply">Apply Now</button>
+            <button type="button" data-format-action="delete">Delete</button>
+          </div>
+        </form>
+      </div>
+      <section class="display-presets-panel" aria-label="Display presets">
+        <div class="subdialog-head">
+          <div>
+            <strong>Display Presets</strong>
+            <small>Named pane recipes you can apply to any folder.</small>
+          </div>
+          <span id="display-preset-summary">0 saved</span>
+        </div>
+        <div class="display-presets-grid">
+          <div id="display-preset-list" class="display-preset-list"></div>
+          <form id="display-preset-form" class="display-preset-form">
+            <input type="hidden" id="display-preset-id" />
+            <label>
+              <span class="field-label">Name</span>
+              <input id="display-preset-name" required />
+            </label>
+            <label>
+              <span class="field-label">Notes</span>
+              <input id="display-preset-description" />
+            </label>
+            <div id="display-preset-capture-summary" class="format-capture-summary">Captures current pane</div>
+            <div class="format-actions">
+              <button type="button" data-display-preset-action="new">New</button>
+              <button type="submit">Save Current</button>
+              <button type="button" data-display-preset-action="apply">Apply Now</button>
+              <button type="button" data-display-preset-action="delete">Delete</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </dialog>
+
+    <dialog class="viewer-dialog" id="viewer-dialog">
+      <div class="viewer-shell">
+        <div class="viewer-head">
+          <div class="viewer-title-block">
+            <strong id="viewer-title">Viewer</strong>
+            <span id="viewer-meta">No file loaded</span>
+          </div>
+          <div class="viewer-actions">
+            <button type="button" data-viewer-action="previous" title="Previous previewable file">Previous</button>
+            <button type="button" data-viewer-action="next" title="Next previewable file">Next</button>
+            <button type="button" data-viewer-action="reveal" title="Reveal current file in Explorer">Reveal</button>
+            <button class="icon-button" data-close-dialog="viewer-dialog" title="Close">X</button>
+          </div>
+        </div>
+        <div id="viewer-strip" class="viewer-strip">
+          <div class="viewer-strip-empty">No previewable neighbors</div>
+        </div>
+        <div id="viewer-body" class="viewer-body">
+          <div class="viewer-empty">Select a previewable file</div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="text-editor-dialog" id="text-editor-dialog">
+      <div class="dialog-head">
+        <strong id="text-editor-title">Quick Edit</strong>
+        <button class="icon-button" data-close-dialog="text-editor-dialog" title="Close">X</button>
+      </div>
+      <form id="text-editor-form" class="text-editor-form">
+        <label for="text-editor-path">
+          <span class="field-label">Path</span>
+          <input id="text-editor-path" aria-label="Text editor path" readonly />
+        </label>
+        <textarea id="text-editor-content" aria-label="Text editor content" spellcheck="false"></textarea>
+        <div id="text-editor-summary" class="text-editor-summary">No file loaded</div>
+        <div class="text-editor-actions">
+          <button type="submit">Save</button>
+          <button type="button" data-text-editor-action="reload">Reload</button>
+          <button type="button" data-text-editor-action="reveal">Reveal</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="new-file-dialog" id="new-file-dialog">
+      <div class="dialog-head">
+        <strong>New File</strong>
+        <div class="dialog-actions">
+          <span id="new-file-summary">Ready</span>
+          <button class="icon-button" data-close-dialog="new-file-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="new-file-form" class="new-file-form">
+        <label>
+          <span class="field-label">Folder</span>
+          <input id="new-file-folder" readonly />
+        </label>
+        <label>
+          <span class="field-label">Name</span>
+          <input id="new-file-name" required placeholder="notes.txt" />
+        </label>
+        <label>
+          <span class="field-label">Template</span>
+          <select id="new-file-template">
+            <option value="empty">Empty</option>
+            <option value="text">Plain text</option>
+            <option value="markdown">Markdown</option>
+            <option value="json">JSON</option>
+            <option value="javascript">JavaScript</option>
+            <option value="powershell">PowerShell</option>
+          </select>
+        </label>
+        <label>
+          <span class="field-label">If Exists</span>
+          <select id="new-file-conflict">
+            <option value="unique">Create unique name</option>
+            <option value="fail">Stop</option>
+          </select>
+        </label>
+        <label class="check-row new-file-edit-row">
+          <input id="new-file-edit" type="checkbox" checked />
+          <span>Edit after create</span>
+        </label>
+        <textarea id="new-file-content" spellcheck="false"></textarea>
+        <div class="new-file-actions">
+          <button type="submit">Create</button>
+          <button type="button" data-new-file-action="refresh-template">Refresh Template</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="link-dialog" id="link-dialog">
+      <div class="dialog-head">
+        <strong>Link</strong>
+        <div class="dialog-actions">
+          <span id="link-selection">0 selected</span>
+          <button class="icon-button" data-close-dialog="link-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="link-form" class="link-form">
+        <label>
+          <span class="field-label">Target Folder</span>
+          <input id="link-target" required />
+        </label>
+        <label>
+          <span class="field-label">Type</span>
+          <select id="link-kind">
+            <option value="auto">Auto</option>
+            <option value="hardlink">Hard Link</option>
+            <option value="junction">Junction</option>
+            <option value="symlink">Symbolic Link</option>
+          </select>
+        </label>
+        <label>
+          <span class="field-label">If Exists</span>
+          <select id="link-conflict">
+            <option value="unique">Create unique name</option>
+            <option value="fail">Stop</option>
+          </select>
+        </label>
+        <div class="link-actions">
+          <button type="submit">Create</button>
+        </div>
+      </form>
+      <div id="link-summary" class="link-summary">Ready</div>
+    </dialog>
+
+    <dialog class="attributes-dialog" id="attributes-dialog">
+      <div class="dialog-head">
+        <strong>Attributes</strong>
+        <div class="dialog-actions">
+          <span id="attributes-selection">0 selected</span>
+          <button class="icon-button" data-close-dialog="attributes-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="attributes-form" class="attributes-form">
+        <div class="attributes-grid">
+          <label>
+            <span class="field-label">Read-only</span>
+            <select id="attributes-readonly">
+              <option value="keep">Keep</option>
+              <option value="set">Set</option>
+              <option value="clear">Clear</option>
+            </select>
+            <span id="attributes-readonly-current" class="attribute-current">None set</span>
+          </label>
+          <label>
+            <span class="field-label">Hidden</span>
+            <select id="attributes-hidden">
+              <option value="keep">Keep</option>
+              <option value="set">Set</option>
+              <option value="clear">Clear</option>
+            </select>
+            <span id="attributes-hidden-current" class="attribute-current">None set</span>
+          </label>
+          <label>
+            <span class="field-label">System</span>
+            <select id="attributes-system">
+              <option value="keep">Keep</option>
+              <option value="set">Set</option>
+              <option value="clear">Clear</option>
+            </select>
+            <span id="attributes-system-current" class="attribute-current">None set</span>
+          </label>
+          <label>
+            <span class="field-label">Archive</span>
+            <select id="attributes-archive">
+              <option value="keep">Keep</option>
+              <option value="set">Set</option>
+              <option value="clear">Clear</option>
+            </select>
+            <span id="attributes-archive-current" class="attribute-current">None set</span>
+          </label>
+        </div>
+        <div class="attributes-actions">
+          <button type="submit">Apply</button>
+        </div>
+      </form>
+      <div id="attributes-summary" class="attributes-summary">Ready</div>
+    </dialog>
+
+    <dialog class="timestamps-dialog" id="timestamps-dialog">
+      <div class="dialog-head">
+        <strong>Timestamps</strong>
+        <div class="dialog-actions">
+          <span id="timestamps-selection">0 selected</span>
+          <button class="icon-button" data-close-dialog="timestamps-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <form id="timestamps-form" class="timestamps-form">
+        <div class="timestamps-grid">
+          <div class="timestamp-row">
+            <label class="check-row">
+              <input id="timestamps-modified-enabled" type="checkbox" />
+              <span>Modified</span>
+            </label>
+            <input id="timestamps-modified" type="datetime-local" step="1" />
+            <span id="timestamps-modified-current" class="timestamp-current">--</span>
+          </div>
+          <div class="timestamp-row">
+            <label class="check-row">
+              <input id="timestamps-created-enabled" type="checkbox" />
+              <span>Created</span>
+            </label>
+            <input id="timestamps-created" type="datetime-local" step="1" />
+            <span id="timestamps-created-current" class="timestamp-current">--</span>
+          </div>
+          <div class="timestamp-row">
+            <label class="check-row">
+              <input id="timestamps-accessed-enabled" type="checkbox" />
+              <span>Accessed</span>
+            </label>
+            <input id="timestamps-accessed" type="datetime-local" step="1" />
+            <span id="timestamps-accessed-current" class="timestamp-current">--</span>
+          </div>
+        </div>
+        <div class="timestamps-actions">
+          <button type="submit">Apply</button>
+          <button type="button" data-timestamps-action="now">Now</button>
+        </div>
+      </form>
+      <div id="timestamps-summary" class="timestamps-summary">Ready</div>
+    </dialog>
+
+    <dialog class="properties-dialog" id="properties-dialog">
+      <div class="dialog-head">
+        <strong>Properties</strong>
+        <button class="icon-button" data-close-dialog="properties-dialog" title="Close">X</button>
+      </div>
+      <form id="properties-form" class="properties-form">
+        <label class="check-row">
+          <input id="properties-recursive" aria-label="Recursive folder sizing" type="checkbox" checked />
+          <span>Recursive</span>
+        </label>
+        <label class="check-row">
+          <input id="properties-hash" aria-label="Hash files" type="checkbox" />
+          <span>Hash</span>
+        </label>
+        <label for="properties-hash-algorithm">
+          <span class="field-label">Algorithm</span>
+          <select id="properties-hash-algorithm" aria-label="Hash algorithm">
+            <option value="sha256">SHA-256</option>
+            <option value="sha1">SHA-1</option>
+            <option value="md5">MD5</option>
+          </select>
+        </label>
+        <label for="properties-max-entries">
+          <span class="field-label">Max Entries</span>
+          <input id="properties-max-entries" aria-label="Max property entries" type="number" min="1" max="100000" value="20000" />
+        </label>
+        <label for="properties-max-hash">
+          <span class="field-label">Max Hash MB</span>
+          <input id="properties-max-hash" aria-label="Max hash megabytes" type="number" min="1" max="1024" value="128" />
+        </label>
+        <div class="properties-actions">
+          <button type="submit">Run</button>
+          <button type="button" id="properties-diagnose">Diagnose</button>
+        </div>
+      </form>
+      <div id="properties-summary" class="properties-summary">Ready</div>
+      <div id="properties-diagnostics" class="properties-diagnostics" aria-live="polite"></div>
+      <div id="properties-results" class="properties-results"></div>
+    </dialog>
+
+    <dialog class="open-with-dialog" id="open-with-dialog">
+      <div class="dialog-head">
+        <strong>Open With</strong>
+        <div class="dialog-actions">
+          <span id="open-with-summary">No target</span>
+          <button class="icon-button" data-close-dialog="open-with-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="open-with-grid">
+        <section class="open-with-targets">
+          <div class="open-with-copy">
+            <strong>Target Selection</strong>
+            <small id="open-with-target-note">Uses the active pane selection, or the current folder if nothing is selected.</small>
+          </div>
+          <div id="open-with-target-list" class="open-with-target-list"></div>
+        </section>
+        <section class="open-with-actions-panel">
+          <div class="open-with-quick-actions">
+            <button type="button" data-open-with-mode="default">Default App</button>
+            <button type="button" data-open-with-mode="terminal">Terminal Here</button>
+            <button type="button" data-open-with-mode="reveal">Reveal</button>
+            <button type="button" data-open-with-shell-verbs>Shell Verbs</button>
+          </div>
+          <div class="open-with-presets">
+            <button type="button" data-open-with-preset="notepad">Notepad</button>
+            <button type="button" data-open-with-preset="code">VS Code</button>
+            <button type="button" data-open-with-preset="powershell">PowerShell</button>
+          </div>
+          <div class="open-with-matches" id="open-with-matched-presets">
+            <span>No matching presets</span>
+          </div>
+          <div class="open-with-preset-manager">
+            <select id="open-with-preset-select" aria-label="Saved Open With preset"></select>
+            <input id="open-with-preset-name" aria-label="Open With preset name" placeholder="Preset name" />
+            <div class="open-with-preset-actions">
+              <button type="button" data-open-with-preset-action="save">Save</button>
+              <button type="button" data-open-with-preset-action="replace">Replace</button>
+              <button type="button" data-open-with-preset-action="apply">Apply</button>
+              <button type="button" data-open-with-preset-action="run">Run</button>
+              <button type="button" data-open-with-preset-action="delete">Delete</button>
+            </div>
+            <span id="open-with-preset-summary">0 presets</span>
+          </div>
+          <form id="open-with-form" class="open-with-form">
+            <label>
+              <span class="field-label">Application</span>
+              <input id="open-with-app" placeholder="notepad.exe" />
+            </label>
+            <label>
+              <span class="field-label">Arguments</span>
+              <input id="open-with-args" placeholder="{path}" />
+            </label>
+            <label>
+              <span class="field-label">Working Folder</span>
+              <input id="open-with-cwd" />
+            </label>
+            <label>
+              <span class="field-label">Extensions</span>
+              <input id="open-with-extensions" placeholder=".md, .txt, folder, *" />
+            </label>
+            <div class="open-with-form-actions">
+              <button type="submit">Run Custom</button>
+              <button type="button" data-open-with-action="use-folder">Use Target Folder</button>
+            </div>
+          </form>
+        </section>
+        <pre id="open-with-output"></pre>
+      </div>
+    </dialog>
+
+    <dialog class="shell-verbs-dialog" id="shell-verbs-dialog">
+      <div class="dialog-head">
+        <strong>Shell Verbs</strong>
+        <div class="dialog-actions">
+          <span id="shell-verbs-summary">No target</span>
+          <button class="icon-button" data-close-dialog="shell-verbs-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="shell-verbs-grid">
+        <section class="shell-verbs-targets">
+          <div class="open-with-copy">
+            <strong>Native Windows Actions</strong>
+            <small>Uses the Windows shell item verbs exposed for the first selected filesystem target.</small>
+          </div>
+          <div id="shell-verbs-target" class="shell-verbs-target"></div>
+          <div class="shell-verbs-actions">
+            <button type="button" id="shell-verbs-refresh">Refresh</button>
+          </div>
+        </section>
+        <section class="shell-verbs-panel">
+          <div id="shell-verbs-list" class="shell-verbs-list"></div>
+        </section>
+        <pre id="shell-verbs-output"></pre>
+      </div>
+    </dialog>
+
+    <dialog class="shell-namespace-dialog" id="shell-namespace-dialog">
+      <div class="dialog-head">
+        <strong>Shell Browser</strong>
+        <div class="dialog-actions">
+          <span id="shell-namespace-summary">No namespace loaded</span>
+          <button class="icon-button" data-close-dialog="shell-namespace-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="shell-namespace-grid">
+        <section class="shell-namespace-roots">
+          <div class="open-with-copy">
+            <strong>Windows Namespaces</strong>
+            <small>Browse virtual shell locations such as This PC, Libraries, Network providers, phones, and other devices.</small>
+          </div>
+          <div class="shell-namespace-root-buttons" id="shell-namespace-roots"></div>
+          <div class="shell-namespace-actions">
+            <button type="button" id="shell-namespace-back">Back</button>
+            <button type="button" id="shell-namespace-refresh">Refresh</button>
+          </div>
+        </section>
+        <section class="shell-namespace-panel">
+          <div class="shell-namespace-head" id="shell-namespace-head"></div>
+          <div id="shell-namespace-list" class="shell-namespace-list"></div>
+        </section>
+        <pre id="shell-namespace-output"></pre>
+      </div>
+    </dialog>
+
+    <dialog class="transfer-dialog" id="transfer-dialog">
+      <div class="dialog-head">
+        <strong>Transfer</strong>
+        <button class="icon-button" data-close-dialog="transfer-dialog" title="Close">X</button>
+      </div>
+      <form id="transfer-form" class="transfer-form">
+        <label for="transfer-target">
+          <span class="field-label">Target</span>
+          <input id="transfer-target" aria-label="Transfer target" />
+        </label>
+        <label for="transfer-mode">
+          <span class="field-label">Mode</span>
+          <select id="transfer-mode" aria-label="Transfer mode">
+            <option value="copy">Copy</option>
+            <option value="move">Move</option>
+          </select>
+        </label>
+        <label for="transfer-conflict">
+          <span class="field-label">Conflict</span>
+          <select id="transfer-conflict" aria-label="Transfer conflict policy">
+            <option value="unique">Rename</option>
+            <option value="overwrite">Overwrite</option>
+            <option value="skip">Skip</option>
+          </select>
+        </label>
+        <div class="transfer-actions">
+          <button type="submit">Preview</button>
+          <button type="button" data-transfer-action="apply" id="transfer-apply" disabled>Apply</button>
+          <button type="button" data-transfer-action="other">Other Pane</button>
+        </div>
+      </form>
+      <div id="transfer-summary" class="search-summary">Select items to transfer</div>
+      <div id="transfer-results" class="transfer-results"></div>
+    </dialog>
+
+    <dialog class="destination-dialog" id="destination-dialog">
+      <div class="dialog-head">
+        <div class="dialog-title-block">
+          <strong>Send To</strong>
+          <small id="destination-heading">No selection</small>
+        </div>
+        <button class="icon-button" data-close-dialog="destination-dialog" title="Close">X</button>
+      </div>
+      <form id="destination-form" class="destination-form">
+        <label for="destination-target">
+          <span class="field-label">Target</span>
+          <input id="destination-target" aria-label="Destination target" />
+        </label>
+        <label for="destination-mode">
+          <span class="field-label">Mode</span>
+          <select id="destination-mode" aria-label="Destination mode">
+            <option value="copy">Copy</option>
+            <option value="move">Move</option>
+          </select>
+        </label>
+        <label for="destination-conflict">
+          <span class="field-label">Conflict</span>
+          <select id="destination-conflict" aria-label="Destination conflict policy">
+            <option value="unique">Rename</option>
+            <option value="overwrite">Overwrite</option>
+            <option value="skip">Skip</option>
+          </select>
+        </label>
+        <div class="destination-actions">
+          <button type="button" data-destination-action="preview">Preview</button>
+          <button type="submit" id="destination-send">Send</button>
+          <button type="button" data-destination-action="other">Other Pane</button>
+        </div>
+      </form>
+      <div id="destination-summary" class="search-summary">Select items to send</div>
+      <div class="destination-layout">
+        <section class="destination-target-panel">
+          <div class="destination-panel-head">
+            <strong>Destinations</strong>
+            <small id="destination-target-count">0</small>
+          </div>
+          <div id="destination-target-list" class="destination-target-list"></div>
+        </section>
+        <section class="destination-selection-panel">
+          <div class="destination-panel-head">
+            <strong>Selection</strong>
+            <small id="destination-selection-count">0</small>
+          </div>
+          <div id="destination-selection-list" class="destination-selection-list"></div>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog class="archive-dialog" id="archive-dialog">
+      <div class="dialog-head">
+        <strong>Archive</strong>
+        <button class="icon-button" data-close-dialog="archive-dialog" title="Close">X</button>
+      </div>
+      <div class="archive-grid">
+        <form id="archive-create-form" class="archive-form">
+          <h3>Create ZIP</h3>
+          <label>
+            <span class="field-label">Name</span>
+            <input id="archive-name" required />
+          </label>
+          <label>
+            <span class="field-label">Target</span>
+            <input id="archive-target" required />
+          </label>
+          <div class="archive-actions">
+            <button type="button" data-archive-target="active-create">Active</button>
+            <button type="button" data-archive-target="other-create">Other</button>
+            <button type="submit">Create ZIP</button>
+          </div>
+          <div id="archive-create-summary" class="archive-summary">Ready</div>
+        </form>
+        <form id="archive-extract-form" class="archive-form">
+          <h3>Extract ZIP</h3>
+          <label>
+            <span class="field-label">Archive</span>
+            <input id="archive-path" required />
+          </label>
+          <label>
+            <span class="field-label">Target</span>
+            <input id="archive-extract-target" required />
+          </label>
+          <label>
+            <span class="field-label">Folder</span>
+            <input id="archive-folder" required />
+          </label>
+          <div class="archive-actions">
+            <button type="button" data-archive-target="active-extract">Active</button>
+            <button type="button" data-archive-target="other-extract">Other</button>
+            <button type="submit">Extract</button>
+          </div>
+          <div id="archive-extract-summary" class="archive-summary">Ready</div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="bulk-dialog" id="bulk-dialog">
+      <div class="dialog-head">
+        <strong>Bulk Rename</strong>
+        <button class="icon-button" data-close-dialog="bulk-dialog" title="Close">X</button>
+      </div>
+      <form id="bulk-form" class="bulk-form">
+        <label for="bulk-find">
+          <span class="field-label">Find</span>
+          <input id="bulk-find" aria-label="Bulk rename find" />
+        </label>
+        <label for="bulk-replace">
+          <span class="field-label">Replace</span>
+          <input id="bulk-replace" aria-label="Bulk rename replace" />
+        </label>
+        <label for="bulk-prefix">
+          <span class="field-label">Prefix</span>
+          <input id="bulk-prefix" aria-label="Bulk rename prefix" />
+        </label>
+        <label for="bulk-suffix">
+          <span class="field-label">Suffix</span>
+          <input id="bulk-suffix" aria-label="Bulk rename suffix" />
+        </label>
+        <label for="bulk-case">
+          <span class="field-label">Case</span>
+          <select id="bulk-case" aria-label="Bulk rename case">
+            <option value="keep">Keep</option>
+            <option value="lower">lowercase</option>
+            <option value="upper">UPPERCASE</option>
+            <option value="title">Title Case</option>
+          </select>
+        </label>
+        <label for="bulk-number-position">
+          <span class="field-label">Number</span>
+          <select id="bulk-number-position" aria-label="Bulk rename numbering">
+            <option value="none">None</option>
+            <option value="prefix">Prefix</option>
+            <option value="suffix">Suffix</option>
+          </select>
+        </label>
+        <label for="bulk-number-start">
+          <span class="field-label">Start</span>
+          <input id="bulk-number-start" aria-label="Bulk rename number start" type="number" value="1" />
+        </label>
+        <label for="bulk-number-pad">
+          <span class="field-label">Pad</span>
+          <input id="bulk-number-pad" aria-label="Bulk rename number padding" type="number" min="1" max="12" value="2" />
+        </label>
+        <label for="bulk-number-separator">
+          <span class="field-label">Sep</span>
+          <input id="bulk-number-separator" aria-label="Bulk rename number separator" value="-" />
+        </label>
+        <label class="check-row">
+          <input id="bulk-preserve-extension" aria-label="Preserve extensions" type="checkbox" checked />
+          <span>Ext</span>
+        </label>
+        <label class="check-row">
+          <input id="bulk-regex" aria-label="Use regular expression" type="checkbox" />
+          <span>Regex</span>
+        </label>
+        <label class="check-row">
+          <input id="bulk-match-case" aria-label="Match case" type="checkbox" />
+          <span>Case</span>
+        </label>
+        <div class="bulk-actions">
+          <button type="submit">Preview</button>
+          <button type="button" data-bulk-action="apply" id="bulk-apply" disabled>Apply</button>
+        </div>
+      </form>
+      <div class="bulk-preset-strip">
+        <select id="bulk-preset-select" aria-label="Saved bulk rename preset"></select>
+        <input id="bulk-preset-name" aria-label="Bulk rename preset name" placeholder="Preset name" />
+        <button type="button" data-bulk-preset-action="save">Save</button>
+        <button type="button" data-bulk-preset-action="replace">Replace</button>
+        <button type="button" data-bulk-preset-action="apply">Apply</button>
+        <button type="button" data-bulk-preset-action="delete">Delete</button>
+        <span id="bulk-preset-summary">0 presets</span>
+      </div>
+      <div id="bulk-summary" class="search-summary">Select items to rename</div>
+      <div id="bulk-results" class="bulk-results"></div>
+    </dialog>
+
+    <dialog class="search-dialog" id="search-dialog">
+      <div class="dialog-head">
+        <strong>Search</strong>
+        <button class="icon-button" data-close-dialog="search-dialog" title="Close">X</button>
+      </div>
+      <form id="search-form" class="search-form">
+        <label for="search-root" class="search-wide">
+          <span class="field-label">Root</span>
+          <input id="search-root" aria-label="Search root" />
+        </label>
+        <label for="search-name">
+          <span class="field-label">Name</span>
+          <input id="search-name" aria-label="Search name" placeholder="server, .md, report" />
+        </label>
+        <label for="search-content">
+          <span class="field-label">Content</span>
+          <input id="search-content" aria-label="Search content" />
+        </label>
+        <label for="search-kind">
+          <span class="field-label">Kind</span>
+          <select id="search-kind" aria-label="Search kind">
+            <option value="all">All</option>
+            <option value="files">Files</option>
+            <option value="folders">Folders</option>
+            <option value="text">Text</option>
+            <option value="images">Images</option>
+            <option value="documents">Documents</option>
+          </select>
+        </label>
+        <label for="search-size-op">
+          <span class="field-label">Size</span>
+          <select id="search-size-op" aria-label="Search size rule">
+            <option value="any">Any size</option>
+            <option value="greater">Larger than</option>
+            <option value="less">Smaller than</option>
+            <option value="equal">Equal to</option>
+          </select>
+        </label>
+        <label for="search-size-value">
+          <span class="field-label">Bytes</span>
+          <input id="search-size-value" aria-label="Search size value" placeholder="10 MB" />
+        </label>
+        <label for="search-date-field">
+          <span class="field-label">Date Field</span>
+          <select id="search-date-field" aria-label="Search date field">
+            <option value="modified">Modified</option>
+            <option value="created">Created</option>
+          </select>
+        </label>
+        <label for="search-date-op">
+          <span class="field-label">Age</span>
+          <select id="search-date-op" aria-label="Search date rule">
+            <option value="any">Any age</option>
+            <option value="newer">Newer than</option>
+            <option value="older">Older than</option>
+          </select>
+        </label>
+        <label for="search-date-days">
+          <span class="field-label">Days</span>
+          <input id="search-date-days" aria-label="Search age in days" type="number" min="0" step="1" placeholder="30" />
+        </label>
+        <label for="search-attribute">
+          <span class="field-label">Attribute</span>
+          <select id="search-attribute" aria-label="Search attribute rule">
+            <option value="any">Any attr</option>
+            <option value="readonly">Read-only</option>
+            <option value="hidden">Hidden</option>
+            <option value="system">System</option>
+            <option value="archive">Archive</option>
+            <option value="compressed">Compressed</option>
+            <option value="encrypted">Encrypted</option>
+            <option value="none">No attrs</option>
+          </select>
+        </label>
+        <label for="search-limit">
+          <span class="field-label">Limit</span>
+          <input id="search-limit" aria-label="Search limit" type="number" min="1" max="1000" value="200" />
+        </label>
+        <label for="search-max-scan">
+          <span class="field-label">Max Scan</span>
+          <input id="search-max-scan" aria-label="Search max scan" type="number" min="100" max="50000" value="8000" />
+        </label>
+        <label for="search-max-kb">
+          <span class="field-label">Max KB</span>
+          <input id="search-max-kb" aria-label="Search max KB" type="number" min="1" max="5000" value="512" />
+        </label>
+        <label class="check-row">
+          <input id="search-hidden" aria-label="Search hidden" type="checkbox" />
+          <span>Hidden</span>
+        </label>
+        <label class="check-row search-cache-toggle">
+          <input id="search-background-cache" aria-label="Use warm search cache" type="checkbox" />
+          <span>Warm Cache</span>
+        </label>
+        <div class="search-actions">
+          <button type="submit">Run</button>
+          <button type="button" data-search-action="active-root">Active</button>
+          <button type="button" data-search-action="other-root">Other</button>
+        </div>
+      </form>
+      <div class="search-preset-strip">
+        <select id="search-preset-select" aria-label="Saved search preset"></select>
+        <input id="search-preset-name" aria-label="Search preset name" placeholder="Preset name" />
+        <button type="button" data-search-preset-action="save">Save</button>
+        <button type="button" data-search-preset-action="replace">Replace</button>
+        <button type="button" data-search-preset-action="apply">Apply</button>
+        <button type="button" data-search-preset-action="delete">Delete</button>
+        <span id="search-preset-summary">0 presets</span>
+      </div>
+      <div id="search-summary" class="search-summary">Ready</div>
+      <div id="search-results" class="search-results"></div>
+    </dialog>
+
+    <dialog class="flat-dialog" id="flat-dialog">
+      <div class="dialog-head">
+        <strong>Flat View</strong>
+        <button class="icon-button" data-close-dialog="flat-dialog" title="Close">X</button>
+      </div>
+      <form id="flat-form" class="flat-form">
+        <label for="flat-root">
+          <span class="field-label">Root</span>
+          <input id="flat-root" aria-label="Flat view root" />
+        </label>
+        <label for="flat-mode">
+          <span class="field-label">Mode</span>
+          <select id="flat-mode" aria-label="Flat view mode">
+            <option value="files">Files</option>
+            <option value="folders">Folders</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+        <label for="flat-limit">
+          <span class="field-label">Limit</span>
+          <input id="flat-limit" aria-label="Flat view limit" type="number" min="1" max="10000" value="1000" />
+        </label>
+        <label for="flat-max-scan">
+          <span class="field-label">Max Scan</span>
+          <input id="flat-max-scan" aria-label="Flat view max scan" type="number" min="100" max="100000" value="20000" />
+        </label>
+        <label class="check-row">
+          <input id="flat-hidden" aria-label="Flat view hidden" type="checkbox" />
+          <span>Hidden</span>
+        </label>
+        <label class="check-row">
+          <input id="flat-ignored" aria-label="Flat view ignored folders" type="checkbox" />
+          <span>Heavy</span>
+        </label>
+        <div class="flat-actions">
+          <button type="submit">Run</button>
+          <button type="button" data-flat-action="active-root">Active</button>
+          <button type="button" data-flat-action="other-root">Other</button>
+        </div>
+      </form>
+      <div id="flat-summary" class="flat-summary">Ready</div>
+      <div id="flat-results" class="flat-results"></div>
+    </dialog>
+
+    <dialog class="duplicates-dialog" id="duplicates-dialog">
+      <div class="dialog-head">
+        <strong>Duplicate Finder</strong>
+        <button class="icon-button" data-close-dialog="duplicates-dialog" title="Close">X</button>
+      </div>
+      <form id="duplicates-form" class="duplicates-form">
+        <label for="duplicates-root">
+          <span class="field-label">Root</span>
+          <input id="duplicates-root" aria-label="Duplicate scan root" />
+        </label>
+        <label for="duplicates-mode">
+          <span class="field-label">Mode</span>
+          <select id="duplicates-mode" aria-label="Duplicate scan mode">
+            <option value="hash">SHA-256</option>
+            <option value="size">Size Only</option>
+          </select>
+        </label>
+        <label for="duplicates-max-scan">
+          <span class="field-label">Max Scan</span>
+          <input id="duplicates-max-scan" aria-label="Duplicate max scan" type="number" min="100" max="100000" value="20000" />
+        </label>
+        <label for="duplicates-max-hash">
+          <span class="field-label">Max Hash MB</span>
+          <input id="duplicates-max-hash" aria-label="Duplicate max hash MB" type="number" min="1" max="1024" value="128" />
+        </label>
+        <label class="check-row">
+          <input id="duplicates-recursive" aria-label="Duplicate recursive" type="checkbox" checked />
+          <span>Recursive</span>
+        </label>
+        <label class="check-row">
+          <input id="duplicates-hidden" aria-label="Duplicate hidden" type="checkbox" />
+          <span>Hidden</span>
+        </label>
+        <label class="check-row">
+          <input id="duplicates-ignored" aria-label="Duplicate heavy folders" type="checkbox" />
+          <span>Heavy</span>
+        </label>
+        <div class="duplicates-actions">
+          <button type="submit">Scan</button>
+          <button type="button" data-duplicate-action="active-root">Active</button>
+          <button type="button" data-duplicate-action="other-root">Other</button>
+          <button type="button" data-duplicate-action="open-results">Open Results</button>
+        </div>
+      </form>
+      <div id="duplicates-summary" class="duplicates-summary">Ready</div>
+      <div id="duplicates-results" class="duplicates-results"></div>
+    </dialog>
+
+    <dialog class="compare-dialog" id="compare-dialog">
+      <div class="dialog-head">
+        <strong>Compare</strong>
+        <button class="icon-button" data-close-dialog="compare-dialog" title="Close">X</button>
+      </div>
+      <form id="compare-form" class="compare-form">
+        <label for="compare-left">
+          <span class="field-label">Left</span>
+          <input id="compare-left" aria-label="Compare left" />
+        </label>
+        <label for="compare-right">
+          <span class="field-label">Right</span>
+          <input id="compare-right" aria-label="Compare right" />
+        </label>
+        <label class="check-row">
+          <input id="compare-recursive" aria-label="Compare recursive" type="checkbox" checked />
+          <span>Recursive</span>
+        </label>
+        <label class="check-row">
+          <input id="compare-hidden" aria-label="Compare hidden" type="checkbox" />
+          <span>Hidden</span>
+        </label>
+        <label for="compare-max">
+          <span class="field-label">Max</span>
+          <input id="compare-max" aria-label="Compare max entries" type="number" min="100" max="100000" value="20000" />
+        </label>
+        <div class="compare-actions">
+          <button type="submit">Compare</button>
+          <button type="button" data-compare-action="swap">Swap</button>
+          <button type="button" data-compare-action="previewLeftToRight">Plan L-&gt;R</button>
+          <button type="button" data-compare-action="previewRightToLeft">Plan R-&gt;L</button>
+          <button type="button" data-compare-action="applySync" id="compare-sync-apply" disabled>Apply Sync</button>
+          <label class="check-row compact-check">
+            <input id="compare-overwrite" aria-label="Compare overwrite" type="checkbox" checked />
+            <span>Overwrite</span>
+          </label>
+          <label class="check-row compact-check">
+            <input id="compare-mirror-deletes" aria-label="Compare mirror extras to app trash" type="checkbox" />
+            <span>Mirror extras</span>
+          </label>
+        </div>
+      </form>
+      <div class="sync-profile-strip">
+        <select id="sync-profile-select" aria-label="Saved sync profile"></select>
+        <input id="sync-profile-name" aria-label="Sync profile name" placeholder="Profile name" />
+        <button type="button" data-sync-profile-action="save">Save</button>
+        <button type="button" data-sync-profile-action="replace">Replace</button>
+        <button type="button" data-sync-profile-action="apply">Apply</button>
+        <button type="button" data-sync-profile-action="delete">Delete</button>
+        <span id="sync-profile-summary">0 profiles</span>
+      </div>
+      <div id="compare-summary" class="search-summary">Ready</div>
+      <div id="sync-preview" class="sync-preview"></div>
+      <div id="compare-results" class="compare-results"></div>
+    </dialog>
+
+    <dialog class="ops-dialog" id="ops-dialog">
+      <div class="dialog-head">
+        <strong>Operations</strong>
+        <div class="dialog-actions">
+          <button data-clear-operations="true">Clear</button>
+          <button class="icon-button" data-close-dialog="ops-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div id="operation-list" class="operation-list"></div>
+    </dialog>
+
+    <dialog class="operation-details-dialog" id="operation-details-dialog">
+      <div class="dialog-head">
+        <div>
+          <strong id="operation-details-title">Operation Details</strong>
+          <span id="operation-details-meta"></span>
+        </div>
+        <div class="dialog-actions">
+          <button data-operation-details-action="copy">Copy Report</button>
+          <button class="icon-button" data-close-dialog="operation-details-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div id="operation-details-body" class="operation-details-body"></div>
+    </dialog>
+
+    <dialog class="trash-dialog" id="trash-dialog">
+      <div class="dialog-head">
+        <strong>Trash Browser</strong>
+        <div class="dialog-actions">
+          <button data-trash-action="refresh">Refresh</button>
+          <button data-trash-action="restore">Restore To Active</button>
+          <button data-trash-action="delete">Delete Selected</button>
+          <button data-trash-action="open-windows" hidden>Open Windows</button>
+          <button class="icon-button" data-close-dialog="trash-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="trash-tabs" aria-label="Trash browser mode">
+        <button type="button" data-trash-mode="app" aria-pressed="true">App Trash</button>
+        <button type="button" data-trash-mode="windows" aria-pressed="false">Windows Recycle</button>
+      </div>
+      <div id="trash-summary" class="trash-summary">Loading trash</div>
+      <div id="trash-results" class="trash-results"></div>
+    </dialog>
+
+    <dialog class="integration-dialog" id="integration-dialog">
+      <div class="dialog-head">
+        <strong>Explorer Integration</strong>
+        <button class="icon-button" data-close-dialog="integration-dialog" title="Close">X</button>
+      </div>
+      <div class="integration-summary" id="integration-summary">
+        <div>
+          <span class="field-label">Replacement</span>
+          <strong id="integration-level">Not configured</strong>
+        </div>
+        <div>
+          <span class="field-label">Readiness</span>
+          <strong id="integration-readiness">0 / 5</strong>
+        </div>
+        <div>
+          <span class="field-label">Win+E</span>
+          <code id="integration-wine">Not installed</code>
+        </div>
+      </div>
+      <div class="integration-steps" id="integration-steps"></div>
+      <div class="integration-preflight" id="integration-preflight"></div>
+      <div class="integration-grid">
+        <div>
+          <span class="field-label">Launch Mode</span>
+          <select id="launch-mode" aria-label="Launch mode">
+            <option value="native">Native Window</option>
+            <option value="appWindow">App Window</option>
+            <option value="browser">Browser Tab</option>
+          </select>
+        </div>
+        <div>
+          <span class="field-label">Shell Opens</span>
+          <select id="shell-open-mode" aria-label="Shell open mode">
+            <option value="leftReplace">Replace Left</option>
+            <option value="rightReplace">Replace Right</option>
+            <option value="activeReplace">Replace Active</option>
+            <option value="activeNewTab">New Active Tab</option>
+          </select>
+        </div>
+        <div>
+          <span class="field-label">Generated</span>
+          <strong id="integration-generated">No</strong>
+        </div>
+        <div>
+          <span class="field-label">App Browser</span>
+          <code id="integration-browser"></code>
+        </div>
+        <div>
+          <span class="field-label">Native Window</span>
+          <code id="integration-native"></code>
+        </div>
+        <div>
+          <span class="field-label">Packaged App</span>
+          <code id="integration-packaged"></code>
+        </div>
+        <div>
+          <span class="field-label">Installed App</span>
+          <code id="integration-installed"></code>
+        </div>
+        <div>
+          <span class="field-label">Shell Handler</span>
+          <code id="integration-handler"></code>
+        </div>
+        <div>
+          <span class="field-label">Launcher</span>
+          <code id="integration-launcher"></code>
+        </div>
+        <div>
+          <span class="field-label">Server</span>
+          <code id="integration-server"></code>
+        </div>
+        <div>
+          <span class="field-label">Shortcuts</span>
+          <code id="integration-shortcuts"></code>
+        </div>
+        <div>
+          <span class="field-label">Context Menu</span>
+          <code id="integration-context"></code>
+        </div>
+        <div>
+          <span class="field-label">Folder Default</span>
+          <code id="integration-default"></code>
+        </div>
+        <div>
+          <span class="field-label">Shell Backup</span>
+          <code id="integration-backup"></code>
+        </div>
+        <div>
+          <span class="field-label">Win+E Helper</span>
+          <code id="integration-wine-file"></code>
+        </div>
+      </div>
+      <div class="integration-actions">
+        <button data-integration-action="generate">Generate</button>
+        <button data-integration-action="testOpen">Test Open</button>
+        <button data-integration-action="appInstall">Install App</button>
+        <button data-integration-action="appRemove">Remove App</button>
+        <button data-integration-action="shortcuts">Install Shortcuts</button>
+        <button data-integration-action="shortcutsRemove">Remove Shortcuts</button>
+        <button data-integration-action="backupShell">Backup Now</button>
+        <button data-integration-action="restoreShell">Restore Previous</button>
+        <button data-integration-action="cleanupIntegration">Clean Integrations</button>
+        <button data-integration-action="contextMenu">Install Menu</button>
+        <button data-integration-action="removeContextMenu">Remove Menu</button>
+        <button data-integration-action="folderDefault">Set Default</button>
+        <button data-integration-action="removeFolderDefault">Clear Default</button>
+        <button data-integration-action="winEInstall">Install Win+E</button>
+        <button data-integration-action="winERemove">Remove Win+E</button>
+      </div>
+      <pre id="integration-output"></pre>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <div class="breadcrumb-menu" id="breadcrumb-menu" role="menu" hidden></div>
+    <div class="context-menu" id="context-menu" role="menu" hidden></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
