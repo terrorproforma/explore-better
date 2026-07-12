@@ -570,6 +570,22 @@ Double-click a `.zip` file in a real folder pane to browse it as a read-only vir
 
 The `Compare` button compares the left and right pane folders. By default it shows differences only and preselects rows that are natural left-to-right candidates. Save frequent folder pairs and options as Sync Profiles, then apply them later before comparing. Use `Plan L->R` or `Plan R->L` to generate an exact sync plan first; it lists copy, overwrite, skip, missing-source, mirror-delete, and risky counts without changing either folder. `Apply Sync` stays disabled until a current plan exists and sends that plan digest back to the backend; if source or destination metadata changed after planning, sync is rejected with a refresh-preview error before it mutates disk. If overwrite is enabled, replaced destination items are first moved into `%LOCALAPPDATA%\ExploreBetter\Trash` as sync backups so the operation can be undone from the Ops dialog or recovered per item from operation details. Enable `Mirror extras` when a selected row exists only on the destination side and should be moved into App Trash as part of the same sync operation; undo restores those mirrored extras too.
 
+## Security And Transactional Guarantees
+
+The backend refuses non-loopback `HOST` values, validates Host/Origin/fetch metadata before API dispatch, requires JSON mutation bodies, and gives the browser a random per-launch HttpOnly SameSite capability. Transfer and sync previews also issue a short-lived, one-use apply token bound to the exact plan digest; browser applies without that token are rejected. Electron denies renderer navigation away from the local app, denies permissions, and opens only explicit `https:` or `mailto:` external URLs.
+
+Copy, overwrite, sync, and cross-volume move paths build a sibling staging item on the destination volume and atomically rename it into place. Failed overwrite staging removes partial data and restores the original backup even for directories. If a cross-volume destination commits but source deletion fails, Ops records `source-removal-pending`; Retry Remaining removes that source and continues remaining items without copying the committed destination again. Permanent delete rejects filesystem roots and Explore Better app-state paths.
+
+## Native Windows Provider
+
+`npm run build:native-helper` builds `native\bin\explore-better-fs.exe`, a Go x64 NDJSON helper with version negotiation, request IDs, progress, cancellation, enumeration, tree scan, volume geometry, and allocated-size operations. Analyzer uses `GetCompressedFileSizeW` on local Windows volumes and reports `allocatedSource`, `clusterSize`, and `allocationAccuracy`. UNC paths, unsupported platforms, missing helpers, and helper failures remain on the Node fallback and are visibly labeled as estimated rather than exact. `npm run verify:native-helper` verifies the protocol, exact allocation metadata, enumeration/tree totals, and cancellation acknowledgement.
+
+## Unified Verification
+
+`npm run verify:all` runs the release-critical suites serially under an exclusive lock, assigns safe loopback ports, enforces per-suite timeouts, removes test-owned orphan processes, and writes one timestamped report under `artifacts\acceptance`. `npm run verify:all:full` discovers and runs the complete `verify:*` fleet before the aggregate gates. `npm run verify:action-inventory` inventories visible action controls, registered commands, and keyboard actions into JSON/CSV plus a pending Computer Use matrix; each row includes preconditions, physical action, expected screen/filesystem state, and an evidence filename.
+
+Final production certification still requires a trusted Authenticode certificate, hosted HTTPS update URL, attached physical MTP/removable hardware, and the second Windows 11 machine described by the acceptance matrix. Local rehearsal evidence does not replace those inputs.
+
 ## Likely Next Steps
 
 - Add production distribution pieces that require external assets: code-signing certificate, signed installer release, and a hosted update-feed URL for the generated static feed.

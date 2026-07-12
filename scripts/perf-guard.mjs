@@ -185,7 +185,15 @@ function evaluateReport(report, budgets) {
     const prefix = `${run.count} images`;
     assertMinimum(checks, `${prefix}: listed entries`, run.cold?.result?.returned, run.count, run.path);
     assertBudget(checks, `${prefix}: warm image list`, run.warm?.wallMs, budgets.imageWarmWallMs, run.path);
-    assertMinimum(checks, `${prefix}: warm dimension cache hits`, run.warm?.result?.dimensionsCache?.hits, 1, run.path);
+    const listingCacheHit = run.warm?.result?.cache?.hit === true && Number(run.warm?.result?.scanned) === 0;
+    const dimensionCacheHits = Number(run.warm?.result?.dimensionsCache?.hits || 0);
+    checks.push({
+      name: `${prefix}: warm metadata cache`,
+      status: listingCacheHit || dimensionCacheHits >= 1 ? "pass" : "fail",
+      actual: listingCacheHit ? "listing cache, zero scan" : `${dimensionCacheHits} dimension hits`,
+      budget: "validated listing cache or >= 1 dimension hit",
+      detail: run.path
+    });
     assertBudget(checks, `${prefix}: image index build`, run.indexBuild?.wallMs, budgets.imageIndexBuildWallMs, run.path);
   }
 

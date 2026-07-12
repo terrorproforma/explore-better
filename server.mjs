@@ -17,6 +17,32 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 4627);
+const apiCapability = crypto.randomBytes(32).toString("base64url");
+const apiCapabilityCookieName = "ExploreBetterCapability";
+const contentSecurityPolicy = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "connect-src 'self'",
+  "font-src 'self' data:",
+  "frame-ancestors 'none'",
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob:",
+  "object-src 'none'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'"
+].join("; ");
+
+function isLoopbackHostname(value) {
+  const hostname = String(value || "").trim().replace(/^\[|\]$/g, "").toLowerCase();
+  return hostname === "localhost" || hostname === "::1" || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+}
+
+if (!isLoopbackHostname(host)) {
+  throw new Error(`Explore Better only accepts a loopback HOST; received ${JSON.stringify(host)}.`);
+}
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error(`Explore Better requires a valid TCP PORT; received ${JSON.stringify(process.env.PORT)}.`);
+}
 const localAppData =
   process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const appDataRoot = path.join(localAppData, "ExploreBetter");
@@ -42,12 +68,15 @@ let stateCache = {
 };
 let startupOperationRecoveryChecked = false;
 const operationControls = new Map();
+const operationPreviewTokens = new Map();
 const folderIndexJobs = new Map();
 const folderIndexCache = new Map();
 const directoryListingCache = new Map();
 const directoryListingInFlight = new Map();
 const sizeAnalysisCache = new Map();
 const sizeAnalysisInFlight = new Map();
+const advancedSearchCache = new Map();
+const advancedSearchInFlight = new Map();
 const backgroundIndexJobs = new Map();
 const backgroundIndexFreshnessCache = new Map();
 const backgroundIndexAutoRebuilds = new Map();
@@ -69,6 +98,7 @@ const directoryListingCacheMaxEntriesPerListing = 150000;
 const directoryListingWindowMaxEntries = 5000;
 const sizeAnalysisCacheLimit = 6;
 const sizeAnalysisCacheTtlMs = 30000;
+const advancedSearchCacheTtlMs = 10000;
 const listingCacheMutationPathKeys = new Set([
   "archive",
   "backup",
@@ -122,6 +152,9 @@ const testStateWriteDelayMs = Math.max(
   0,
   Math.min(Number(process.env.EB_TEST_STATE_WRITE_DELAY_MS || 0), 30000)
 );
+const testForceCrossVolumeMove = process.env.EB_TEST_FORCE_CROSS_VOLUME_MOVE === "1";
+const testFailSourceRemoval = process.env.EB_TEST_FAIL_SOURCE_REMOVAL === "1";
+const testFailStagingRename = process.env.EB_TEST_FAIL_STAGING_RENAME === "1";
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -298,6 +331,7 @@ const shellRegistrySnapshotSpec = [
 const retryableOperationTypes = new Set([
   "copy",
   "move",
+  "move-resume",
   "delete",
   "recycle",
   "trash",
@@ -477,6 +511,69 @@ function sendJson(res, status, payload) {
 
 function sendError(res, status, message, details) {
   sendJson(res, status, { error: message, details });
+}
+
+function cookieValue(req, name) {
+  const prefix = `${name}=`;
+  for (const part of String(req.headers.cookie || "").split(";")) {
+    const candidate = part.trim();
+    if (candidate.startsWith(prefix)) {
+      return candidate.slice(prefix.length);
+    }
+  }
+  return "";
+}
+
+function validateRequestBoundary(req) {
+  const isApiRequest = String(req.url || "").split("?", 1)[0].startsWith("/api/");
+  const authority = String(req.headers.host || "");
+  let requestOrigin;
+  try {
+    requestOrigin = new URL(`http://${authority}`);
+  } catch {
+    return { status: 400, message: "A valid Host header is required." };
+  }
+  const requestPort = Number(requestOrigin.port || 80);
+  if (!isLoopbackHostname(requestOrigin.hostname) || requestPort !== port) {
+    return { status: 403, message: "The request Host is not the local application origin." };
+  }
+
+  const originHeader = String(req.headers.origin || "");
+  if (originHeader) {
+    let origin;
+    try {
+      origin = new URL(originHeader);
+    } catch {
+      return { status: 403, message: "The request Origin is invalid." };
+    }
+    if (origin.origin !== requestOrigin.origin) {
+      return { status: 403, message: "Cross-origin API requests are not allowed." };
+    }
+  }
+
+  const fetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+    return { status: 403, message: "Cross-site API requests are not allowed." };
+  }
+
+  const method = String(req.method || "GET").toUpperCase();
+  if (isApiRequest && !new Set(["GET", "POST", "DELETE"]).has(method)) {
+    return { status: 405, message: "The HTTP method is not supported." };
+  }
+  if (isApiRequest && method === "POST") {
+    const contentType = String(req.headers["content-type"] || "").toLowerCase();
+    if (!contentType.startsWith("application/json")) {
+      return { status: 415, message: "Mutation requests must use application/json." };
+    }
+  }
+
+  // Browsers receive this HttpOnly capability with the UI. Tokenless access is
+  // limited to direct loopback clients such as the packaged main process and
+  // command-line verifiers, which do not carry browser fetch metadata.
+  if (isApiRequest && (originHeader || fetchSite) && cookieValue(req, apiCapabilityCookieName) !== apiCapability) {
+    return { status: 403, message: "The launch capability is missing or invalid." };
+  }
+  return null;
 }
 
 function boundedInteger(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -741,6 +838,8 @@ function sanitizeStoredOperation(operation) {
     createdAt,
     startedAt: sanitizeOperationTimestamp(operation.startedAt, null),
     finishedAt: sanitizeOperationTimestamp(operation.finishedAt, null),
+    interruptedAt: sanitizeOperationTimestamp(operation.interruptedAt, null),
+    recoveredAt: sanitizeOperationTimestamp(operation.recoveredAt, null),
     result: sanitizeOperationPayload(operation.result, null),
     error,
     undo:
@@ -2390,6 +2489,14 @@ function retryBodyForOperation(type, body = {}) {
     const targetDir = retryString(source.targetDir);
     return paths.length && targetDir ? { paths, targetDir } : null;
   }
+  if (type === "move-resume") {
+    const pendingSource = retryString(source.source);
+    const committedDest = retryString(source.dest);
+    const targetDir = retryString(source.targetDir);
+    return pendingSource && committedDest && targetDir
+      ? { source: pendingSource, dest: committedDest, targetDir, paths }
+      : null;
+  }
   if (type === "delete" || type === "recycle" || type === "trash" || type === "trash-delete") {
     return paths.length ? { paths } : null;
   }
@@ -2751,6 +2858,33 @@ async function runRetryableOperation(type, body, options = {}) {
   if (type === "move") {
     const sources = Array.isArray(body.paths) ? body.paths : [];
     return enqueueRetryableOperation(type, body, (hooks) => movePaths(sources, body.targetDir, hooks), options);
+  }
+  if (type === "move-resume") {
+    const pendingSource = resolveUserPath(body.source);
+    const committedDest = resolveUserPath(body.dest);
+    const remainingPaths = Array.isArray(body.paths) ? body.paths : [];
+    return enqueueRetryableOperation(type, body, async (hooks) => {
+      if (!(await pathExists(committedDest))) {
+        throw new Error("The committed move destination is missing; source removal was not attempted.");
+      }
+      await hooks.updateProgress?.({
+        unit: "items",
+        total: remainingPaths.length + 1,
+        completed: 0,
+        phase: "Removing committed source",
+        currentPath: pendingSource
+      });
+      if (await pathExists(pendingSource)) {
+        await removeCommittedMoveSource(pendingSource, committedDest);
+      }
+      if (!remainingPaths.length) {
+        return {
+          result: { sourceRemoved: pendingSource, destinationCommitted: committedDest, moved: [committedDest] },
+          undo: { type: "move-back", items: [{ from: committedDest, to: pendingSource }] }
+        };
+      }
+      return movePaths(remainingPaths, body.targetDir, hooks);
+    }, options);
   }
   if (type === "delete") {
     const sources = Array.isArray(body.paths) ? body.paths : [];
@@ -4870,6 +5004,7 @@ function dropSizeAnalysisCacheForMutationPath(mutationPath) {
 function invalidateSizeAnalysisCachesForDirs(dirs, reason = "mutation") {
   let invalidated = 0;
   let inFlightInvalidated = 0;
+  let searchInvalidated = 0;
   const paths = [];
   for (const dir of dirs.values()) {
     if (!dir) {
@@ -4877,14 +5012,37 @@ function invalidateSizeAnalysisCachesForDirs(dirs, reason = "mutation") {
     }
     inFlightInvalidated += dropSizeAnalysisInFlightForMutationPath(dir);
     invalidated += dropSizeAnalysisCacheForMutationPath(dir);
+    searchInvalidated += dropAdvancedSearchCacheForMutationPath(dir);
     paths.push(dir);
   }
   return {
     reason,
     invalidated,
     inFlightInvalidated,
+    searchInvalidated,
     dirs: paths.slice(0, 40)
   };
+}
+
+function dropAdvancedSearchCacheForMutationPath(mutationPath) {
+  let invalidated = 0;
+  for (const [cacheKey, record] of advancedSearchCache) {
+    try {
+      if (isInsidePath(mutationPath, record.rootPath) || isInsidePath(record.rootPath, mutationPath)) {
+        advancedSearchCache.delete(cacheKey);
+        invalidated += 1;
+      }
+    } catch {}
+  }
+  for (const [cacheKey, record] of advancedSearchInFlight) {
+    try {
+      if (isInsidePath(mutationPath, record.rootPath) || isInsidePath(record.rootPath, mutationPath)) {
+        record.invalidated = true;
+        advancedSearchInFlight.delete(cacheKey);
+      }
+    } catch {}
+  }
+  return invalidated;
 }
 
 function dropDirectoryListingCacheForWatchKey(watchKey) {
@@ -5435,6 +5593,7 @@ async function listDirectory(targetPath, options = {}) {
   const includeSignature = options.includeSignature !== false;
   const showHidden = options.showHidden !== false;
   const includeAttributes = options.includeAttributes === true || !showHidden;
+  const bypassCache = options.bypassCache === true;
   const priority = options.priority === "background" ? "background" : "foreground";
   const statConcurrency = listStatConcurrency(priority);
   throwIfAborted(signal);
@@ -5458,6 +5617,7 @@ async function listDirectory(targetPath, options = {}) {
   let listingCacheContext = null;
   let labelState = null;
   if (
+    !bypassCache &&
     directoryListingCacheEligible(targetStats, {
       priority,
       includeDimensions,
@@ -8870,11 +9030,81 @@ async function copyPathWithProgress(source, dest, options = {}) {
   return target;
 }
 
+function siblingStagingPath(target) {
+  const resolved = resolveUserPath(target);
+  const suffix = crypto.randomBytes(6).toString("hex");
+  return path.join(path.dirname(resolved), `.${path.basename(resolved)}.explore-better-${suffix}.partial`);
+}
+
+async function copyToStagingAndCommit(source, dest, options = {}) {
+  const src = resolveUserPath(source);
+  const target = resolveUserPath(dest);
+  const staging = siblingStagingPath(target);
+  if (await pathExists(target)) {
+    throw existingTargetError(target);
+  }
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  try {
+    await options.onTransactionPhase?.({ phase: "staging", source: src, staging, destination: target });
+    await copyPathWithProgress(src, staging, { ...options, force: false });
+    if (testFailStagingRename) {
+      const injected = new Error("Injected staging rename failure.");
+      injected.code = "EB_TEST_STAGING_RENAME";
+      throw injected;
+    }
+    await fs.rename(staging, target);
+    await options.onTransactionPhase?.({ phase: "destination-committed", source: src, staging, destination: target });
+    return target;
+  } catch (error) {
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
+    error.details = {
+      ...(error.details || {}),
+      transaction: {
+        version: 1,
+        phase: "staging-failed",
+        source: src,
+        stagingPath: staging,
+        destinationPath: target
+      }
+    };
+    throw error;
+  }
+}
+
+async function removeCommittedMoveSource(source, dest) {
+  const src = resolveUserPath(source);
+  const target = resolveUserPath(dest);
+  try {
+    if (testFailSourceRemoval) {
+      const injected = new Error("Injected source removal failure.");
+      injected.code = "EB_TEST_SOURCE_REMOVE";
+      throw injected;
+    }
+    await fs.rm(src, { recursive: true, force: false });
+  } catch (error) {
+    error.details = {
+      ...(error.details || {}),
+      sourceRemovalPending: true,
+      destinationCommitted: true,
+      source: src,
+      dest: target,
+      transaction: {
+        version: 1,
+        phase: "source-removal-pending",
+        source: src,
+        destinationPath: target,
+        stagingPath: null
+      }
+    };
+    throw error;
+  }
+}
+
 async function copyOne(source, targetDir, options = {}) {
   const src = resolveUserPath(source);
   const destDir = resolveUserPath(targetDir);
   const dest = await uniquePath(destDir, path.basename(src));
-  await copyPathWithProgress(src, dest, { ...options, force: false });
+  await copyToStagingAndCommit(src, dest, options);
   return dest;
 }
 
@@ -8883,13 +9113,18 @@ async function moveOne(source, targetDir, options = {}) {
   const destDir = resolveUserPath(targetDir);
   const dest = await uniquePath(destDir, path.basename(src));
   try {
+    if (testForceCrossVolumeMove) {
+      const injected = new Error("Injected cross-volume move.");
+      injected.code = "EXDEV";
+      throw injected;
+    }
     await fs.rename(src, dest);
   } catch (error) {
     if (error.code !== "EXDEV") {
       throw error;
     }
-    await copyPathWithProgress(src, dest, { ...options, force: false });
-    await fs.rm(src, { recursive: true, force: true });
+    await copyToStagingAndCommit(src, dest, options);
+    await removeCommittedMoveSource(src, dest);
   }
   return dest;
 }
@@ -8902,13 +9137,18 @@ async function moveToExactOrUnique(source, requestedTarget, options = {}) {
     : requested;
   await fs.mkdir(path.dirname(dest), { recursive: true });
   try {
+    if (testForceCrossVolumeMove) {
+      const injected = new Error("Injected cross-volume move.");
+      injected.code = "EXDEV";
+      throw injected;
+    }
     await fs.rename(src, dest);
   } catch (error) {
     if (error.code !== "EXDEV") {
       throw error;
     }
-    await copyPathWithProgress(src, dest, { ...options, force: false });
-    await fs.rm(src, { recursive: true, force: true });
+    await copyToStagingAndCommit(src, dest, options);
+    await removeCommittedMoveSource(src, dest);
   }
   return dest;
 }
@@ -8917,6 +9157,13 @@ async function copyPaths(paths, targetDir, hooks = {}) {
   const copied = [];
   const total = paths.length;
   const resolvedSources = paths.map((source) => resolveUserPath(source));
+  const resolvedTargetDir = resolveUserPath(targetDir);
+  for (const source of resolvedSources) {
+    const stats = await fs.lstat(source);
+    if (stats.isDirectory() && isInsidePath(resolvedTargetDir, source)) {
+      throw new Error("A folder cannot be copied into itself or one of its descendants.");
+    }
+  }
   let activeIndex = 0;
   try {
     await hooks.updateProgress?.({ unit: "items", total, completed: 0, phase: "Scanning" });
@@ -8973,7 +9220,8 @@ async function copyPaths(paths, targetDir, hooks = {}) {
       undo: { type: "trash-created", items: copied.map((item) => ({ path: item.dest })) }
     };
   } catch (error) {
-    error.details = operationRecoveryDetails({
+    const transactionFailure = error.details;
+    const details = operationRecoveryDetails({
       type: "copy",
       body: { paths, targetDir },
       resolvedSources,
@@ -8990,6 +9238,13 @@ async function movePaths(paths, targetDir, hooks = {}) {
   const moved = [];
   const total = paths.length;
   const resolvedSources = paths.map((source) => resolveUserPath(source));
+  const resolvedTargetDir = resolveUserPath(targetDir);
+  for (const source of resolvedSources) {
+    const stats = await fs.lstat(source);
+    if (stats.isDirectory() && isInsidePath(resolvedTargetDir, source)) {
+      throw new Error("A folder cannot be moved into itself or one of its descendants.");
+    }
+  }
   let activeIndex = 0;
   try {
     await hooks.updateProgress?.({ unit: "items", total, completed: 0, phase: "Scanning" });
@@ -9052,7 +9307,8 @@ async function movePaths(paths, targetDir, hooks = {}) {
       }
     };
   } catch (error) {
-    error.details = operationRecoveryDetails({
+    const transactionFailure = error.details;
+    const details = operationRecoveryDetails({
       type: "move",
       body: { paths, targetDir },
       resolvedSources,
@@ -9061,7 +9317,41 @@ async function movePaths(paths, targetDir, hooks = {}) {
       error,
       result: { moved: moved.map((item) => item.dest), items: moved }
     });
+    if (transactionFailure?.sourceRemovalPending) {
+      const remainingPaths = resolvedSources.slice(activeIndex + 1);
+      const retry = retryRequestForOperation("move-resume", {
+        source: transactionFailure.source,
+        dest: transactionFailure.dest,
+        targetDir,
+        paths: remainingPaths
+      });
+      details.destinationCommitted = transactionFailure.dest;
+      details.sourceRemovalPending = transactionFailure.source;
+      details.transaction = transactionFailure.transaction;
+      details.recovery = {
+        ...details.recovery,
+        sourceRemovalPending: true,
+        destinationCommitted: true,
+        pendingSource: transactionFailure.source,
+        committedDestination: transactionFailure.dest,
+        transaction: transactionFailure.transaction,
+        retry,
+        canRetryRemaining: Boolean(retry),
+        reconciliationActions: ["remove-source", "keep-destination"]
+      };
+    }
+    error.details = details;
     throw error;
+  }
+}
+
+function assertSafePermanentDeletePath(itemPath) {
+  const resolved = resolveUserPath(itemPath);
+  if (sameResolvedPath(resolved, path.parse(resolved).root)) {
+    throw new Error("Deleting a drive or filesystem root is not allowed.");
+  }
+  if (isInsidePath(resolved, appDataRoot) || isInsidePath(appDataRoot, resolved)) {
+    throw new Error("Deleting Explore Better application state through the file operation API is not allowed.");
   }
 }
 
@@ -9069,6 +9359,9 @@ async function deletePaths(paths, hooks = {}) {
   const deleted = [];
   const total = paths.length;
   const resolvedSources = paths.map((source) => resolveUserPath(source));
+  for (const source of resolvedSources) {
+    assertSafePermanentDeletePath(source);
+  }
   let activeIndex = 0;
   try {
     await hooks.updateProgress?.({ unit: "items", total, completed: 0, phase: "Preparing" });
@@ -10337,9 +10630,10 @@ async function copyExactWithBackup(source, dest, backupDir, overwrite, options =
 
   await fs.mkdir(path.dirname(target), { recursive: true });
   try {
-    await copyPathWithProgress(src, target, { ...options, force: true });
+    await copyToStagingAndCommit(src, target, options);
   } catch (error) {
-    if (backup && (await pathExists(backup)) && !(await pathExists(target))) {
+    if (backup && (await pathExists(backup))) {
+      await fs.rm(target, { recursive: true, force: true }).catch(() => {});
       await moveToExactOrUnique(backup, target);
       await updateLabelsForTransfers([{ source: backup, dest: target }], "move");
     }
@@ -11023,7 +11317,14 @@ function operationPlanDigest(plan) {
 
 function attachOperationPlanDigest(plan) {
   const planDigest = operationPlanDigest(plan);
-  return { ...plan, planDigest };
+  const now = Date.now();
+  for (const [token, record] of operationPreviewTokens) {
+    if (record.expiresAt <= now || operationPreviewTokens.size > 1000) operationPreviewTokens.delete(token);
+  }
+  const applyToken = crypto.randomBytes(24).toString("base64url");
+  const applyTokenExpiresAt = now + 120000;
+  operationPreviewTokens.set(applyToken, { planDigest, expiresAt: applyTokenExpiresAt });
+  return { ...plan, planDigest, applyToken, applyTokenExpiresAt: new Date(applyTokenExpiresAt).toISOString() };
 }
 
 function expectedOperationPlanDigest(body) {
@@ -11032,6 +11333,18 @@ function expectedOperationPlanDigest(body) {
 }
 
 function assertExpectedOperationPlan(plan, body, label = "Operation") {
+  const applyToken = String(body?.applyToken || "").trim();
+  if (applyToken) {
+    const record = operationPreviewTokens.get(applyToken);
+    operationPreviewTokens.delete(applyToken);
+    if (!record || record.expiresAt <= Date.now()) {
+      throw new Error(`${label} preview token expired. Refresh the preview before applying.`);
+    }
+    if (record.planDigest !== plan.planDigest) {
+      throw new Error(`${label} preview changed. Refresh the preview before applying.`);
+    }
+    return;
+  }
   const expectedPlanDigest = expectedOperationPlanDigest(body);
   if (!expectedPlanDigest) {
     return;
@@ -11044,6 +11357,15 @@ function assertExpectedOperationPlan(plan, body, label = "Operation") {
       actionCounts: plan.actionCounts,
       counts: plan.counts
     };
+    throw error;
+  }
+}
+
+function requireBrowserApplyToken(req, body) {
+  const browserRequest = Boolean(req.headers.origin || req.headers["sec-fetch-site"]);
+  if (browserRequest && !String(body?.applyToken || "").trim()) {
+    const error = new Error("A current preview token is required before applying this operation.");
+    error.status = 403;
     throw error;
   }
 }
@@ -11319,13 +11641,18 @@ async function moveExact(source, dest, options = {}) {
   const target = resolveUserPath(dest);
   await fs.mkdir(path.dirname(target), { recursive: true });
   try {
+    if (testForceCrossVolumeMove) {
+      const injected = new Error("Injected cross-volume move.");
+      injected.code = "EXDEV";
+      throw injected;
+    }
     await fs.rename(src, target);
   } catch (error) {
     if (error.code !== "EXDEV") {
       throw error;
     }
-    await copyPathWithProgress(src, target, { ...options, force: false });
-    await fs.rm(src, { recursive: true, force: true });
+    await copyToStagingAndCommit(src, target, options);
+    await removeCommittedMoveSource(src, target);
   }
   return target;
 }
@@ -11386,12 +11713,13 @@ async function applyTransfer(body, hooks = {}) {
       try {
         if (plan.mode === "copy") {
           await fs.mkdir(path.dirname(item.dest), { recursive: true });
-          await copyPathWithProgress(item.source, item.dest, { hooks, progressState, progressFields, force: true });
+          await copyToStagingAndCommit(item.source, item.dest, { hooks, progressState, progressFields });
         } else {
           await moveExact(item.source, item.dest, { hooks, progressState, progressFields });
         }
       } catch (error) {
-        if (backup && (await pathExists(backup)) && !(await pathExists(item.dest))) {
+        if (backup && (await pathExists(backup)) && !error.details?.sourceRemovalPending) {
+          await fs.rm(item.dest, { recursive: true, force: true }).catch(() => {});
           await moveToExactOrUnique(backup, item.dest);
         }
         throw error;
@@ -11458,7 +11786,8 @@ async function applyTransfer(body, hooks = {}) {
       }
     };
   } catch (error) {
-    error.details = operationRecoveryDetails({
+    const transactionFailure = error.details;
+    const details = operationRecoveryDetails({
       type: "transfer",
       body,
       resolvedSources: ready.map((item) => item.source),
@@ -11474,6 +11803,21 @@ async function applyTransfer(body, hooks = {}) {
         items: applied
       }
     });
+    if (transactionFailure?.transaction) {
+      details.transaction = transactionFailure.transaction;
+      details.recovery = {
+        ...details.recovery,
+        transaction: transactionFailure.transaction,
+        sourceRemovalPending: transactionFailure.sourceRemovalPending === true,
+        destinationCommitted: transactionFailure.destinationCommitted === true,
+        pendingSource: transactionFailure.source || null,
+        committedDestination: transactionFailure.dest || null,
+        reconciliationActions: transactionFailure.sourceRemovalPending
+          ? ["remove-source", "keep-destination"]
+          : ["restore-original", "retry"]
+      };
+    }
+    error.details = details;
     throw error;
   }
 }
@@ -13160,13 +13504,107 @@ function extensionBucketFor(fileName) {
   return path.extname(fileName).toLowerCase() || "(none)";
 }
 
-function allocatedBytesForSize(bytes) {
+function allocatedBytesForSize(bytes, clusterSize = 4096) {
   const value = Math.max(0, Number(bytes || 0));
   if (!value) {
     return 0;
   }
-  const cluster = 4096;
+  const cluster = Math.max(1, Number(clusterSize || 4096));
   return Math.ceil(value / cluster) * cluster;
+}
+
+function nativeFilesystemHelperPath() {
+  const executable = process.platform === "win32" ? "explore-better-fs.exe" : "explore-better-fs";
+  const candidates = [
+    process.env.EXPLORE_BETTER_FS_HELPER,
+    path.join(__dirname, "native", "bin", executable),
+    process.resourcesPath ? path.join(process.resourcesPath, "native", executable) : null
+  ].filter(Boolean);
+  return candidates.find((candidate) => existsSync(candidate)) || null;
+}
+
+async function nativeAllocationSnapshot(rootPath, maxEntries, signal) {
+  if (process.platform !== "win32" || String(rootPath).startsWith("\\\\")) {
+    return null;
+  }
+  const helperPath = nativeFilesystemHelperPath();
+  if (!helperPath) {
+    return null;
+  }
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const child = spawn(helperPath, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      child.stdin.end();
+      if (child.exitCode === null) child.kill();
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const processLines = () => {
+      let index;
+      while ((index = stdout.indexOf("\n")) !== -1) {
+        const line = stdout.slice(0, index).trim();
+        stdout = stdout.slice(index + 1);
+        if (!line) continue;
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch (error) {
+          finish(error);
+          return;
+        }
+        if (message.id !== requestId || message.type === "progress") continue;
+        if (!message.ok) {
+          finish(new Error(message.error?.message || "Native filesystem helper failed."));
+          return;
+        }
+        const entries = new Map();
+        for (const entry of message.data?.entries || []) {
+          entries.set(pathIdentity(entry.path), Number(entry.allocatedBytes || 0));
+        }
+        finish(null, {
+          entries,
+          allocatedSource: message.data?.volume?.allocatedSource || "win32-get-compressed-file-size",
+          allocationAccuracy: message.data?.volume?.allocationAccuracy || "exact",
+          clusterSize: Number(message.data?.volume?.clusterSize || 0),
+          helperPath,
+          helperFiles: Number(message.data?.files || 0),
+          skipped: Number(message.data?.skipped || 0)
+        });
+      }
+    };
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      processLines();
+    });
+    child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
+    child.once("error", (error) => finish(error));
+    child.once("exit", (code) => {
+      if (!settled) finish(new Error(`Native filesystem helper exited ${code}: ${stderr.trim()}`));
+    });
+    const timeout = setTimeout(() => finish(new Error("Native filesystem helper timed out.")), 120000);
+    const onAbort = () => {
+      child.stdin.write(`${JSON.stringify({ version: 1, id: crypto.randomUUID(), op: "cancel", targetId: requestId })}\n`);
+      setTimeout(() => finish(signal.reason || operationCanceledError()), 150).unref();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.stdin.write(`${JSON.stringify({ version: 1, id: requestId, op: "scan-tree", path: rootPath, maxEntries })}\n`);
+  });
+}
+
+function allocatedBytesForPath(itemPath, bytes, allocationSnapshot) {
+  const key = pathIdentity(itemPath);
+  if (allocationSnapshot?.entries?.has(key)) {
+    return allocationSnapshot.entries.get(key);
+  }
+  return allocatedBytesForSize(bytes, allocationSnapshot?.clusterSize || 4096);
 }
 
 const sizeAnalysisCategoryExtensions = [
@@ -13515,6 +13953,9 @@ async function sizeAnalysisReport(body = {}, options = {}) {
         path: rootPath
       },
       space: null,
+      allocatedSource: "unavailable",
+      clusterSize: null,
+      allocationAccuracy: "unknown",
       summary: {
         bytes: 0,
         allocated: 0,
@@ -13549,10 +13990,17 @@ async function sizeAnalysisReport(body = {}, options = {}) {
   return coalescedSizeAnalysisReport(cacheContext, async () => {
     const space = await sizeAnalysisSpaceForPath(rootPath);
     throwIfAborted(signal);
+    const allocationSnapshot = await nativeAllocationSnapshot(rootPath, maxEntries, signal).catch((error) => {
+      if (isAbortError(error)) throw error;
+      return null;
+    });
+    const clusterSize = allocationSnapshot?.clusterSize || 4096;
+    const allocatedSource = allocationSnapshot?.allocatedSource || "cluster-size-estimate";
+    const allocationAccuracy = allocationSnapshot?.allocationAccuracy || "estimated";
 
   if (rootStats.isFile()) {
     const bytes = Number(rootStats.size || 0);
-    const allocated = allocatedBytesForSize(bytes);
+    const allocated = allocatedBytesForPath(rootPath, bytes, allocationSnapshot);
     addFileToSizeNode(rootNode, bytes, allocated, rootStats.mtimeMs);
     rememberExtensionStat(extensionStats, rootPath, bytes, allocated);
     rememberCategoryStat(categoryStats, rootPath, bytes, allocated);
@@ -13610,7 +14058,7 @@ async function sizeAnalysisReport(body = {}, options = {}) {
             stack.push(child);
           } else if (stats.isFile()) {
             const bytes = Number(stats.size || 0);
-            const allocated = allocatedBytesForSize(bytes);
+            const allocated = allocatedBytesForPath(fullPath, bytes, allocationSnapshot);
             addFileToSizeNode(current, bytes, allocated, stats.mtimeMs);
             rememberExtensionStat(extensionStats, dirent.name, bytes, allocated);
             rememberCategoryStat(categoryStats, dirent.name, bytes, allocated);
@@ -13679,6 +14127,10 @@ async function sizeAnalysisReport(body = {}, options = {}) {
     truncated: truncated || scanned >= maxEntries,
     skipped: skipped.slice(0, 500),
     space,
+    allocatedSource,
+    clusterSize,
+    allocationAccuracy,
+    allocationProvider: allocationSnapshot ? "native-go-helper" : "node-fallback",
     summary: {
       bytes: rootNode.size,
       allocated: rootNode.allocated,
@@ -15100,7 +15552,7 @@ function contentSnippet(content, query) {
   return content.slice(start, end).replace(/\s+/g, " ").trim();
 }
 
-async function advancedSearch(options) {
+async function advancedSearchUncached(options) {
   const root = resolveUserPath(options.path || options.root || process.cwd());
   const nameNeedle = String(options.query || options.name || "").toLowerCase();
   const contentNeedle = String(options.content || "").trim();
@@ -15210,6 +15662,51 @@ async function advancedSearch(options) {
     skipped: skipped.slice(0, 100),
     entries: attachPathLabels(results, labelMap)
   };
+}
+
+function advancedSearchCacheKey(options = {}) {
+  const root = resolveUserPath(options.path || options.root || process.cwd());
+  const ordered = {};
+  for (const key of Object.keys(options).sort()) {
+    ordered[key] = options[key];
+  }
+  return `${pathIdentity(root)}\u001f${crypto.createHash("sha256").update(JSON.stringify(ordered)).digest("hex")}`;
+}
+
+async function advancedSearch(options = {}) {
+  const rootPath = resolveUserPath(options.path || options.root || process.cwd());
+  const cacheKey = advancedSearchCacheKey(options);
+  const now = Date.now();
+  const cached = advancedSearchCache.get(cacheKey);
+  if (cached && now - cached.createdAt <= advancedSearchCacheTtlMs) {
+    cached.lastAccess = now;
+    return { ...cached.report, searchCache: { hit: true, coalesced: false, ageMs: now - cached.createdAt } };
+  }
+  if (cached) advancedSearchCache.delete(cacheKey);
+  const existing = advancedSearchInFlight.get(cacheKey);
+  if (existing) {
+    const report = await existing.promise;
+    return { ...report, searchCache: { hit: false, coalesced: true } };
+  }
+  const record = { rootPath, invalidated: false, promise: null };
+  record.promise = advancedSearchUncached(options).then((report) => {
+    if (!record.invalidated) {
+      advancedSearchCache.set(cacheKey, { rootPath, report, createdAt: Date.now(), lastAccess: Date.now() });
+      while (advancedSearchCache.size > 24) {
+        const oldest = [...advancedSearchCache.entries()].sort((left, right) => left[1].lastAccess - right[1].lastAccess)[0];
+        if (!oldest) break;
+        advancedSearchCache.delete(oldest[0]);
+      }
+    }
+    return report;
+  });
+  advancedSearchInFlight.set(cacheKey, record);
+  try {
+    const report = await record.promise;
+    return { ...report, searchCache: { hit: false, coalesced: false } };
+  } finally {
+    if (advancedSearchInFlight.get(cacheKey) === record) advancedSearchInFlight.delete(cacheKey);
+  }
 }
 
 async function searchDirectory(rootPath, query, limit = 200) {
@@ -17506,7 +18003,8 @@ async function handleApi(req, res, url) {
       includeDimensions: url.searchParams.get("includeDimensions") === "true",
       includeLinks: url.searchParams.get("includeLinks") === "true",
       includeAttributes: url.searchParams.get("includeAttributes") === "true",
-      includeSignature: url.searchParams.get("includeSignature") === "true"
+      includeSignature: url.searchParams.get("includeSignature") === "true",
+      bypassCache: url.searchParams.get("bypassCache") === "true"
     });
     return sendJson(
       res,
@@ -17651,6 +18149,7 @@ async function handleApi(req, res, url) {
 
   if (route === "POST /api/sync") {
     const body = await readJson(req);
+    requireBrowserApplyToken(req, body);
     const operation = await runRetryableOperation("sync", body);
     return sendJson(res, 200, { ...operation.result, operation });
   }
@@ -17799,6 +18298,7 @@ async function handleApi(req, res, url) {
 
   if (route === "POST /api/transfer") {
     const body = await readJson(req);
+    requireBrowserApplyToken(req, body);
     const operation = await runRetryableOperation("transfer", body);
     return sendJson(res, 200, { ...operation.result, operation });
   }
@@ -18108,7 +18608,15 @@ async function serveStatic(req, res, url) {
     res.writeHead(200, {
       "content-type": mimeTypes.get(ext) || "application/octet-stream",
       "content-length": stats.size,
-      "cache-control": "no-store"
+      "cache-control": "no-store",
+      "content-security-policy": contentSecurityPolicy,
+      "cross-origin-opener-policy": "same-origin",
+      "cross-origin-resource-policy": "same-origin",
+      "permissions-policy": "camera=(), display-capture=(), geolocation=(), microphone=(), payment=(), usb=()",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "set-cookie": `${apiCapabilityCookieName}=${apiCapability}; HttpOnly; SameSite=Strict; Path=/`
     });
     return createReadStream(file).pipe(res);
   } catch {
@@ -18118,6 +18626,10 @@ async function serveStatic(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    const boundaryError = validateRequestBoundary(req);
+    if (boundaryError) {
+      return sendError(res, boundaryError.status, boundaryError.message);
+    }
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
@@ -18128,7 +18640,8 @@ const server = http.createServer(async (req, res) => {
     if (isAbortError(error) || res.destroyed || res.writableEnded) {
       return;
     }
-    sendError(res, 500, error.message || "Unexpected server error.", {
+    const status = Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 500;
+    sendError(res, status, error.message || "Unexpected server error.", {
       name: error.name,
       code: error.code
     });

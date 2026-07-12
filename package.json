@@ -14,12 +14,17 @@
     "desktop:smoke-backend-restart": "electron . --smoke --smoke-window --smoke-backend-restart",
     "desktop:smoke-update-feed": "electron . --smoke --smoke-window --smoke-update-feed",
     "build:icon": "node scripts/generate-icon.mjs",
+    "build:native-helper": "node scripts/build-native-helper.mjs",
     "perf:bench": "node scripts/perf-benchmark.mjs",
     "perf:bench:100k": "node scripts/perf-benchmark.mjs --counts 1000,10000,100000",
     "perf:guard": "node scripts/perf-guard.mjs",
     "verify:speed-health": "node scripts/speed-health-audit.mjs",
     "verify:startup-latency": "node scripts/startup-latency-smoke.mjs",
     "verify:goal": "node scripts/goal-stress-audit.mjs",
+    "verify:all": "node scripts/verify-all.mjs",
+    "verify:all:full": "node scripts/verify-all.mjs --full",
+    "verify:all:refresh": "node scripts/verify-all.mjs --refresh-stale",
+    "verify:action-inventory": "node scripts/action-inventory.mjs",
     "verify:perf-100k": "node scripts/perf-100k-verify.mjs",
     "verify:windows-baseline": "node scripts/windows-baseline-smoke.mjs",
     "verify:mixed-load": "node scripts/mixed-load-smoke.mjs",
@@ -31,6 +36,7 @@
     "verify:operation-preview-scale": "node scripts/operation-preview-scale-smoke.mjs",
     "verify:power-tools-ui": "node scripts/power-tools-ui-smoke.mjs",
     "verify:operation-journal": "node scripts/operation-journal-integrity-smoke.mjs",
+    "verify:transactional-operations": "node scripts/transactional-operations-smoke.mjs",
     "verify:operation-journal-concurrency": "node scripts/operation-journal-concurrency-smoke.mjs",
     "verify:operation-journal-scale": "node scripts/operation-journal-scale-smoke.mjs",
     "verify:operation-journal-retention": "node scripts/operation-journal-retention-smoke.mjs",
@@ -47,9 +53,11 @@
     "verify:elevation": "node scripts/elevation-plan-smoke.mjs",
     "verify:elevation-ui": "node scripts/elevation-ui-smoke.mjs",
     "verify:no-admin-access": "node scripts/no-admin-access-smoke.mjs",
+    "verify:native-helper": "node scripts/native-helper-smoke.mjs",
     "verify:path-diagnostics": "node scripts/path-diagnostics-smoke.mjs",
     "verify:real-paths": "node scripts/real-paths-verify.mjs",
     "verify:network-loopback": "node scripts/network-loopback-smoke.mjs",
+    "verify:security-boundary": "node scripts/security-boundary-smoke.mjs",
     "verify:filesystem-objects": "node scripts/filesystem-objects-smoke.mjs",
     "verify:thumbnail-cache-ui": "node scripts/thumbnail-cache-ui-smoke.mjs",
     "verify:metadata-cache-corruption": "node scripts/metadata-cache-corruption-smoke.mjs",
@@ -112,9 +120,9 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "electron": "^42.3.3",
-    "electron-builder": "^26.8.1",
-    "playwright-core": "^1.60.0"
+    "electron": "^42.6.1",
+    "electron-builder": "^26.15.3",
+    "playwright-core": "^1.61.1"
   },
   "build": {
     "appId": "local.explorebetter.filemanager",
@@ -126,14 +134,21 @@
       "electron-main.mjs",
       "electron-preload.cjs",
       "server.mjs",
+      "native/bin/**/*",
       "public/**/*",
       "README.md",
       "USER_MANUAL.md",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "native/bin/explore-better-fs.exe",
+        "to": "native/explore-better-fs.exe"
+      }
+    ],
     "win": {
       "icon": "build/icon.ico",
-      "signAndEditExecutable": false,
+      "signAndEditExecutable": true,
       "target": [
         "dir",
         "portable",
@@ -157,6 +172,6 @@
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
-    "yauzl": "^2.10.0"
+    "yauzl": "^3.4.0"
   }
 }

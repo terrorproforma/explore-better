@@ -10,6 +10,7 @@ const fixtureRoot = path.join(runRoot, "fixture");
 const appData = path.join(runRoot, "appdata");
 const statePath = path.join(appData, "ExploreBetter", "state.json");
 let serverOutput = "";
+const ownedServers = new Set();
 
 function optionValue(name, fallback = "") {
   const prefix = `${name}=`;
@@ -41,6 +42,7 @@ async function pathExists(itemPath) {
 async function requestJson(baseUrl, route, options = {}) {
   const response = await fetch(`${baseUrl}${route}`, {
     ...options,
+    signal: options.signal || AbortSignal.timeout(5000),
     headers: {
       "content-type": "application/json",
       ...(options.headers || {})
@@ -55,6 +57,10 @@ async function requestJson(baseUrl, route, options = {}) {
     throw error;
   }
   return data;
+}
+
+function boundedFetch(url, options = {}, timeoutMs = 30000) {
+  return fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(timeoutMs) });
 }
 
 async function waitForServer(baseUrl, child) {
@@ -105,17 +111,24 @@ function startServer(port, options = {}) {
   child.stderr.on("data", (chunk) => {
     serverOutput += chunk.toString();
   });
+  ownedServers.add(child);
   return child;
 }
 
 async function startReadyServer(baseUrl, port, options = {}) {
   const child = startServer(port, options);
-  await waitForServer(baseUrl, child);
-  return child;
+  try {
+    await waitForServer(baseUrl, child);
+    return child;
+  } catch (error) {
+    await stopServer(child);
+    throw error;
+  }
 }
 
 async function stopServer(child) {
   if (!child || child.exitCode !== null) {
+    if (child) ownedServers.delete(child);
     return;
   }
   child.kill("SIGKILL");
@@ -126,6 +139,11 @@ async function stopServer(child) {
       resolve();
     });
   });
+  ownedServers.delete(child);
+}
+
+async function stopOwnedServers() {
+  await Promise.all([...ownedServers].map((child) => stopServer(child)));
 }
 
 async function prepareFixture() {
@@ -228,7 +246,7 @@ async function waitForCheckpoint(type, expectedRemaining) {
       const operation = latestOperationByType(state, type);
       if (
         operation?.status === "running" &&
-        operation?.progress?.testDelay === true &&
+        operation?.progress?.phase === "Test delay" &&
         operation?.result?.recovery?.remainingCount === expectedRemaining
       ) {
         return operation;
@@ -262,7 +280,7 @@ async function recoverAfterKill({ baseUrl, port, server, inFlight, type }) {
 
 async function runCopyKillPhase(baseUrl, port, fixture) {
   let server = await startReadyServer(baseUrl, port, true);
-  const inFlight = fetch(`${baseUrl}/api/copy`, {
+  const inFlight = boundedFetch(`${baseUrl}/api/copy`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ paths: fixture.sources, targetDir: fixture.targetDir })
@@ -288,7 +306,7 @@ async function runCopyKillPhase(baseUrl, port, fixture) {
 async function runMoveKillPhase(baseUrl, port, fixture, currentServer) {
   await stopServer(currentServer);
   let server = await startReadyServer(baseUrl, port, { operationDelay: true });
-  const inFlight = fetch(`${baseUrl}/api/move`, {
+  const inFlight = boundedFetch(`${baseUrl}/api/move`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ paths: fixture.sources, targetDir: fixture.targetDir })
@@ -320,7 +338,7 @@ async function runMoveKillPhase(baseUrl, port, fixture, currentServer) {
 async function runDeleteKillPhase(baseUrl, port, fixture, currentServer) {
   await stopServer(currentServer);
   let server = await startReadyServer(baseUrl, port, { operationDelay: true });
-  const inFlight = fetch(`${baseUrl}/api/delete`, {
+  const inFlight = boundedFetch(`${baseUrl}/api/delete`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ paths: fixture.sources })
@@ -348,7 +366,7 @@ async function runDeleteKillPhase(baseUrl, port, fixture, currentServer) {
 async function runTrashKillPhase(baseUrl, port, fixture, currentServer) {
   await stopServer(currentServer);
   let server = await startReadyServer(baseUrl, port, { operationDelay: true });
-  const inFlight = fetch(`${baseUrl}/api/trash`, {
+  const inFlight = boundedFetch(`${baseUrl}/api/trash`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ paths: fixture.sources })
@@ -388,7 +406,7 @@ async function runSyncKillPhase(baseUrl, port, fixture, currentServer) {
     mirrorDeletes: false,
     items: fixture.items
   };
-  const inFlight = fetch(`${baseUrl}/api/sync`, {
+  const inFlight = boundedFetch(`${baseUrl}/api/sync`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body)
@@ -415,7 +433,7 @@ async function runSyncKillPhase(baseUrl, port, fixture, currentServer) {
 async function runRenameKillPhase(baseUrl, port, fixture, currentServer) {
   await stopServer(currentServer);
   let server = await startReadyServer(baseUrl, port, { operationDelay: true });
-  const inFlight = fetch(`${baseUrl}/api/rename`, {
+  const inFlight = boundedFetch(`${baseUrl}/api/rename`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: fixture.source, name: fixture.name })
@@ -450,7 +468,7 @@ async function runStateSaveKillPhase(baseUrl, port, currentServer) {
 
   await stopServer(currentServer);
   let server = await startReadyServer(baseUrl, port, { stateDelay: true });
-  const inFlight = fetch(`${baseUrl}/api/state`, {
+  const inFlight = boundedFetch(`${baseUrl}/api/state`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ settings: { density: "spacious", startupMode: "homeDownloads" } })
@@ -487,6 +505,7 @@ async function main() {
   const port = Number(optionValue("--port", process.env.PORT || 54000 + Math.floor(Math.random() * 10000)));
   const baseUrl = `http://127.0.0.1:${port}`;
   let server = null;
+  let completed = false;
 
   try {
     const copyPhase = await runCopyKillPhase(baseUrl, port, fixture.copy);
@@ -583,10 +602,14 @@ async function main() {
     console.log("killed server during atomic state save");
     console.log(`state recovered density: ${statePhase.state.recoveredDensity}`);
     console.log(`wrote ${outputPath}`);
+    completed = true;
   } finally {
     await stopServer(server);
-    if (!keepFixture()) {
+    await stopOwnedServers();
+    if (completed && !keepFixture()) {
       await fs.rm(runRoot, { recursive: true, force: true }).catch(() => {});
+    } else if (!completed) {
+      console.error(`Retained failed crash fixture: ${runRoot}`);
     }
   }
 }

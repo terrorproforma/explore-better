@@ -571,8 +571,29 @@ async function showLister(targetPath = null, shellMode = null) {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    try {
+      const protocol = new URL(url).protocol;
+      if (protocol === "https:" || protocol === "mailto:") {
+        shell.openExternal(url).catch(() => {});
+      }
+    } catch {
+      // Invalid external URLs are denied below.
+    }
     return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    try {
+      if (new URL(url).origin === new URL(baseUrl).origin) {
+        return;
+      }
+    } catch {
+      // Invalid navigation targets are denied below.
+    }
+    event.preventDefault();
+  });
+  mainWindow.webContents.session.setPermissionCheckHandler(() => false);
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(false);
   });
   mainWindow.webContents.on("before-input-event", (event, input) => {
     const action = desktopShortcutAction(input);

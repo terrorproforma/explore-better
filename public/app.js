@@ -5790,6 +5790,9 @@ function renderSizeAnalysisDialog(message = "") {
   const allocatedBytes = Number(report.summary?.allocated || totalBytes);
   const skipped = Number(report.summary?.skipped || 0);
   const truncated = report.truncated ? " / capped" : "";
+  const allocationLabel = report.allocationAccuracy === "exact"
+    ? `Exact via ${report.allocatedSource || "filesystem"}${report.clusterSize ? ` / ${formatSize(report.clusterSize)} clusters` : ""}`
+    : `Estimated${report.clusterSize ? ` / ${formatSize(report.clusterSize)} clusters` : ""}`;
   summary.textContent =
     message || `${formatSize(totalBytes)} / ${itemWord(Number(report.summary?.files || 0), "file")}${truncated}`;
   if (scanStrip) scanStrip.innerHTML = sizeAnalysisScanStrip(report);
@@ -5798,7 +5801,9 @@ function renderSizeAnalysisDialog(message = "") {
     sizeAnalysisMetric(
       "Allocated",
       formatSize(allocatedBytes),
-      report.space?.available ? `${sizeAnalysisPercentText(allocatedBytes, report.space.totalBytes)} of volume` : "4 KB cluster estimate"
+      report.space?.available
+        ? `${sizeAnalysisPercentText(allocatedBytes, report.space.totalBytes)} of volume / ${allocationLabel}`
+        : allocationLabel
     ),
     sizeAnalysisMetric("Files", Number(report.summary?.files || 0).toLocaleString(), `${Number(report.scanned || 0).toLocaleString()} scanned`),
     sizeAnalysisMetric("Folders", Number(report.summary?.folders || 0).toLocaleString(), report.truncated ? "truncated" : "complete"),
@@ -10702,6 +10707,9 @@ function transferPayload(options = {}) {
   if (options.expectedPlanDigest) {
     payload.expectedPlanDigest = options.expectedPlanDigest;
   }
+  if (options.applyToken) {
+    payload.applyToken = options.applyToken;
+  }
   return payload;
 }
 
@@ -10790,7 +10798,10 @@ async function applyTransfer() {
   }
   const result = await request("/api/transfer", {
     method: "POST",
-    body: JSON.stringify(transferPayload({ expectedPlanDigest: app.transfer.plan.planDigest }))
+    body: JSON.stringify(transferPayload({
+      expectedPlanDigest: app.transfer.plan.planDigest,
+      applyToken: app.transfer.plan.applyToken
+    }))
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
@@ -13253,6 +13264,9 @@ function syncPayload(direction, options = {}) {
   if (options.expectedPlanDigest) {
     payload.expectedPlanDigest = options.expectedPlanDigest;
   }
+  if (options.applyToken) {
+    payload.applyToken = options.applyToken;
+  }
   return payload;
 }
 
@@ -13319,7 +13333,8 @@ async function applySyncPreview() {
     method: "POST",
     body: JSON.stringify({
       ...preview.payload,
-      expectedPlanDigest: preview.plan.planDigest
+      expectedPlanDigest: preview.plan.planDigest,
+      applyToken: preview.plan.applyToken
     })
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);

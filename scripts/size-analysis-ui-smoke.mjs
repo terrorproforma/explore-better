@@ -228,6 +228,7 @@ async function main() {
   const checks = [];
   const pageErrors = [];
   const consoleMessages = [];
+  const failedResponses = [];
   let serverOutput = "";
   const server = spawn(process.execPath, ["server.mjs"], {
     cwd: workspace,
@@ -260,6 +261,11 @@ async function main() {
     page.on("console", (message) => {
       if (["error", "warning"].includes(message.type())) {
         consoleMessages.push({ type: message.type(), text: message.text() });
+      }
+    });
+    page.on("response", (response) => {
+      if (response.status() >= 400) {
+        failedResponses.push({ status: response.status(), url: response.url() });
       }
     });
     let releaseCanceledRoute = null;
@@ -468,7 +474,7 @@ async function main() {
     check(checks, "ui-no-inner-scrollbars", ui.scrollIssues.length === 0, `${ui.scrollIssues.length} internal analyzer overflow issue(s).`);
     check(checks, "browser-console-clean", pageErrors.length === 0, `${pageErrors.length} page error(s).`);
   } catch (error) {
-    check(checks, "smoke-execution", false, error.message);
+    check(checks, "smoke-execution", false, `${error.message}; failed responses: ${JSON.stringify(failedResponses.slice(-10))}`);
   } finally {
     await browser?.close().catch(() => {});
     await stopServer(server);
@@ -491,6 +497,7 @@ async function main() {
     cancelProbe,
     pageErrors,
     consoleMessages,
+    failedResponses,
     serverOutput: serverOutput.slice(-4000),
     checks,
     summary

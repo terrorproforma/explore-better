@@ -181,7 +181,8 @@ async function listWithDimensions(baseUrl) {
     `/api/list?${new URLSearchParams({
       path: fixtureRoot,
       includeDimensions: "true",
-      includeSignature: "true"
+      includeSignature: "true",
+      bypassCache: "true"
     })}`
   );
 }
