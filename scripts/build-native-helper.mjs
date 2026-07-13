@@ -25,7 +25,7 @@ function run(file, args, options = {}) {
 
 async function main() {
   await fs.mkdir(outputDir, { recursive: true });
-  await run("go", ["build", "-trimpath", "-ldflags", "-s -w", "-o", outputPath, "."], {
+  await run("go", ["build", "-buildvcs=false", "-trimpath", "-ldflags", "-s -w", "-o", outputPath, "."], {
     cwd: sourceDir,
     env: { ...process.env, CGO_ENABLED: "0", GOOS: process.platform === "win32" ? "windows" : process.platform, GOARCH: "amd64" }
   });
