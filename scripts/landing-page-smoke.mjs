@@ -63,8 +63,8 @@ async function startServer() {
   };
 }
 
-async function pageSnapshot(page) {
-  return page.evaluate(() => {
+async function pageSnapshot(page, installerName) {
+  return page.evaluate((expectedInstallerName) => {
     const viewportWidth = window.innerWidth;
     const elements = [...document.querySelectorAll("body *")].filter((element) => {
       const style = getComputedStyle(element);
@@ -105,9 +105,9 @@ async function pageSnapshot(page) {
         };
       })
       .filter((image) => !Number.isFinite(image.ratioDelta) || image.ratioDelta > 0.02);
-    const downloadLinks = [...document.querySelectorAll('a[href*="ExploreBetter-0.1.2-x64-setup.exe"]')].map(
-      (link) => link.href
-    );
+    const downloadLinks = [...document.querySelectorAll("a[href]")]
+      .filter((link) => link.getAttribute("href")?.includes(expectedInstallerName))
+      .map((link) => link.href);
     return {
       title: document.title,
       h1: document.querySelector("h1")?.textContent.trim() || "",
@@ -125,7 +125,25 @@ async function pageSnapshot(page) {
       verifyCommand: document.querySelector("[data-verify-command]")?.textContent.trim() || "",
       unsignedDisclosure: document.querySelector("#unsigned-preview-note")?.textContent.replace(/\s+/g, " ").trim() || ""
     };
-  });
+  }, installerName);
+}
+
+async function releaseExpectations() {
+  const pkg = JSON.parse(await fs.readFile(path.join(workspace, "package.json"), "utf8"));
+  const version = String(pkg.version || "").trim();
+  const installerName = `ExploreBetter-${version}-x64-setup.exe`;
+  let checksum = "";
+  try {
+    const checksumText = await fs.readFile(path.join(workspace, "dist", "SHA256SUMS.txt"), "utf8");
+    const record = checksumText
+      .split(/\r?\n/)
+      .map((line) => line.trim().split(/\s+/, 2))
+      .find(([, name]) => name === installerName);
+    checksum = record?.[0] || "";
+  } catch {
+    // Source-only checks still validate that the published page carries a SHA-256 value.
+  }
+  return { version, installerName, checksum };
 }
 
 function markdownReport(report) {
@@ -150,6 +168,7 @@ async function main() {
   const checks = [];
   const evidence = [];
   const errors = [];
+  const release = await releaseExpectations();
   const { server, baseUrl } = await startServer();
   let browser;
   try {
@@ -178,7 +197,7 @@ async function main() {
 
       addCheck(checks, `${viewport.name}-response`, response?.ok() === true, `HTTP ${response?.status() || 0}`);
 
-      const snapshot = await pageSnapshot(page);
+      const snapshot = await pageSnapshot(page, release.installerName);
       addCheck(checks, `${viewport.name}-title`, snapshot.title.includes("Explore Better"), snapshot.title);
       addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === "Explore Better", snapshot.h1 || "Missing H1");
       addCheck(checks, `${viewport.name}-sections`, snapshot.sectionCount >= 8, `${snapshot.sectionCount} main sections`);
@@ -232,13 +251,13 @@ async function main() {
       addCheck(
         checks,
         `${viewport.name}-checksum`,
-        snapshot.checksum === "2851cc5ab923a9a1bae9f5ee860c2be07d54b3fcd21812b50e99cc6d6d27d0a0",
+        release.checksum ? snapshot.checksum === release.checksum : /^[a-f0-9]{64}$/i.test(snapshot.checksum),
         snapshot.checksum
       );
       addCheck(
         checks,
         `${viewport.name}-verify-command`,
-        snapshot.verifyCommand === "Get-FileHash .\\ExploreBetter-0.1.2-x64-setup.exe -Algorithm SHA256",
+        snapshot.verifyCommand === `Get-FileHash .\\${release.installerName} -Algorithm SHA256`,
         snapshot.verifyCommand
       );
       addCheck(

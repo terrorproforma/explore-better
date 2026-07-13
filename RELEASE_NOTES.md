@@ -1,6 +1,6 @@
 # Explore Better Release Notes
 
-## Unreleased
+## v0.1.3 - 2026-07-13
 
 ### Per-Tab Integrated Terminals
 
