@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 
 const workspace = process.cwd();
@@ -87,6 +88,23 @@ async function waitForServer(baseUrl, child) {
     }
   }
   throw new Error(`Server did not start at ${baseUrl}: ${serverOutput}`);
+}
+
+async function availablePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const selectedPort = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (!selectedPort) reject(new Error("Windows did not assign a loopback port."));
+        else resolve(selectedPort);
+      });
+    });
+  });
 }
 
 async function readNamespace(baseUrl, target, limit = 200) {
@@ -406,7 +424,8 @@ async function main() {
   const checks = [];
   await fs.mkdir(stateDir, { recursive: true });
   await fs.mkdir(artifactsDir, { recursive: true });
-  const port = Number(optionValue("--port", process.env.PORT || 58500 + Math.floor(Math.random() * 3500)));
+  const requestedPort = optionValue("--port", process.env.PORT || "");
+  const port = requestedPort ? Number(requestedPort) : await availablePort();
   const limit = Math.max(10, Math.min(Number(optionValue("--limit", process.env.EB_SHELL_DEVICES_LIMIT || 200)), 500));
   const query = deviceQuery();
   const baseUrl = `http://127.0.0.1:${port}`;
