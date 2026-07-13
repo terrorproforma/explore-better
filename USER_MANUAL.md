@@ -6,7 +6,7 @@ Navigator and Preview have independent panel buttons in their headers and in the
 
 ## Starting The App
 
-For normal use, download `ExploreBetter-0.1.0-x64-setup.exe` from the [latest GitHub release](https://github.com/terrorproforma/explore-better/releases/latest). This initial public preview is unsigned, so verify the release SHA-256 before accepting any Windows SmartScreen prompt. The installer is per-user by default and does not require the main app to run as administrator.
+For normal use, download the `ExploreBetter-<version>-x64-setup.exe` asset from the [latest GitHub release](https://github.com/terrorproforma/explore-better/releases/latest). This initial public preview is unsigned, so verify the release SHA-256 before accepting any Windows SmartScreen prompt. The installer is per-user by default and does not require the main app to run as administrator.
 
 From the project folder:
 

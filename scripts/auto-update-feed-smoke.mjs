@@ -47,6 +47,13 @@ function sha512Base64(buffer) {
   return createHash("sha512").update(buffer).digest("base64");
 }
 
+async function nextPatchVersion() {
+  const pkg = JSON.parse(await fs.readFile(path.join(workspace, "package.json"), "utf8"));
+  const match = String(pkg.version || "").match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) throw new Error(`Cannot derive an update-test version from ${JSON.stringify(pkg.version)}.`);
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+}
+
 async function prepareFeed(version) {
   await fs.mkdir(feedRoot, { recursive: true });
   const updateFileName = `ExploreBetter-${version}-x64-setup.exe`;
@@ -207,7 +214,7 @@ ${report.feed.requests.map((request) => `- ${request.method} ${request.path}`).j
 async function main() {
   await fs.mkdir(appData, { recursive: true });
   await fs.mkdir(artifactsDir, { recursive: true });
-  const version = optionValue("--version", process.env.EB_UPDATE_FEED_VERSION || "0.1.1");
+  const version = optionValue("--version", process.env.EB_UPDATE_FEED_VERSION || (await nextPatchVersion()));
   const configuredFeedPort = optionValue("--feed-port", process.env.EB_UPDATE_FEED_PORT || "");
   const configuredAppPort = optionValue("--app-port", process.env.PORT || "");
   const feedPort = configuredFeedPort ? Number(configuredFeedPort) : 0;
