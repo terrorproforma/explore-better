@@ -4,9 +4,9 @@
 [![Windows CI](https://github.com/terrorproforma/explore-better/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/terrorproforma/explore-better/actions/workflows/windows-ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)
 
-**A fast, dual-pane Windows file manager with tabs, scripting, transactional file operations, reversible Explorer integration, and a visual disk-space analyzer.**
+**A fast, dual-pane Windows file manager with tabs, per-tab terminals, scripting, transactional file operations, reversible Explorer integration, and a visual disk-space analyzer.**
 
-[Download the latest Windows release](https://github.com/terrorproforma/explore-better/releases/latest) | [Read the user manual](USER_MANUAL.md) | [Report an issue](https://github.com/terrorproforma/explore-better/issues)
+[Visit the Explore Better website](https://terrorproforma.github.io/explore-better/) | [Download the latest Windows release](https://github.com/terrorproforma/explore-better/releases/latest) | [Read the user manual](USER_MANUAL.md) | [Report an issue](https://github.com/terrorproforma/explore-better/issues)
 
 ## Why Explore Better Exists
 
@@ -49,7 +49,17 @@ The installer is per-user by default. Normal browsing, the native filesystem hel
 
 ### Windows SmartScreen Notice
 
-The current public preview is not Authenticode-signed because a trusted production certificate is not yet available. Windows SmartScreen may show an unrecognized-app warning. Verify the published SHA-256 checksum before choosing **More info** and **Run anyway**.
+The current public preview is not Authenticode-signed because a trusted production certificate is not yet available. Windows SmartScreen will identify it as an unrecognized app from an unknown publisher.
+
+Download only from the [official GitHub release](https://github.com/terrorproforma/explore-better/releases/latest), then verify the installer before deciding whether to continue:
+
+```powershell
+Get-FileHash .\ExploreBetter-*-x64-setup.exe -Algorithm SHA256
+```
+
+Compare the result with `SHA256SUMS.txt` from the same release. Do not disable SmartScreen globally or install an untrusted root certificate. The [project website](https://terrorproforma.github.io/explore-better/#download) keeps the current filename, checksum, and expected first-run warning together in one place.
+
+Tagged builds produced by the repository release workflow also receive a GitHub build-provenance attestation. Provenance ties an artifact to its source workflow and commit; it improves traceability but does not replace Authenticode or remove the Windows warning.
 
 ### Explorer Integration
 
@@ -143,6 +153,16 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 - Custom app-level hotkeys for built-in actions, tools, and scripts.
 - Open With presets and extension-matched quick launchers.
 
+### Per-Tab Integrated Terminals
+
+- One lazy ConPTY terminal for every file tab, rendered with xterm.js in a resizable drawer below its pane.
+- Independent left and right terminals that stay alive, retain output, and return with their tab while the app is open.
+- PowerShell 7 discovery with Windows PowerShell and Command Prompt fallbacks.
+- New terminals start in the tab's folder and can follow later pane navigation when the shell is idle.
+- Search, clear, restart, profile selection, external launch, drag-and-drop path quoting, and an explicit **Open terminal folder in pane** action.
+- Dark, Light, and High Contrast themes plus configurable font size, cursor, and scrollback.
+- Optional administrator terminals through a narrow one-session UAC broker; the main app and local backend remain non-elevated.
+
 ### Windows Shell And Explorer Replacement
 
 - Navigator access to This PC, drives, libraries, Network, Recycle Bin, and discovered shell locations.
@@ -179,9 +199,10 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 5. Use `F5` to copy or `F6` to move the current selection to the opposite pane.
 6. Open **Ops** to inspect progress, retry remaining work, recover an interrupted operation, or undo a supported action.
 7. Open **Disk Map** to scan the active folder and drill into its largest branches.
-8. Open **Command** or press `Ctrl+P` to find every action without exposing every control in the toolbar.
+8. Choose the terminal icon in either pane, or press `Ctrl+Backquote`, to open that tab's shell in its current folder.
+9. Open **Command** or press `Ctrl+P` to find every action without exposing every control in the toolbar.
 
-The [user manual](USER_MANUAL.md) covers all primary controls, keyboard workflows, resizing, file operations, Disk Map, scripting, recovery, and Explorer integration.
+The [user manual](USER_MANUAL.md) covers all primary controls, keyboard workflows, per-tab terminals, resizing, file operations, Disk Map, scripting, recovery, and Explorer integration.
 
 ## Project Architecture
 
@@ -189,8 +210,11 @@ The [user manual](USER_MANUAL.md) covers all primary controls, keyboard workflow
 | --- | --- | --- |
 | Electron desktop shell | `electron-main.mjs` | Native window, backend supervision, single-instance routing, updater bridge, and external URL policy |
 | Renderer bridge | `electron-preload.cjs` | Narrow desktop capabilities exposed to the local UI |
+| Terminal service | `terminal-service.mjs` | Per-tab ConPTY ownership, shell discovery, folder synchronization, IPC isolation, and elevated-session brokering |
 | Local backend | `server.mjs` | Filesystem providers, operations, recovery, indexing, search, Analyzer, shell integration, and API security |
 | User interface | `public/` | Dual-pane workspace, dialogs, Disk Map, command system, and virtualized lists |
+| Public landing page | [`site/`](site/) | Static product website deployed through GitHub Pages |
+| Release provenance | [`.github/workflows/release.yml`](.github/workflows/release.yml) | Draft release builds, SHA-256 manifests, and GitHub artifact attestations |
 | Native filesystem helper | `native/fshelper/` | Go Win32 enumeration, allocation data, tree scans, progress, and cancellation |
 | Verification fleet | `scripts/` | Security, operations, performance, package, updater, shell, layout, and acceptance checks |
 

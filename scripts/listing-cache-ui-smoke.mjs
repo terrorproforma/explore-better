@@ -137,6 +137,8 @@ function markdownReport(report) {
   const rows = report.checks
     .map((item) => `| ${item.status.toUpperCase()} | ${item.id} | ${item.detail.replace(/\|/g, "\\|")} |`)
     .join("\n");
+  const cold = report.cold || {};
+  const warm = report.warm || {};
   return `# Listing Cache UI Smoke
 
 Generated: ${report.generatedAt}
@@ -151,8 +153,8 @@ ${rows}
 
 | Phase | Source | Pane Items | Live Load | Status |
 | --- | --- | --- | --- | --- |
-| Cold | ${report.cold.source} | ${report.cold.paneItems} | ${report.cold.liveLoadMs ?? "n/a"} ms | ${report.cold.statusText.replace(/\|/g, "\\|")} |
-| Warm Revisit | ${report.warm.source} | ${report.warm.paneItems} | ${report.warm.liveLoadMs ?? "n/a"} ms | ${report.warm.statusText.replace(/\|/g, "\\|")} |
+| Cold | ${cold.source || "n/a"} | ${cold.paneItems || "n/a"} | ${cold.liveLoadMs ?? "n/a"} ms | ${String(cold.statusText || "n/a").replace(/\|/g, "\\|")} |
+| Warm Revisit | ${warm.source || "n/a"} | ${warm.paneItems || "n/a"} | ${warm.liveLoadMs ?? "n/a"} ms | ${String(warm.statusText || "n/a").replace(/\|/g, "\\|")} |
 `;
 }
 
@@ -220,7 +222,13 @@ async function main() {
     if (childCount !== 1) {
       throw new Error(`Expected one ${childFolderName} row, found ${childCount}.`);
     }
-    await childRow.dblclick();
+    const childBox = await childRow.boundingBox();
+    if (!childBox) throw new Error(`Could not locate ${childFolderName} for a physical double-click.`);
+    const clickPoint = {
+      x: childBox.x + Math.min(40, childBox.width / 2),
+      y: childBox.y + childBox.height / 2
+    };
+    await page.mouse.dblclick(clickPoint.x, clickPoint.y, { delay: 40 });
     await page.waitForFunction(
       (expectedPath) => document.querySelector('[data-path-input="left"]')?.value === expectedPath,
       childFolder,
@@ -273,6 +281,13 @@ async function main() {
     check(checks, "missing-path-preserves-list", missingPathState.rows === 4, `${missingPathState.rows} rows`);
     check(checks, "browser-console-clean", pageErrors.length === 0, `${pageErrors.length} page error(s).`);
   } catch (error) {
+    navigation.failureSnapshot = await page?.evaluate(() => ({
+      leftPath: document.querySelector('[data-path-input="left"]')?.value || "",
+      status: document.querySelector("#status-pill")?.textContent || "",
+      toast: document.querySelector("#toast")?.textContent || "",
+      selected: document.querySelector('.pane[data-pane="left"] [data-entry-path][aria-selected="true"]')?.dataset?.entryPath || "",
+      selectedKind: document.querySelector('.pane[data-pane="left"] [data-entry-path][aria-selected="true"]')?.dataset?.entryKind || ""
+    })).catch(() => null);
     check(checks, "smoke-execution", false, error.message);
   } finally {
     await browser?.close().catch(() => {});

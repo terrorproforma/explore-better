@@ -6,8 +6,8 @@
   "type": "module",
   "main": "electron-main.mjs",
   "author": "Explore Better",
-  "description": "A fast dual-pane Windows file manager with tabs, scripting, transactional operations, Explorer integration, and a visual disk analyzer.",
-  "homepage": "https://github.com/terrorproforma/explore-better",
+  "description": "A fast dual-pane Windows file manager with tabs, per-tab terminals, transactional operations, Explorer integration, and a visual disk analyzer.",
+  "homepage": "https://terrorproforma.github.io/explore-better/",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/terrorproforma/explore-better.git"
@@ -16,14 +16,21 @@
     "url": "https://github.com/terrorproforma/explore-better/issues"
   },
   "scripts": {
+    "prestart": "npm run build:renderer",
     "start": "node server.mjs",
+    "predesktop": "npm run build:renderer",
     "desktop": "electron .",
     "desktop:smoke": "electron . --smoke",
     "desktop:smoke-window": "electron . --smoke --smoke-window",
     "desktop:smoke-backend-restart": "electron . --smoke --smoke-window --smoke-backend-restart",
     "desktop:smoke-update-feed": "electron . --smoke --smoke-window --smoke-update-feed",
+    "desktop:smoke-terminal": "electron . --smoke --smoke-window --smoke-terminal",
+    "desktop:smoke-terminal-security": "electron . --smoke --smoke-window --smoke-terminal-security",
     "build:icon": "node scripts/generate-icon.mjs",
     "build:native-helper": "node scripts/build-native-helper.mjs",
+    "build:app": "node scripts/build-app.mjs",
+    "build:terminal": "node scripts/build-terminal.mjs",
+    "build:renderer": "npm run build:app && npm run build:terminal",
     "perf:bench": "node scripts/perf-benchmark.mjs",
     "perf:bench:100k": "node scripts/perf-benchmark.mjs --counts 1000,10000,100000",
     "perf:guard": "node scripts/perf-guard.mjs",
@@ -65,6 +72,7 @@
     "verify:no-admin-access": "node scripts/no-admin-access-smoke.mjs",
     "verify:native-helper": "node scripts/native-helper-smoke.mjs",
     "verify:packaged-native-helper": "node scripts/packaged-native-helper-smoke.mjs",
+    "verify:packaged-terminal": "node scripts/packaged-terminal-smoke.mjs",
     "verify:native-listing-provider": "node scripts/native-listing-provider-smoke.mjs",
     "verify:path-diagnostics": "node scripts/path-diagnostics-smoke.mjs",
     "verify:real-paths": "node scripts/real-paths-verify.mjs",
@@ -86,6 +94,8 @@
     "verify:production-signing": "node scripts/production-signing-smoke.mjs",
     "verify:production-readiness": "node scripts/production-readiness-smoke.mjs",
     "build:update-feed": "node scripts/generate-update-feed.mjs",
+    "build:release-checksums": "node scripts/generate-release-checksums.mjs",
+    "verify:release-checksums": "node scripts/generate-release-checksums.mjs --check",
     "verify:release-update-feed": "node scripts/generate-update-feed.mjs",
     "verify:release-update-feed-desktop": "node scripts/release-update-feed-desktop-smoke.mjs",
     "verify:release-bundle": "node scripts/release-bundle-manifest-smoke.mjs",
@@ -130,11 +140,12 @@
     "verify:keyboard-workflows-ui": "node scripts/keyboard-workflows-ui-smoke.mjs",
     "verify:command-center-ui": "node scripts/command-center-ui-smoke.mjs",
     "verify:accessibility": "node scripts/accessibility-verify.mjs",
-    "prepackage:dir": "npm run build:native-helper",
+    "verify:terminal": "node scripts/terminal-verify.mjs",
+    "prepackage:dir": "npm run build:renderer && npm run build:native-helper",
     "package:dir": "electron-builder --dir",
-    "prepackage:win": "npm run build:native-helper",
+    "prepackage:win": "npm run build:renderer && npm run build:native-helper",
     "package:win": "electron-builder --win portable",
-    "prepackage:installer": "npm run build:native-helper",
+    "prepackage:installer": "npm run build:renderer && npm run build:native-helper",
     "package:installer": "electron-builder --win nsis"
   },
   "engines": {
@@ -143,12 +154,14 @@
   "devDependencies": {
     "electron": "^42.6.1",
     "electron-builder": "^26.15.3",
+    "esbuild": "0.28.1",
     "lucide-static": "^1.24.0",
     "playwright-core": "^1.61.1"
   },
   "build": {
     "appId": "io.github.terrorproforma.explorebetter",
     "productName": "Explore Better",
+    "npmRebuild": false,
     "directories": {
       "output": "dist"
     },
@@ -161,11 +174,13 @@
     "files": [
       "electron-main.mjs",
       "electron-preload.cjs",
+      "terminal-service.mjs",
       "server.mjs",
       "native/bin/**/*",
       "public/**/*",
       "README.md",
       "USER_MANUAL.md",
+      "RELEASE_NOTES.md",
       "package.json"
     ],
     "extraResources": [
@@ -173,6 +188,9 @@
         "from": "native/bin/explore-better-fs.exe",
         "to": "native/explore-better-fs.exe"
       }
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
     ],
     "win": {
       "icon": "build/icon.ico",
@@ -199,7 +217,12 @@
     }
   },
   "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/addon-webgl": "0.19.0",
+    "@xterm/xterm": "6.0.0",
     "electron-updater": "^6.8.9",
+    "node-pty": "1.1.0",
     "yauzl": "^3.4.0"
   }
 }

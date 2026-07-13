@@ -10,6 +10,59 @@ const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const paneValueCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
 let serverOutput = "";
 
+function cpuTimesSnapshot() {
+  return os.cpus().reduce(
+    (totals, cpu) => {
+      const times = Object.values(cpu.times).reduce((sum, value) => sum + value, 0);
+      totals.idle += cpu.times.idle;
+      totals.total += times;
+      return totals;
+    },
+    { idle: 0, total: 0 }
+  );
+}
+
+function cpuLoadBetween(start, end) {
+  const total = end.total - start.total;
+  const idle = end.idle - start.idle;
+  return total > 0 ? Math.round((100 - (idle / total) * 100) * 10) / 10 : null;
+}
+
+function loadProfile(cpuPercent) {
+  if (!Number.isFinite(cpuPercent)) return "unknown";
+  if (cpuPercent < 20) return "light";
+  if (cpuPercent < 50) return "moderate";
+  return "heavy";
+}
+
+function pathWithin(candidate, parent) {
+  if (!candidate || !parent) return false;
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function benchmarkEnvironment(targetPath, startedAt, cpuStarted) {
+  const stat = await fs.statfs(targetPath).catch(() => null);
+  const oneDriveRoots = [process.env.OneDrive, process.env.OneDriveConsumer, process.env.OneDriveCommercial].filter(Boolean);
+  const systemCpuLoadPercent = cpuLoadBetween(cpuStarted, cpuTimesSnapshot());
+  return {
+    cpuModel: os.cpus()[0]?.model || "unknown",
+    systemCpuLoadPercent,
+    activeProcessLoad: loadProfile(systemCpuLoadPercent),
+    measuredDurationMs: Math.round((performance.now() - startedAt) * 10) / 10,
+    volume: {
+      root: path.parse(path.resolve(targetPath)).root,
+      fileSystemType: stat ? `0x${(Number(stat.type) >>> 0).toString(16)}` : "unknown",
+      blockSize: stat ? Number(stat.bsize) : null
+    },
+    oneDrive: {
+      configured: oneDriveRoots.length > 0,
+      workspaceWithinSyncRoot: oneDriveRoots.some((root) => pathWithin(workspace, root)),
+      fixtureWithinSyncRoot: oneDriveRoots.some((root) => pathWithin(targetPath, root))
+    }
+  };
+}
+
 function optionValue(name, fallback = "") {
   const prefix = `${name}=`;
   const inline = process.argv.find((arg) => arg.startsWith(prefix));
@@ -459,6 +512,8 @@ Notes:
 }
 
 async function main() {
+  const benchmarkStartedAt = performance.now();
+  const cpuStarted = cpuTimesSnapshot();
   await fs.mkdir(artifactsDir, { recursive: true });
   const counts = parseCounts();
   if (!counts.length) {
@@ -616,11 +671,13 @@ async function main() {
       }
     }
 
+    const environment = await benchmarkEnvironment(fixtureRoot, benchmarkStartedAt, cpuStarted);
     const report = {
       generatedAt: new Date().toISOString(),
       platform: process.platform,
       cpuCount: os.cpus().length,
       node: process.version,
+      environment,
       fixtureRoot,
       appData,
       baseUrl,

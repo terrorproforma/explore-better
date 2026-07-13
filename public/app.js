@@ -37,6 +37,7 @@ const app = {
   dockDrag: null,
   fileClipboard: { mode: null, paths: [], sourcePane: null, sourcePath: null, capturedAt: null },
   inlineRename: null,
+  lastEntryClick: null,
   lastEntryOpen: null,
   layoutResize: null,
   quickSearch: { paneName: null, mode: "filter", query: "", activeIndex: 0 },
@@ -88,6 +89,16 @@ const app = {
   textEditor: null,
   viewer: { paneName: "left", path: null, entries: [], index: -1, preview: null },
   commandPalette: { items: [], activeIndex: 0, view: "all", pins: new Set(), recents: [], loaded: false },
+  terminals: {
+    capabilities: null,
+    capabilitiesPromise: null,
+    rendererPromise: null,
+    sessions: new Map(),
+    bySessionId: new Map(),
+    earlyEvents: new Map(),
+    visible: { left: false, right: false },
+    unsubscribe: null
+  },
   operationDetails: { id: null, selectedRemaining: new Set(), selectedBackups: new Set() },
   fileBasket: { selected: new Set() },
   trashBrowser: {
@@ -123,6 +134,9 @@ const app = {
   operationPollBusy: false,
   autoRefreshTimer: null,
   autoRefreshBusy: false,
+  inspectorVirtualRefreshTimer: null,
+  inspectorPresenceTimer: null,
+  entryFocusTimer: null,
   typeahead: { paneName: null, value: "", lastAt: 0 },
   toastTimer: null,
   saveTimer: null,
@@ -224,7 +238,9 @@ const layoutSizeDefaults = {
   rightPaneWeight: 1,
   topPaneWeight: 1,
   bottomPaneWeight: 1,
-  dockHeight: 44
+  dockHeight: 44,
+  leftTerminalHeight: 220,
+  rightTerminalHeight: 220
 };
 const virtualRenderThreshold = 1800;
 const virtualOverscanRows = 14;
@@ -470,6 +486,36 @@ const commands = [
     name: "Duplicate tab",
     detail: "Opens the current path in a new tab.",
     run: () => duplicateTab(app.activePane)
+  },
+  {
+    name: "Toggle terminal",
+    detail: "Opens or closes the active pane tab's integrated terminal. Ctrl+`.",
+    run: () => togglePaneTerminal(app.activePane)
+  },
+  {
+    name: "Focus terminal",
+    detail: "Opens and focuses the active pane tab's integrated terminal.",
+    run: () => focusPaneTerminal(app.activePane)
+  },
+  {
+    name: "Restart terminal",
+    detail: "Restarts the active tab terminal with the same profile and privilege level.",
+    run: () => restartPaneTerminal(app.activePane)
+  },
+  {
+    name: "Restart terminal as administrator",
+    detail: "Requests UAC for a new elevated terminal without elevating Explore Better.",
+    run: () => restartPaneTerminal(app.activePane, { elevation: "administrator" })
+  },
+  {
+    name: "Open terminal folder in pane",
+    detail: "Navigates the active file pane to the terminal's current folder.",
+    run: () => openTerminalFolderInPane(app.activePane)
+  },
+  {
+    name: "Open terminal externally",
+    detail: "Opens Windows Terminal or PowerShell in the active tab folder.",
+    run: () => openTerminalExternally(app.activePane)
   },
   {
     name: "Close tab",
@@ -818,6 +864,7 @@ function createPaneState() {
     activeTab: 0,
     tabs: [
       {
+        id: runtimeTabId(),
         path: "",
         entries: [],
         selected: new Set(),
@@ -856,7 +903,13 @@ function createPaneState() {
 
 function tabOf(paneName) {
   const pane = panes[paneName];
-  return pane.tabs[pane.activeTab];
+  const tab = pane.tabs[pane.activeTab];
+  if (tab && !tab.id) tab.id = runtimeTabId();
+  return tab;
+}
+
+function runtimeTabId() {
+  return globalThis.crypto?.randomUUID?.() || `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function otherPane(paneName) {
@@ -1255,7 +1308,9 @@ function normalizeLayoutSizes(source = {}) {
     rightPaneWeight: clampNumber(raw.rightPaneWeight, 0.45, 3.5, layoutSizeDefaults.rightPaneWeight),
     topPaneWeight: clampNumber(raw.topPaneWeight, 0.45, 3.5, layoutSizeDefaults.topPaneWeight),
     bottomPaneWeight: clampNumber(raw.bottomPaneWeight, 0.45, 3.5, layoutSizeDefaults.bottomPaneWeight),
-    dockHeight: clampNumber(raw.dockHeight, 34, 280, layoutSizeDefaults.dockHeight)
+    dockHeight: clampNumber(raw.dockHeight, 34, 280, layoutSizeDefaults.dockHeight),
+    leftTerminalHeight: clampNumber(raw.leftTerminalHeight, 140, 720, layoutSizeDefaults.leftTerminalHeight),
+    rightTerminalHeight: clampNumber(raw.rightTerminalHeight, 140, 720, layoutSizeDefaults.rightTerminalHeight)
   };
 }
 
@@ -1301,19 +1356,30 @@ async function request(url, options = {}) {
   if (shouldWatchOperation && app.state) {
     scheduleOperationPoll(200);
   }
-  const response = await fetch(url, {
-    ...fetchOptions,
-    headers: {
-      "content-type": "application/json",
-      ...(fetchOptions.headers || {})
+  const initialListing = method === "GET" && window.__exploreBetterInitialListing?.route === url
+    ? window.__exploreBetterInitialListing
+    : null;
+  let parsed;
+  if (initialListing) {
+    delete window.__exploreBetterInitialListing;
+    const result = await initialListing.promise;
+    if (!result.ok) throw result.error;
+    parsed = result.data;
+  } else {
+    const response = await fetch(url, {
+      ...fetchOptions,
+      headers: {
+        "content-type": "application/json",
+        ...(fetchOptions.headers || {})
+      }
+    });
+    const text = await response.text();
+    parsed = text ? JSON.parse(text) : {};
+    if (!response.ok) {
+      throw new Error(parsed.error || `Request failed: ${response.status}`);
     }
-  });
-  const text = await response.text();
-  const parsed = text ? JSON.parse(text) : {};
-  const data = expandCompactDirectoryListing(parsed);
-  if (!response.ok) {
-    throw new Error(data.error || `Request failed: ${response.status}`);
   }
+  const data = expandCompactDirectoryListing(parsed);
   if (shouldInvalidateListingCache(method, pathname, invalidateListingCache)) {
     clearListingCache();
   }
@@ -1390,6 +1456,7 @@ function expandCompactDirectoryListing(data) {
 
 function normalizeSavedTab(savedTab, fallbackPath) {
   return {
+    id: runtimeTabId(),
     path: savedTab?.path || fallbackPath || "",
     entries: [],
     selected: new Set(),
@@ -1666,7 +1733,9 @@ async function loadStartupPane(paneName, targetPath, fallbackPath, { allowRecove
           save: false,
           preserveSelection: false
         });
-        showToast(`${paneName === "left" ? "Left" : "Right"} pane recovered to ${candidate}`);
+        const recoveryMessage = `${paneName === "left" ? "Left" : "Right"} pane recovered to ${candidate}`;
+        setStatus(recoveryMessage);
+        showToast(recoveryMessage);
         return { recovered: true, path: candidate, missingPath: targetPath };
       } catch (candidateError) {
         if (!missingStartupPathError(candidateError)) {
@@ -2525,6 +2594,10 @@ function applyPaneListing(paneName, tab, data, context = {}) {
   }
   rememberLocation(data.path);
   renderPane(paneName);
+  if (isWindowedListing(data)) {
+    window.dispatchEvent(new Event("explorebetter:first-pane-window"));
+    return { appliedFormat, selectedTargetPath, entries };
+  }
   renderRoots();
   updateSelectionReadout();
   renderInspector();
@@ -5247,6 +5320,7 @@ function renderPane(paneName) {
   updateDualPaneActionChrome();
   renderPaneActivity(paneName);
   renderFileHead(paneName, tab);
+  renderPaneTerminal(paneName);
 
   const list = document.querySelector(`[data-list="${paneName}"]`);
   disconnectThumbnailObserver(paneName);
@@ -5621,6 +5695,7 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
         options,
         cached: true
       });
+      window.dispatchEvent(new Event("explorebetter:first-pane-window"));
       setPaneActivity(paneName, load, "ready", {
         count: entries.length,
         wallMs: performance.now() - load.startedAt,
@@ -5645,6 +5720,7 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
       if (options.save !== false) {
         scheduleStateSave();
       }
+      await syncTerminalAfterNavigation(tab, cached.path);
       await maybeFollowLinkedPane(paneName, linkedPreviousPath, cached.path, options);
       return true;
     }
@@ -5658,6 +5734,9 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
     const windowQuery = windowedListingQuery(plan.query);
     const data = await request(`/api/list?${windowQuery}`, { signal: load.controller.signal });
     if (!isCurrentPaneLoad(paneName, load)) {
+      return false;
+    }
+    if (options.autoRefresh && paneEntryInteractionRecent(paneName)) {
       return false;
     }
     const partial = isWindowedListing(data);
@@ -5748,12 +5827,13 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
   } finally {
     finishPaneLoad(paneName, load);
   }
+  await syncTerminalAfterNavigation(tab, appliedPath || tab.path);
   await maybeFollowLinkedPane(paneName, linkedPreviousPath, appliedPath, options);
   return true;
 }
 
 async function refreshPane(paneName, options = {}) {
-  await loadPane(paneName, tabOf(paneName).path, false, { ...options, forceReload: options.forceReload !== false });
+  return loadPane(paneName, tabOf(paneName).path, false, { ...options, forceReload: options.forceReload !== false });
 }
 
 function selectedEntries(paneName) {
@@ -8388,7 +8468,7 @@ function commitSelectionChange(paneName, options = {}) {
     updatePaneActionAvailability(paneName);
     updateSelectionReadout();
   }
-  renderInspector();
+  renderInspector({ deferPresence: options.deferInspectorPresence === true });
   if (options.focusList !== false) {
     focusPaneList(paneName);
   }
@@ -9616,6 +9696,13 @@ function normalizedKnownSettings(source = app.state?.settings || {}) {
     autoRefresh: source.autoRefresh !== false,
     showHidden: source.showHidden !== false,
     linkedNavigation: source.linkedNavigation === true,
+    terminalDefaultProfile: String(source.terminalDefaultProfile || "auto").slice(0, 80),
+    terminalDefaultElevation: source.terminalDefaultElevation === "administrator" ? "administrator" : "standard",
+    terminalFollowDirectory: source.terminalFollowDirectory !== false,
+    terminalTheme: ["dark", "light", "high-contrast"].includes(source.terminalTheme) ? source.terminalTheme : "dark",
+    terminalFontSize: Math.round(clampNumber(source.terminalFontSize, 10, 20, 12)),
+    terminalCursor: ["block", "bar", "underline"].includes(source.terminalCursor) ? source.terminalCursor : "block",
+    terminalScrollback: Math.round(clampNumber(source.terminalScrollback, 1000, 50000, 10000)),
     layoutSizes: normalizeLayoutSizes(source.layoutSizes),
     toolbarActions: normalizeToolbarActions(source.toolbarActions),
     toolbarOrder: normalizeToolbarOrder(source.toolbarOrder)
@@ -9634,7 +9721,7 @@ function inspectorShouldAutoCollapse() {
   return inspectorEnabled() && currentSettings().inspectorAutoCollapse && selectedPaths(app.activePane).length === 0;
 }
 
-function applyInspectorPresence() {
+function applyInspectorPresence(options = {}) {
   const shell = document.querySelector(".app-shell");
   if (!shell) {
     return;
@@ -9647,11 +9734,14 @@ function applyInspectorPresence() {
     inspector.setAttribute("aria-label", collapsed ? "Preview, waiting for a selection" : "Preview");
   }
   if (changed) {
-    for (const paneName of ["left", "right"]) {
-      if (app.virtualLists[paneName]) {
-        scheduleVirtualFileRender(paneName);
+    clearTimeout(app.inspectorVirtualRefreshTimer);
+    app.inspectorVirtualRefreshTimer = setTimeout(() => {
+      for (const paneName of ["left", "right"]) {
+        if (app.virtualLists[paneName]) {
+          scheduleVirtualFileRender(paneName);
+        }
       }
-    }
+    }, options.virtualRefreshDelay === 0 ? 0 : 650);
   }
 }
 
@@ -9678,6 +9768,12 @@ function applyLayoutSizeVariables(sizes = currentSettings().layoutSizes) {
   const focusedDock = normalizeToolbarActions(currentSettings().toolbarActions).length === 0;
   shell.classList.toggle("dock-focused", focusedDock);
   shell.style.setProperty("--user-dock-height", `${normalized.dockHeight}px`);
+  for (const paneName of ["left", "right"]) {
+    const pane = document.querySelector(`.pane[data-pane="${paneName}"]`);
+    const key = paneName === "left" ? "leftTerminalHeight" : "rightTerminalHeight";
+    const maxHeight = Math.max(140, Math.floor((pane?.getBoundingClientRect().height || 1200) * 0.6));
+    pane?.style.setProperty("--terminal-height", `${clampNumber(normalized[key], 140, maxHeight, 220)}px`);
+  }
   for (const paneName of ["left", "right"]) {
     if (app.virtualLists[paneName]) {
       scheduleVirtualFileRender(paneName);
@@ -9718,13 +9814,14 @@ function beginLayoutResize(event, kind) {
     rightWidth: rightRect?.width || 0,
     topHeight: leftRect?.height || 0,
     bottomHeight: rightRect?.height || 0,
+    terminalPaneHeight: kind === "terminal-right" ? rightRect?.height || 0 : leftRect?.height || 0,
     frame: null,
     pendingSizes: null
   };
   app.layoutResize.handle?.setPointerCapture?.(event.pointerId);
   app.layoutResize.handle?.classList.add("dragging");
   document.body.classList.add("resizing-layout");
-  document.body.classList.toggle("resizing-rows", kind === "paneRows" || kind === "dock");
+  document.body.classList.toggle("resizing-rows", kind === "paneRows" || kind === "dock" || kind.startsWith("terminal-"));
   event.preventDefault();
   event.stopPropagation();
   return true;
@@ -9791,6 +9888,10 @@ function updateLayoutResize(event) {
     sizes.bottomPaneWeight = pair.secondary;
   } else if (session.kind === "dock") {
     sizes.dockHeight = clampNumber(session.startSizes.dockHeight - dy, 34, 280, session.startSizes.dockHeight);
+  } else if (session.kind === "terminal-left" || session.kind === "terminal-right") {
+    const key = session.kind === "terminal-left" ? "leftTerminalHeight" : "rightTerminalHeight";
+    const maxHeight = Math.max(140, Math.floor(session.terminalPaneHeight * 0.6));
+    sizes[key] = clampNumber(session.startSizes[key] - dy, 140, maxHeight, session.startSizes[key]);
   }
   applyLayoutResizeDraft(sizes);
   event.preventDefault();
@@ -10094,7 +10195,7 @@ function setupDockOverflow() {
   dockOverflowResizeObserver = new ResizeObserver(scheduleDockOverflowUpdate);
   dockOverflowResizeObserver.observe(strip);
   dockOverflowResizeObserver.observe(dock);
-  scheduleDockOverflowUpdate();
+  updateDockOverflow();
 }
 
 function renderToolbarDialog() {
@@ -10192,6 +10293,13 @@ function renderPreferencesDialog() {
   document.getElementById("preference-confirm-trash").checked = settings.confirmTrash;
   document.getElementById("preference-launch-mode").value = settings.launchMode;
   document.getElementById("preference-shell-open-mode").value = settings.shellOpenMode;
+  renderTerminalProfileChoices();
+  document.getElementById("preference-terminal-elevation").value = settings.terminalDefaultElevation;
+  document.getElementById("preference-terminal-theme").value = settings.terminalTheme;
+  document.getElementById("preference-terminal-font-size").value = settings.terminalFontSize;
+  document.getElementById("preference-terminal-cursor").value = settings.terminalCursor;
+  document.getElementById("preference-terminal-scrollback").value = settings.terminalScrollback;
+  document.getElementById("preference-terminal-follow").checked = settings.terminalFollowDirectory;
   renderPreferencesSummary(settings);
 }
 
@@ -10266,6 +10374,13 @@ function preferencesSettingsFromForm() {
     confirmTrash: document.getElementById("preference-confirm-trash").checked,
     launchMode: document.getElementById("preference-launch-mode").value,
     shellOpenMode: document.getElementById("preference-shell-open-mode").value,
+    terminalDefaultProfile: document.getElementById("preference-terminal-profile").value,
+    terminalDefaultElevation: document.getElementById("preference-terminal-elevation").value,
+    terminalFollowDirectory: document.getElementById("preference-terminal-follow").checked,
+    terminalTheme: document.getElementById("preference-terminal-theme").value,
+    terminalFontSize: document.getElementById("preference-terminal-font-size").value,
+    terminalCursor: document.getElementById("preference-terminal-cursor").value,
+    terminalScrollback: document.getElementById("preference-terminal-scrollback").value,
     layoutSizes: currentSettings().layoutSizes,
     toolbarActions: currentSettings().toolbarActions,
     toolbarOrder: currentSettings().toolbarOrder
@@ -10289,6 +10404,13 @@ function defaultPreferenceSettings() {
     autoRefresh: true,
     showHidden: true,
     linkedNavigation: false,
+    terminalDefaultProfile: "auto",
+    terminalDefaultElevation: "standard",
+    terminalFollowDirectory: true,
+    terminalTheme: "dark",
+    terminalFontSize: 12,
+    terminalCursor: "block",
+    terminalScrollback: 10000,
     layoutSizes: normalizeLayoutSizes(),
     toolbarActions: [],
     toolbarOrder: []
@@ -10328,6 +10450,7 @@ async function saveSettingsPatch(patch, options = {}) {
   renderPreferencesDialog();
   renderBackupDialog();
   renderIntegration();
+  applyTerminalPreferencesToSessions();
   if (previous.autoRefresh !== next.autoRefresh) {
     scheduleAutoRefresh(next.autoRefresh ? 250 : null);
   }
@@ -10508,13 +10631,19 @@ function previewActionBar(preview, extraMarkup = "") {
   return `<div class="preview-actions">${previewViewerButton(preview)}${extraMarkup}</div>`;
 }
 
-async function renderInspector() {
+async function renderInspector(options = {}) {
   const inspector = document.getElementById("inspector");
   const body = inspector.querySelector(".inspector-body");
   const renderToken = ++app.inspectorRenderToken;
   app.inspectorPreviewController?.abort();
   app.inspectorPreviewController = null;
-  applyInspectorPresence();
+  if (options.deferPresence) {
+    clearTimeout(app.inspectorPresenceTimer);
+    app.inspectorPresenceTimer = setTimeout(() => applyInspectorPresence({ virtualRefreshDelay: 0 }), 650);
+  } else {
+    clearTimeout(app.inspectorPresenceTimer);
+    applyInspectorPresence();
+  }
   if (!inspectorEnabled()) {
     body.innerHTML = `<div class="muted">Preview disabled</div>`;
     return;
@@ -10992,7 +11121,7 @@ async function saveTextEditor(force = false) {
   showToast("Text saved");
 }
 
-function selectEntry(paneName, entryPath, event = {}) {
+function selectEntry(paneName, entryPath, event = {}, options = {}) {
   app.activePane = paneName;
   const tab = tabOf(paneName);
   const entries = visibleEntries(paneName);
@@ -11013,7 +11142,12 @@ function selectEntry(paneName, entryPath, event = {}) {
     tab.selected = new Set([entryPath]);
     tab.anchorPath = entryPath;
   }
-  commitSelectionChange(paneName);
+  commitSelectionChange(paneName, options);
+}
+
+function scheduleEntryPointerFocus(paneName) {
+  clearTimeout(app.entryFocusTimer);
+  app.entryFocusTimer = setTimeout(() => focusPaneList(paneName), 650);
 }
 
 function entryOpenRecently(paneName, entryPath) {
@@ -13178,6 +13312,7 @@ function duplicateTab(paneName) {
   const pane = panes[paneName];
   const current = tabOf(paneName);
   pane.tabs.push({
+    id: runtimeTabId(),
     path: current.path,
     entries: current.entries,
     selected: new Set(),
@@ -13210,6 +13345,7 @@ function duplicateTab(paneName) {
   pane.activeTab = pane.tabs.length - 1;
   app.activePane = paneName;
   renderPane(paneName);
+  if (app.terminals.visible[paneName]) ensureTerminalForPane(paneName).catch((error) => showToast(error.message));
   scheduleStateSave();
   focusPaneList(paneName);
   return true;
@@ -13217,6 +13353,7 @@ function duplicateTab(paneName) {
 
 function tabShellForPath(sourceTab, targetPath) {
   return {
+    id: runtimeTabId(),
     path: targetPath,
     entries: [],
     selected: new Set(),
@@ -13312,6 +13449,7 @@ async function activateTab(paneName, tabIndex) {
   renderAll();
   renderRoots();
   renderInspector();
+  if (app.terminals.visible[paneName]) await ensureTerminalForPane(paneName);
   scheduleStateSave();
   focusPaneList(paneName);
   return true;
@@ -13330,7 +13468,7 @@ async function cyclePaneTab(paneName, direction = 1) {
   return activateTab(paneName, nextIndex);
 }
 
-function closeTab(paneName, tabIndex = panes[paneName]?.activeTab || 0) {
+async function closeTab(paneName, tabIndex = panes[paneName]?.activeTab || 0) {
   if (!isPaneName(paneName)) {
     return false;
   }
@@ -13340,6 +13478,8 @@ function closeTab(paneName, tabIndex = panes[paneName]?.activeTab || 0) {
     return false;
   }
   const closeIndex = Math.max(0, Math.min(Number(tabIndex) || 0, pane.tabs.length - 1));
+  const targetTab = pane.tabs[closeIndex];
+  if (!(await disposeTerminalForTab(targetTab))) return false;
   const [closedTab] = pane.tabs.splice(closeIndex, 1);
   rememberClosedTab(paneName, closedTab);
   if (pane.activeTab > closeIndex) {
@@ -13351,6 +13491,7 @@ function closeTab(paneName, tabIndex = panes[paneName]?.activeTab || 0) {
   renderPane(paneName);
   renderRoots();
   renderInspector();
+  if (app.terminals.visible[paneName]) await ensureTerminalForPane(paneName);
   scheduleStateSave();
   focusPaneList(paneName);
   showToast(`Closed ${closedTab.title || labelForPath(closedTab.path)}`);
@@ -15577,6 +15718,11 @@ function signatureChanged(previous, next) {
   return previous.signature !== next.signature || previous.truncated !== next.truncated;
 }
 
+function paneEntryInteractionRecent(paneName, thresholdMs = 750) {
+  const interaction = app.lastEntryClick;
+  return Boolean(interaction?.paneName === paneName && Date.now() - interaction.at < thresholdMs);
+}
+
 async function pollAutoRefresh({ force = false } = {}) {
   if (app.autoRefreshBusy || !app.state || (!force && (!autoRefreshEnabled() || document.hidden))) {
     return;
@@ -15592,16 +15738,25 @@ async function pollAutoRefresh({ force = false } = {}) {
       const previous = tab.folderSignature;
       const watch = await folderWatchForPath(tab.path, tab.folderWatchVersion);
       if (watch.available) {
-        if (!Number.isFinite(Number(tab.folderWatchVersion))) {
+        if (
+          tab.folderWatchVersion === null ||
+          tab.folderWatchVersion === undefined ||
+          !Number.isFinite(Number(tab.folderWatchVersion))
+        ) {
           tab.folderWatchVersion = Number(watch.version || 0);
           continue;
         }
         if (watch.changed) {
-          await refreshPane(paneName, {
+          if (paneEntryInteractionRecent(paneName)) {
+            continue;
+          }
+          const didRefresh = await refreshPane(paneName, {
             preserveSelection: true,
             save: false,
-            silent: true
+            silent: true,
+            autoRefresh: true
           });
+          if (!didRefresh) continue;
           tab.folderWatchVersion = Number(watch.version || 0);
           refreshed.push(paneName);
         } else {
@@ -15622,11 +15777,16 @@ async function pollAutoRefresh({ force = false } = {}) {
         continue;
       }
       if (signatureChanged(previous, next)) {
-        await refreshPane(paneName, {
+        if (paneEntryInteractionRecent(paneName)) {
+          continue;
+        }
+        const didRefresh = await refreshPane(paneName, {
           preserveSelection: true,
           save: false,
-          silent: true
+          silent: true,
+          autoRefresh: true
         });
+        if (!didRefresh) continue;
         refreshed.push(paneName);
       } else {
         tab.folderSignature = next;
@@ -21483,6 +21643,417 @@ async function runScript() {
   });
 }
 
+function desktopTerminalBridge() {
+  return window.exploreBetterDesktop?.terminal || null;
+}
+
+function terminalViewSettings(settings = currentSettings()) {
+  return {
+    theme: settings.terminalTheme,
+    fontSize: settings.terminalFontSize,
+    cursor: settings.terminalCursor,
+    scrollback: settings.terminalScrollback
+  };
+}
+
+function loadTerminalRenderer() {
+  if (window.ExploreBetterTerminal?.createView) return Promise.resolve(window.ExploreBetterTerminal);
+  if (app.terminals.rendererPromise) return app.terminals.rendererPromise;
+  app.terminals.rendererPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/generated/terminal-renderer.js";
+    script.async = true;
+    script.onload = () => window.ExploreBetterTerminal?.createView
+      ? resolve(window.ExploreBetterTerminal)
+      : reject(new Error("Terminal renderer did not initialize."));
+    script.onerror = () => reject(new Error("Terminal renderer could not be loaded."));
+    document.head.append(script);
+  });
+  return app.terminals.rendererPromise;
+}
+
+async function terminalCapabilities() {
+  if (app.terminals.capabilities) return app.terminals.capabilities;
+  const bridge = desktopTerminalBridge();
+  if (!bridge) return { available: false, profiles: [], elevationAvailable: false };
+  if (!app.terminals.capabilitiesPromise) {
+    app.terminals.capabilitiesPromise = bridge.capabilities().then((capabilities) => {
+      app.terminals.capabilities = capabilities;
+      renderTerminalProfileChoices();
+      return capabilities;
+    });
+  }
+  return app.terminals.capabilitiesPromise;
+}
+
+function terminalProfileOptions(selected = "auto") {
+  const profiles = app.terminals.capabilities?.profiles || [];
+  const choices = [{ id: "auto", label: "Automatic" }, ...profiles];
+  if (selected && !choices.some((item) => item.id === selected)) choices.push({ id: selected, label: selected });
+  return choices.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join("");
+}
+
+function renderTerminalProfileChoices() {
+  const settings = currentSettings();
+  const preference = document.getElementById("preference-terminal-profile");
+  if (preference) {
+    preference.innerHTML = terminalProfileOptions(settings.terminalDefaultProfile);
+    preference.value = settings.terminalDefaultProfile;
+  }
+  for (const paneName of ["left", "right"]) {
+    const select = document.querySelector(`[data-terminal-profile="${paneName}"]`);
+    if (!select) continue;
+    const session = app.terminals.sessions.get(tabOf(paneName)?.id);
+    const selected = session?.profileId || settings.terminalDefaultProfile;
+    select.innerHTML = terminalProfileOptions(selected);
+    select.value = selected;
+  }
+}
+
+function paneNameForTerminalTab(tabId) {
+  for (const paneName of ["left", "right"]) {
+    if (panes[paneName].tabs.some((tab) => tab.id === tabId)) return paneName;
+  }
+  return null;
+}
+
+function activeTerminalSession(paneName = app.activePane) {
+  return app.terminals.sessions.get(tabOf(paneName)?.id) || null;
+}
+
+function renderPaneTerminal(paneName) {
+  const pane = document.querySelector(`.pane[data-pane="${paneName}"]`);
+  const drawer = document.querySelector(`[data-terminal-drawer="${paneName}"]`);
+  const resizer = document.querySelector(`[data-layout-resize="terminal-${paneName}"]`);
+  const toggle = document.querySelector(`[data-terminal-toggle="${paneName}"]`);
+  if (!pane || !drawer || !resizer || !toggle) return;
+  const visible = app.terminals.visible[paneName] === true;
+  pane.classList.toggle("terminal-open", visible);
+  drawer.hidden = !visible;
+  resizer.hidden = !visible;
+  toggle.classList.toggle("active", visible);
+  toggle.setAttribute("aria-pressed", String(visible));
+  if (!visible) return;
+
+  const tab = tabOf(paneName);
+  const session = app.terminals.sessions.get(tab?.id);
+  const host = document.querySelector(`[data-terminal-host="${paneName}"]`);
+  const settings = currentSettings();
+  drawer.classList.toggle("elevated", session?.elevation === "administrator");
+  drawer.classList.toggle("theme-light", settings.terminalTheme === "light");
+  drawer.classList.toggle("theme-high-contrast", settings.terminalTheme === "high-contrast");
+  const elevation = document.querySelector(`[data-terminal-elevation="${paneName}"]`);
+  elevation.hidden = session?.elevation !== "administrator";
+  const adminButton = document.querySelector(`[data-terminal-action="administrator"][data-pane="${paneName}"]`);
+  adminButton?.classList.toggle("active", session?.elevation === "administrator");
+  const title = document.querySelector(`[data-terminal-title="${paneName}"]`);
+  if (title) {
+    const state = session?.starting ? "Starting" : session?.exited ? "Exited" : session?.busy ? "Busy" : "Ready";
+    title.textContent = session ? `${session.profileLabel || "Terminal"} / ${state}` : "Terminal";
+  }
+  const cwd = document.querySelector(`[data-terminal-cwd="${paneName}"]`);
+  if (cwd) {
+    cwd.textContent = session?.cwd || tab?.path || "";
+    cwd.title = session?.cwd || tab?.path || "Terminal folder";
+  }
+  const profile = document.querySelector(`[data-terminal-profile="${paneName}"]`);
+  if (profile) {
+    const selected = session?.profileId || settings.terminalDefaultProfile;
+    if (!profile.options.length || ![...profile.options].some((option) => option.value === selected)) {
+      profile.innerHTML = terminalProfileOptions(selected);
+    }
+    profile.value = selected;
+    profile.disabled = session?.starting === true;
+  }
+  if (host && session?.element) {
+    if (host.firstElementChild !== session.element) host.replaceChildren(session.element);
+    requestAnimationFrame(() => session.view?.fit());
+  } else if (host) {
+    host.innerHTML = `<div class="terminal-placeholder" data-terminal-placeholder="${paneName}">${session?.error ? escapeHtml(session.error) : "Starting terminal..."}</div>`;
+  }
+}
+
+function renderAllTerminals() {
+  renderPaneTerminal("left");
+  renderPaneTerminal("right");
+}
+
+function terminalCreateRequest(tab, session = null, overrides = {}) {
+  const settings = currentSettings();
+  const dimensions = session?.view?.dimensions?.() || { cols: 100, rows: 28 };
+  return {
+    tabId: tab.id,
+    cwd: overrides.cwd || session?.requestedCwd || tab.path,
+    profileId: overrides.profileId || session?.profileId || settings.terminalDefaultProfile,
+    elevation: overrides.elevation || session?.elevation || settings.terminalDefaultElevation,
+    cols: dimensions.cols,
+    rows: dimensions.rows
+  };
+}
+
+function shellQuoteDroppedPath(profileId, value) {
+  const pathValue = String(value || "");
+  if (profileId === "command-prompt") return `"${pathValue.replaceAll('"', '""')}"`;
+  return `'${pathValue.replaceAll("'", "''")}'`;
+}
+
+function insertDroppedTerminalFiles(session, files) {
+  const desktop = window.exploreBetterDesktop;
+  const paths = files.map((file) => desktop?.getPathForFile?.(file)).filter(Boolean);
+  if (!paths.length || !session.sessionId) return;
+  desktopTerminalBridge()?.write(session.sessionId, paths.map((item) => shellQuoteDroppedPath(session.profileId, item)).join(" "));
+}
+
+function queueEarlyTerminalEvent(message) {
+  const sessionId = String(message?.sessionId || "");
+  if (!sessionId) return;
+  const queue = app.terminals.earlyEvents.get(sessionId) || [];
+  queue.push(message);
+  while (queue.length > 64) queue.shift();
+  app.terminals.earlyEvents.set(sessionId, queue);
+}
+
+function handleTerminalEvent(message) {
+  const session = app.terminals.bySessionId.get(String(message?.sessionId || ""));
+  if (!session) return queueEarlyTerminalEvent(message);
+  if (message.type === "data") session.view?.write(message.data);
+  if (message.type === "busy") session.busy = message.busy === true;
+  if (message.type === "cwd") session.cwd = String(message.cwd || session.cwd);
+  if (message.type === "sync-pending") session.requestedCwd = String(message.cwd || "");
+  if (message.type === "error") {
+    session.error = String(message.message || "Terminal error");
+    session.view?.write(`\r\n\x1b[31m${session.error}\x1b[0m\r\n`);
+  }
+  if (message.type === "exit") {
+    session.exited = true;
+    session.busy = false;
+    session.view?.write(`\r\n\x1b[90m[Process exited with code ${Number(message.exitCode || 0)}]\x1b[0m\r\n`);
+    app.terminals.bySessionId.delete(session.sessionId);
+    session.sessionId = "";
+  }
+  const paneName = paneNameForTerminalTab(session.tabId);
+  if (paneName && tabOf(paneName)?.id === session.tabId) renderPaneTerminal(paneName);
+}
+
+function replayEarlyTerminalEvents(sessionId) {
+  const queued = app.terminals.earlyEvents.get(sessionId) || [];
+  app.terminals.earlyEvents.delete(sessionId);
+  queued.forEach(handleTerminalEvent);
+}
+
+async function initializeTerminalBridge() {
+  const bridge = desktopTerminalBridge();
+  if (!bridge) return;
+  if (!app.terminals.unsubscribe) app.terminals.unsubscribe = bridge.onEvent(handleTerminalEvent);
+  await terminalCapabilities();
+}
+
+async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides = {}) {
+  const bridge = desktopTerminalBridge();
+  if (!bridge) return null;
+  if (app.terminals.sessions.has(tab.id)) return app.terminals.sessions.get(tab.id);
+  await terminalCapabilities();
+  const element = document.createElement("div");
+  element.className = "terminal-session-surface";
+  const session = {
+    tabId: tab.id,
+    paneName,
+    sessionId: "",
+    profileId: overrides.profileId || currentSettings().terminalDefaultProfile,
+    profileLabel: "Terminal",
+    elevation: overrides.elevation || currentSettings().terminalDefaultElevation,
+    cwd: tab.path,
+    requestedCwd: tab.path,
+    busy: false,
+    starting: true,
+    exited: false,
+    error: "",
+    element,
+    view: null
+  };
+  app.terminals.sessions.set(tab.id, session);
+  renderPaneTerminal(paneName);
+  const createPromise = bridge.create(terminalCreateRequest(tab, session, overrides));
+  try {
+    const [loadedRenderer, metadata] = await Promise.all([loadTerminalRenderer(), createPromise]);
+    session.view = loadedRenderer.createView({
+      host: element,
+      settings: terminalViewSettings(),
+      onInput: (data) => session.sessionId && bridge.write(session.sessionId, data),
+      onResize: (cols, rows) => session.sessionId && bridge.resize(session.sessionId, cols, rows),
+      onDropPaths: (files) => insertDroppedTerminalFiles(session, files)
+    });
+    Object.assign(session, metadata, { starting: false, exited: false, error: "" });
+    app.terminals.bySessionId.set(session.sessionId, session);
+    replayEarlyTerminalEvents(session.sessionId);
+    if (session.requestedCwd && session.requestedCwd !== session.cwd && currentSettings().terminalFollowDirectory) {
+      await bridge.syncDirectory(session.sessionId, session.requestedCwd);
+    }
+    renderPaneTerminal(paneName);
+    session.view.focus();
+    return session;
+  } catch (error) {
+    const created = await createPromise.catch(() => null);
+    if (created?.sessionId) await bridge.dispose(created.sessionId).catch(() => false);
+    session.starting = false;
+    session.exited = true;
+    session.error = error.message;
+    session.view?.write(`\x1b[31m${error.message}\x1b[0m\r\n`);
+    renderPaneTerminal(paneName);
+    throw error;
+  }
+}
+
+async function ensureTerminalForPane(paneName) {
+  if (!app.terminals.visible[paneName]) return null;
+  const existing = activeTerminalSession(paneName);
+  if (existing) {
+    renderPaneTerminal(paneName);
+    return existing;
+  }
+  return createTerminalForTab(paneName);
+}
+
+async function openTerminalExternally(paneName = app.activePane) {
+  const pathValue = activeTerminalSession(paneName)?.cwd || tabOf(paneName).path;
+  await request("/api/open-with", { method: "POST", body: JSON.stringify({ mode: "terminal", paths: [pathValue] }) });
+  showToast("External terminal opened");
+}
+
+async function togglePaneTerminal(paneName = app.activePane, force = null) {
+  if (!isPaneName(paneName)) return false;
+  app.activePane = paneName;
+  if (!desktopTerminalBridge()) {
+    await openTerminalExternally(paneName);
+    return false;
+  }
+  const opening = typeof force === "boolean" ? force : !app.terminals.visible[paneName];
+  if (!opening) {
+    const closed = await closePaneTerminal(paneName, { hideDrawer: true });
+    if (!closed) return false;
+  } else {
+    app.terminals.visible[paneName] = true;
+    renderPaneTerminal(paneName);
+    await ensureTerminalForPane(paneName);
+  }
+  return true;
+}
+
+async function focusPaneTerminal(paneName = app.activePane) {
+  if (!app.terminals.visible[paneName]) await togglePaneTerminal(paneName, true);
+  activeTerminalSession(paneName)?.view?.focus();
+}
+
+async function disposeTerminalForTab(tab, { confirmBusy = true } = {}) {
+  const session = app.terminals.sessions.get(tab?.id);
+  if (!session) return true;
+  if (confirmBusy && session.busy && !window.confirm("This terminal is running a command. Close it and its child processes?")) return false;
+  if (session.sessionId) {
+    await desktopTerminalBridge()?.dispose(session.sessionId).catch(() => false);
+    app.terminals.bySessionId.delete(session.sessionId);
+  }
+  session.view?.dispose();
+  session.element?.remove();
+  app.terminals.sessions.delete(tab.id);
+  return true;
+}
+
+async function closePaneTerminal(paneName = app.activePane, { hideDrawer = true } = {}) {
+  const tab = tabOf(paneName);
+  if (!(await disposeTerminalForTab(tab))) return false;
+  if (hideDrawer) app.terminals.visible[paneName] = false;
+  renderPaneTerminal(paneName);
+  focusPaneList(paneName);
+  return true;
+}
+
+async function restartPaneTerminal(paneName = app.activePane, overrides = {}) {
+  const tab = tabOf(paneName);
+  let session = activeTerminalSession(paneName);
+  if (!session || !session.sessionId) {
+    if (session) {
+      session.view?.dispose();
+      app.terminals.sessions.delete(tab.id);
+    }
+    app.terminals.visible[paneName] = true;
+    return createTerminalForTab(paneName, tab, overrides);
+  }
+  const bridge = desktopTerminalBridge();
+  const oldSessionId = session.sessionId;
+  session.view.write("\r\n\x1b[90m[Restarting terminal...]\x1b[0m\r\n");
+  session.starting = true;
+  renderPaneTerminal(paneName);
+  try {
+    const metadata = await bridge.restart(oldSessionId, terminalCreateRequest(tab, session, overrides));
+    app.terminals.bySessionId.delete(oldSessionId);
+    Object.assign(session, metadata, { starting: false, exited: false, error: "", busy: false });
+    app.terminals.bySessionId.set(session.sessionId, session);
+    replayEarlyTerminalEvents(session.sessionId);
+    renderPaneTerminal(paneName);
+    session.view.focus();
+    return session;
+  } catch (error) {
+    session.starting = false;
+    session.error = error.message;
+    session.view.write(`\x1b[31m${error.message}\x1b[0m\r\n`);
+    renderPaneTerminal(paneName);
+    throw error;
+  }
+}
+
+async function syncTerminalAfterNavigation(tab, targetPath) {
+  const session = app.terminals.sessions.get(tab?.id);
+  if (!session || !targetPath || !currentSettings().terminalFollowDirectory) return;
+  session.requestedCwd = targetPath;
+  if (!session.sessionId || session.exited) return;
+  try {
+    await desktopTerminalBridge()?.syncDirectory(session.sessionId, targetPath);
+  } catch (error) {
+    session.error = error.message;
+    const paneName = paneNameForTerminalTab(tab.id);
+    if (paneName) renderPaneTerminal(paneName);
+  }
+}
+
+async function openTerminalFolderInPane(paneName = app.activePane) {
+  const session = activeTerminalSession(paneName);
+  if (!session?.cwd) return showToast("Terminal folder is not available yet");
+  await loadPane(paneName, session.cwd);
+  focusPaneList(paneName);
+}
+
+function searchPaneTerminal(paneName, next = false) {
+  const panel = document.querySelector(`[data-terminal-search-panel="${paneName}"]`);
+  const input = document.querySelector(`[data-terminal-search="${paneName}"]`);
+  if (!panel || !input) return;
+  if (!next) {
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) input.focus();
+    return;
+  }
+  if (input.value) activeTerminalSession(paneName)?.view?.searchNext(input.value);
+}
+
+async function handleTerminalAction(action, paneName) {
+  const session = activeTerminalSession(paneName);
+  if (action === "close") return closePaneTerminal(paneName);
+  if (action === "clear") return session?.view?.clear();
+  if (action === "search") return searchPaneTerminal(paneName);
+  if (action === "search-next") return searchPaneTerminal(paneName, true);
+  if (action === "restart") return restartPaneTerminal(paneName);
+  if (action === "administrator") {
+    const elevation = session?.elevation === "administrator" ? "standard" : "administrator";
+    return restartPaneTerminal(paneName, { elevation });
+  }
+  if (action === "external") return openTerminalExternally(paneName);
+  if (action === "open-folder") return openTerminalFolderInPane(paneName);
+}
+
+function applyTerminalPreferencesToSessions() {
+  for (const session of app.terminals.sessions.values()) session.view?.setSettings(terminalViewSettings());
+  renderAllTerminals();
+}
+
 async function handleAction(action, paneName) {
   app.activePane = paneName || app.activePane;
   try {
@@ -21522,6 +22093,7 @@ function wireEvents() {
     handleDesktopShortcutAction(event.detail).catch((error) => showToast(error.message));
   });
   window.addEventListener("resize", () => {
+    applyLayoutSizeVariables();
     for (const paneName of ["left", "right"]) {
       if (app.virtualLists[paneName]) {
         scheduleVirtualFileRender(paneName);
@@ -22023,6 +22595,26 @@ function wireEvents() {
       return;
     }
 
+    const terminalToggle = event.target.closest("[data-terminal-toggle]");
+    if (terminalToggle) {
+      try {
+        await togglePaneTerminal(terminalToggle.dataset.terminalToggle);
+      } catch (error) {
+        showToast(error.message);
+      }
+      return;
+    }
+
+    const terminalAction = event.target.closest("[data-terminal-action]");
+    if (terminalAction) {
+      try {
+        await handleTerminalAction(terminalAction.dataset.terminalAction, terminalAction.dataset.pane);
+      } catch (error) {
+        showToast(error.message);
+      }
+      return;
+    }
+
     const quickSearchModeButton = event.target.closest("[data-quick-search-mode]");
     if (quickSearchModeButton) {
       setQuickSearchMode(quickSearchModeButton.dataset.pane, quickSearchModeButton.dataset.quickSearchMode);
@@ -22099,8 +22691,24 @@ function wireEvents() {
 
     const row = event.target.closest("[data-entry-path]");
     if (row) {
-      if (event.detail >= 2 && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      const now = Date.now();
+      const lastClick = app.lastEntryClick;
+      const repeatedClick = Boolean(
+        lastClick &&
+          lastClick.paneName === row.dataset.pane &&
+          samePath(lastClick.path, row.dataset.entryPath) &&
+          now - lastClick.at < 600
+      );
+      app.lastEntryClick = { paneName: row.dataset.pane, path: row.dataset.entryPath, at: now };
+      if ((event.detail >= 2 || repeatedClick) && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
         event.preventDefault();
+        selectEntry(row.dataset.pane, row.dataset.entryPath, event, {
+          focusList: false,
+          scroll: false,
+          deferInspectorPresence: true
+        });
+        scheduleEntryPointerFocus(row.dataset.pane);
+        await openEntryFromGesture(row.dataset.pane, row.dataset.entryPath, { otherPane: event.altKey });
         return;
       }
       if (
@@ -22112,11 +22720,21 @@ function wireEvents() {
         !event.altKey
       ) {
         event.preventDefault();
-        selectEntry(row.dataset.pane, row.dataset.entryPath, event);
+        selectEntry(row.dataset.pane, row.dataset.entryPath, event, {
+          focusList: false,
+          scroll: false,
+          deferInspectorPresence: true
+        });
+        scheduleEntryPointerFocus(row.dataset.pane);
         await openEntryFromGesture(row.dataset.pane, row.dataset.entryPath);
         return;
       }
-      selectEntry(row.dataset.pane, row.dataset.entryPath, event);
+      selectEntry(row.dataset.pane, row.dataset.entryPath, event, {
+        focusList: false,
+        scroll: false,
+        deferInspectorPresence: true
+      });
+      scheduleEntryPointerFocus(row.dataset.pane);
       return;
     }
 
@@ -22149,7 +22767,7 @@ function wireEvents() {
 
     const closeTabButton = event.target.closest("[data-close-tab]");
     if (closeTabButton) {
-      closeTab(closeTabButton.dataset.pane, closeTabButton.dataset.closeTab);
+      await closeTab(closeTabButton.dataset.pane, closeTabButton.dataset.closeTab);
       return;
     }
 
@@ -22446,6 +23064,16 @@ function wireEvents() {
   });
 
   document.body.addEventListener("change", async (event) => {
+    const terminalProfile = event.target.closest?.("[data-terminal-profile]");
+    if (terminalProfile) {
+      try {
+        await restartPaneTerminal(terminalProfile.dataset.terminalProfile, { profileId: terminalProfile.value });
+      } catch (error) {
+        showToast(error.message);
+        renderPaneTerminal(terminalProfile.dataset.terminalProfile);
+      }
+      return;
+    }
     if (event.target.id === "size-analysis-size-by") {
       setSizeAnalysisMapEncoding({ sizeMode: event.target.value });
       return;
@@ -22606,6 +23234,19 @@ function wireEvents() {
   });
 
   document.body.addEventListener("keydown", async (event) => {
+    const terminalSearch = event.target.closest?.("[data-terminal-search]");
+    if (terminalSearch) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        searchPaneTerminal(terminalSearch.dataset.terminalSearch, true);
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        document.querySelector(`[data-terminal-search-panel="${terminalSearch.dataset.terminalSearch}"]`).hidden = true;
+        activeTerminalSession(terminalSearch.dataset.terminalSearch)?.view?.focus();
+      }
+      return;
+    }
     const inlineRenameInput = event.target.closest?.("[data-inline-rename]");
     if (inlineRenameInput) {
       if (event.key === "Enter") {
@@ -22667,6 +23308,11 @@ function wireEvents() {
       } catch {
         pathInput.value = tabOf(pathInput.dataset.pathInput).path;
       }
+      return;
+    }
+    if (event.ctrlKey && !event.altKey && !event.metaKey && event.code === "Backquote") {
+      event.preventDefault();
+      await togglePaneTerminal(app.activePane);
       return;
     }
     if (await handleCustomHotkey(event)) {
@@ -24266,58 +24912,105 @@ async function init() {
   wireEvents();
   setupDockOverflow();
   const urlParams = new URL(window.location.href).searchParams;
-  const [roots, shellLocations] = await Promise.all([
+  const bootstrap = window.__exploreBetterBootstrap || Promise.all([
     request("/api/roots"),
     request("/api/shell/locations"),
-    loadState()
+    request("/api/state")
   ]);
+  const [roots, shellLocations, state] = await bootstrap;
   app.roots = roots;
   app.shellLocations = shellLocations;
+  app.state = state;
+  updateOperationReadout();
   applyAppSettingsChrome();
   hydratePanesFromState(urlParams);
-  const paneLoads = Promise.all([
-    loadStartupPane("left", tabOf("left").path || app.roots.cwd, app.roots.cwd, {
-      allowRecovery: !startupPaneHasExplicitTarget("left", urlParams)
-    }),
-    loadStartupPane("right", tabOf("right").path || app.roots.home, app.roots.home, {
-      allowRecovery: !startupPaneHasExplicitTarget("right", urlParams)
-    })
-  ]);
-  renderRoots();
-  renderSavedCommandStrip();
-  renderToolManager();
-  renderHotkeys();
-  renderBackupDialog();
-  renderScriptLibrary();
-  renderTabGroups();
-  renderFavoritesDialog();
-  renderAliasesDialog();
-  renderBasket();
-  renderPaneSnapshots();
-  renderDisplayPresets();
-  renderFilterPresets();
-  renderSyncProfiles();
-  renderOpenWithPresets();
-  renderSelectPresets();
-  renderSelectionSetsDialog();
-  renderSearchPresets();
-  renderBulkRenamePresets();
+  let secondaryStartupTimer = null;
+  const secondaryStartupUi = new Promise((resolve) => {
+    let scheduled = false;
+    const schedule = () => {
+      if (scheduled) return;
+      scheduled = true;
+      clearTimeout(secondaryStartupTimer);
+      window.removeEventListener("explorebetter:first-pane-window", schedule);
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          renderRoots();
+          updateSelectionReadout();
+          renderInspector();
+          renderSavedCommandStrip();
+          renderToolManager();
+          renderHotkeys();
+          renderBackupDialog();
+          renderScriptLibrary();
+          renderTabGroups();
+          renderFavoritesDialog();
+          renderAliasesDialog();
+          renderBasket();
+          renderPaneSnapshots();
+          renderDisplayPresets();
+          renderFilterPresets();
+          renderSyncProfiles();
+          renderOpenWithPresets();
+          renderSelectPresets();
+          renderSelectionSetsDialog();
+          renderSearchPresets();
+          renderBulkRenamePresets();
+          resolve();
+        }, 0);
+      });
+    };
+    window.addEventListener("explorebetter:first-pane-window", schedule, { once: true });
+    secondaryStartupTimer = setTimeout(schedule, 1500);
+  });
+  const terminalInitialization = initializeTerminalBridge();
+  const loadInitialPane = (paneName) =>
+    loadStartupPane(
+      paneName,
+      tabOf(paneName).path || (paneName === "left" ? app.roots.cwd : app.roots.home),
+      paneName === "left" ? app.roots.cwd : app.roots.home,
+      { allowRecovery: !startupPaneHasExplicitTarget(paneName, urlParams) }
+    );
+  const primaryPane = app.activePane === "right" ? "right" : "left";
+  const secondaryPane = otherPane(primaryPane);
+  let secondaryPaneTimer = null;
+  const secondaryPaneLoad = new Promise((resolve, reject) => {
+    let started = false;
+    const start = () => {
+      if (started) return;
+      started = true;
+      clearTimeout(secondaryPaneTimer);
+      window.removeEventListener("explorebetter:first-pane-window", start);
+      requestAnimationFrame(() => loadInitialPane(secondaryPane).then(resolve, reject));
+    };
+    window.addEventListener("explorebetter:first-pane-window", start, { once: true });
+    secondaryPaneTimer = setTimeout(start, 1000);
+  });
+  const primaryPaneLoad = loadInitialPane(primaryPane);
+  const paneLoads = primaryPane === "left"
+    ? Promise.all([primaryPaneLoad, secondaryPaneLoad])
+    : Promise.all([secondaryPaneLoad, primaryPaneLoad]);
   const startupPaneResults = await paneLoads;
+  await Promise.all([secondaryStartupUi, terminalInitialization]);
   if (startupPaneResults.some((result) => result?.recovered)) {
     scheduleStateSave();
   }
   renderOperations();
   renderPreferencesDialog();
+  renderAllTerminals();
   renderToolbarDialog();
   startOperationPolling();
   startAutoRefresh();
   renderShowHiddenToggle();
   renderLinkedNavigationToggle();
-  setStatus("Ready");
   window.__exploreBetterStartup = {
     readyMs: Math.round((performance.now() - startupStartedAt) * 10) / 10,
     completedAt: Date.now()
   };
+  setTimeout(() => {
+    requestIdle(() => {
+      if (desktopTerminalBridge()) loadTerminalRenderer().catch(() => {});
+    }, 2000);
+  }, 5000);
   loadIntegrationStatus()
     .then(async () => {
       renderIntegration();

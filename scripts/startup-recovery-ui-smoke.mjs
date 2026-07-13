@@ -150,12 +150,17 @@ async function main() {
       recovered.rightPath === rightFixture && recovered.rightRows.some((row) => row.includes("right-pane-marker.txt")),
       `${recovered.rightPath} / ${recovered.rightRows.length} rows`
     );
-    check(checks, "startup-finishes-ready", recovered.status === "Ready", recovered.status);
+    check(
+      checks,
+      "startup-finishes-recovered",
+      recovered.ready && /^Left pane recovered to /i.test(recovered.status),
+      recovered.status
+    );
     check(checks, "focus-hides-root-strip", recovered.rootsVisible === false, String(recovered.rootsVisible));
     check(
       checks,
       "pane-commands-have-stable-icon-width",
-      recovered.paneCommandWidths.length === 5 && recovered.paneCommandWidths.every((width) => width === 34),
+      recovered.paneCommandWidths.length === 6 && recovered.paneCommandWidths.every((width) => width === 34),
       recovered.paneCommandWidths.join(",")
     );
     check(checks, "root-scrollbar-style-hidden", recovered.rootScrollbarsHidden, String(recovered.rootScrollbarsHidden));

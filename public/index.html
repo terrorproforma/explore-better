@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Explore Better</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23202322'/%3E%3Ctext x='32' y='39' text-anchor='middle' font-family='Segoe UI,Arial,sans-serif' font-size='22' font-weight='800' fill='%23f9faf8'%3EEB%3C/text%3E%3C/svg%3E" />
+    <script src="/bootstrap.js"></script>
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/generated/terminal-renderer.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -111,6 +113,7 @@
               <button data-view-mode="compact" data-pane="left" title="Compact view" aria-label="Compact view"><span class="view-glyph view-glyph-compact" aria-hidden="true"></span></button>
               <button data-view-mode="tiles" data-pane="left" title="Tiles view" aria-label="Tiles view"><span class="view-glyph view-glyph-tiles" aria-hidden="true"></span></button>
             </div>
+            <button class="pane-command terminal-toggle" data-terminal-toggle="left" title="Toggle terminal (Ctrl+`)" aria-label="Toggle left terminal" aria-pressed="false"><span class="lucide-icon icon-terminal" aria-hidden="true"></span><span class="command-label">Terminal</span></button>
             <button class="pane-command" data-action="new-folder" data-pane="left" title="New folder" aria-label="New folder"><span class="lucide-icon icon-folder-plus" aria-hidden="true"></span><span class="command-label">New folder</span></button>
             <button class="pane-command" data-action="rename" data-pane="left" data-requires-selection disabled><span class="lucide-icon icon-rename" aria-hidden="true"></span><span class="command-label">Rename</span></button>
             <button class="pane-command pane-transfer-action" data-action="copy-other" data-pane="left" data-requires-selection disabled><span class="lucide-icon icon-copy" aria-hidden="true"></span><span class="command-label">Copy</span><span class="transfer-direction-glyph" aria-hidden="true"></span></button>
@@ -149,7 +152,26 @@
             <button data-sort="size" data-pane="left">Size</button>
             <button data-sort="modified" data-pane="left">Modified</button>
           </div>
-          <div class="file-list" data-list="left" tabindex="0"></div>
+          <div class="file-list" data-list="left" tabindex="0" role="listbox" aria-multiselectable="true" aria-label="Left file list"></div>
+          <div class="pane-terminal-resizer" data-layout-resize="terminal-left" role="separator" aria-label="Resize left terminal" aria-orientation="horizontal" hidden></div>
+          <section class="pane-terminal" data-terminal-drawer="left" aria-label="Left tab terminal" hidden>
+            <header class="terminal-header">
+              <span class="terminal-identity"><span class="lucide-icon icon-terminal" aria-hidden="true"></span><strong data-terminal-title="left">Terminal</strong><span class="terminal-elevation" data-terminal-elevation="left" hidden><span class="lucide-icon icon-shield" aria-hidden="true"></span>Administrator</span></span>
+              <span class="terminal-cwd" data-terminal-cwd="left" title="Terminal folder"></span>
+              <div class="terminal-controls">
+                <select data-terminal-profile="left" aria-label="Left terminal profile" title="Terminal profile"></select>
+                <button type="button" data-terminal-action="administrator" data-pane="left" title="Restart with administrator privileges" aria-label="Restart left terminal as administrator"><span class="lucide-icon icon-shield" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="search" data-pane="left" title="Search terminal" aria-label="Search left terminal"><span class="lucide-icon icon-search" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="clear" data-pane="left" title="Clear terminal" aria-label="Clear left terminal"><span class="lucide-icon icon-eraser" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="restart" data-pane="left" title="Restart terminal" aria-label="Restart left terminal"><span class="lucide-icon icon-restart" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="open-folder" data-pane="left" title="Open terminal folder in pane" aria-label="Open terminal folder in left pane"><span class="lucide-icon icon-folder-open" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="external" data-pane="left" title="Open terminal externally" aria-label="Open external terminal for left pane"><span class="lucide-icon icon-external" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="close" data-pane="left" title="Close terminal" aria-label="Close left terminal"><span class="lucide-icon icon-close" aria-hidden="true"></span></button>
+              </div>
+            </header>
+            <div class="terminal-search" data-terminal-search-panel="left" hidden><input data-terminal-search="left" aria-label="Search left terminal output" placeholder="Find in terminal" /><button type="button" data-terminal-action="search-next" data-pane="left">Next</button></div>
+            <div class="terminal-surface-host" data-terminal-host="left"><div class="terminal-placeholder" data-terminal-placeholder="left">Starting terminal...</div></div>
+          </section>
         </section>
         <div class="layout-resizer pane-resizer" data-layout-resize="panes" role="separator" aria-label="Resize panes"></div>
         <div class="layout-resizer pane-row-resizer" data-layout-resize="paneRows" role="separator" aria-label="Resize horizontal panes"></div>
@@ -182,6 +204,7 @@
               <button data-view-mode="compact" data-pane="right" title="Compact view" aria-label="Compact view"><span class="view-glyph view-glyph-compact" aria-hidden="true"></span></button>
               <button data-view-mode="tiles" data-pane="right" title="Tiles view" aria-label="Tiles view"><span class="view-glyph view-glyph-tiles" aria-hidden="true"></span></button>
             </div>
+            <button class="pane-command terminal-toggle" data-terminal-toggle="right" title="Toggle terminal (Ctrl+`)" aria-label="Toggle right terminal" aria-pressed="false"><span class="lucide-icon icon-terminal" aria-hidden="true"></span><span class="command-label">Terminal</span></button>
             <button class="pane-command" data-action="new-folder" data-pane="right" title="New folder" aria-label="New folder"><span class="lucide-icon icon-folder-plus" aria-hidden="true"></span><span class="command-label">New folder</span></button>
             <button class="pane-command" data-action="rename" data-pane="right" data-requires-selection disabled><span class="lucide-icon icon-rename" aria-hidden="true"></span><span class="command-label">Rename</span></button>
             <button class="pane-command pane-transfer-action" data-action="copy-other" data-pane="right" data-requires-selection disabled><span class="lucide-icon icon-copy" aria-hidden="true"></span><span class="command-label">Copy</span><span class="transfer-direction-glyph" aria-hidden="true"></span></button>
@@ -220,7 +243,26 @@
             <button data-sort="size" data-pane="right">Size</button>
             <button data-sort="modified" data-pane="right">Modified</button>
           </div>
-          <div class="file-list" data-list="right" tabindex="0"></div>
+          <div class="file-list" data-list="right" tabindex="0" role="listbox" aria-multiselectable="true" aria-label="Right file list"></div>
+          <div class="pane-terminal-resizer" data-layout-resize="terminal-right" role="separator" aria-label="Resize right terminal" aria-orientation="horizontal" hidden></div>
+          <section class="pane-terminal" data-terminal-drawer="right" aria-label="Right tab terminal" hidden>
+            <header class="terminal-header">
+              <span class="terminal-identity"><span class="lucide-icon icon-terminal" aria-hidden="true"></span><strong data-terminal-title="right">Terminal</strong><span class="terminal-elevation" data-terminal-elevation="right" hidden><span class="lucide-icon icon-shield" aria-hidden="true"></span>Administrator</span></span>
+              <span class="terminal-cwd" data-terminal-cwd="right" title="Terminal folder"></span>
+              <div class="terminal-controls">
+                <select data-terminal-profile="right" aria-label="Right terminal profile" title="Terminal profile"></select>
+                <button type="button" data-terminal-action="administrator" data-pane="right" title="Restart with administrator privileges" aria-label="Restart right terminal as administrator"><span class="lucide-icon icon-shield" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="search" data-pane="right" title="Search terminal" aria-label="Search right terminal"><span class="lucide-icon icon-search" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="clear" data-pane="right" title="Clear terminal" aria-label="Clear right terminal"><span class="lucide-icon icon-eraser" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="restart" data-pane="right" title="Restart terminal" aria-label="Restart right terminal"><span class="lucide-icon icon-restart" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="open-folder" data-pane="right" title="Open terminal folder in pane" aria-label="Open terminal folder in right pane"><span class="lucide-icon icon-folder-open" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="external" data-pane="right" title="Open terminal externally" aria-label="Open external terminal for right pane"><span class="lucide-icon icon-external" aria-hidden="true"></span></button>
+                <button type="button" data-terminal-action="close" data-pane="right" title="Close terminal" aria-label="Close right terminal"><span class="lucide-icon icon-close" aria-hidden="true"></span></button>
+              </div>
+            </header>
+            <div class="terminal-search" data-terminal-search-panel="right" hidden><input data-terminal-search="right" aria-label="Search right terminal output" placeholder="Find in terminal" /><button type="button" data-terminal-action="search-next" data-pane="right">Next</button></div>
+            <div class="terminal-surface-host" data-terminal-host="right"><div class="terminal-placeholder" data-terminal-placeholder="right">Starting terminal...</div></div>
+          </section>
         </section>
         <div class="layout-resizer inspector-resizer" data-layout-resize="inspector" role="separator" aria-label="Resize preview"></div>
 
@@ -834,6 +876,19 @@
             <button type="button" data-preferences-action="reset">Defaults</button>
             <button type="button" data-preferences-action="integration">Integration</button>
           </div>
+        </section>
+        <section class="preference-section terminal-preferences">
+          <div class="preference-section-head">
+            <strong>Terminal</strong>
+            <small>New per-tab sessions</small>
+          </div>
+          <label><span class="field-label">Profile</span><select id="preference-terminal-profile"><option value="auto">Automatic</option></select></label>
+          <label><span class="field-label">Privilege</span><select id="preference-terminal-elevation"><option value="standard">Standard user</option><option value="administrator">Administrator (UAC on open)</option></select></label>
+          <label><span class="field-label">Theme</span><select id="preference-terminal-theme"><option value="dark">Explore Better Dark</option><option value="light">Light</option><option value="high-contrast">High Contrast</option></select></label>
+          <label><span class="field-label">Font Size</span><input id="preference-terminal-font-size" type="number" min="10" max="20" step="1" /></label>
+          <label><span class="field-label">Cursor</span><select id="preference-terminal-cursor"><option value="block">Block</option><option value="bar">Bar</option><option value="underline">Underline</option></select></label>
+          <label><span class="field-label">Scrollback</span><input id="preference-terminal-scrollback" type="number" min="1000" max="50000" step="1000" /></label>
+          <label class="check-row"><input id="preference-terminal-follow" type="checkbox" /><span>Follow pane folder while shell is idle</span></label>
         </section>
       </form>
     </dialog>
@@ -2653,6 +2708,6 @@
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <div class="breadcrumb-menu" id="breadcrumb-menu" role="menu" hidden></div>
     <div class="context-menu" id="context-menu" role="menu" hidden></div>
-    <script src="/app.js" type="module"></script>
+    <script src="/generated/app-runtime.js" defer></script>
   </body>
 </html>

@@ -1,6 +1,6 @@
 # Explore Better User Manual
 
-Explore Better is a local dual-pane Windows file manager for power users. It is built for fast folder browsing, tabbed workflows, bulk file operations, previewing, scripting, and optional Explorer-style shell integration.
+Explore Better is a local dual-pane Windows file manager for power users. It is built for fast folder browsing, tabbed workflows, per-tab terminals, bulk file operations, previewing, scripting, and optional Explorer-style shell integration.
 
 Navigator and Preview have independent panel buttons in their headers and in the right side of the command dock. Hiding either panel immediately gives its space to the file panes, and the choice persists after restart. `Focus` still hides both panels temporarily without changing those individual choices; both panel actions are also available from `Ctrl+P` Command.
 
@@ -234,6 +234,22 @@ Saved tools and scripts can appear in the command strip and command palette. Tre
 
 Drag built-in command dock buttons to reorder them. Use `Toolbar` to decide which buttons are visible.
 
+## Integrated Terminals
+
+The installed desktop app gives every file tab its own interactive Windows terminal. Choose the terminal icon in a pane toolbar or press `Ctrl+Backquote` to open the active pane's drawer. The shell is created only when the drawer is first opened, so ordinary browsing does not start background shell processes. Browser development mode cannot host ConPTY and uses the existing external **Terminal Here** action instead.
+
+Each terminal starts in its tab's current folder. Its process, output, selection, profile, and scroll position remain attached to that tab while the app is open, including when you switch tabs. Left and right pane terminals are independent and can stay visible at the same time. Drag the horizontal handle above a drawer to resize it; left and right heights are saved separately.
+
+The terminal header provides profile selection, administrator restart, search, clear, restart, open terminal folder in pane, open externally, and close. The active profile order is PowerShell 7 when installed, then Windows PowerShell, then Command Prompt. `Ctrl+Shift+C` and `Ctrl+Shift+V` copy and paste terminal text while `Ctrl+C` remains available for interrupting a command. Dropping files onto the terminal inserts safely shell-quoted paths.
+
+When **Follow tab folder when idle** is enabled in Preferences, pane navigation updates an idle shell immediately. Navigation while a command is running queues only the newest folder and applies it at the next recognized prompt. If the shell cannot report prompt readiness, Explore Better does not inject a command; use the pending synchronization control. A shell-side `cd` updates the terminal header but does not move the file pane. Choose **Open terminal folder in pane** when you want that navigation explicitly.
+
+Preferences also control the default profile, default elevation, Dark/Light/High Contrast terminal theme, font size, cursor shape, scrollback, and follow behavior. Changes apply to visible terminals where possible; profile and elevation changes restart the selected session.
+
+Administrator mode elevates only the new terminal through Windows UAC. Explore Better, its renderer, local backend, and filesystem helper remain at normal user integrity. UAC appears only when an administrator terminal is opened or an existing terminal is deliberately restarted as administrator. Canceling UAC leaves the existing standard terminal untouched. Elevated sessions always show a shield, an **Administrator** label, and a distinct border. Setting administrator mode as the default affects new terminal sessions only and never elevates Explore Better at startup.
+
+Closing an idle terminal ends it immediately. Closing a terminal with a running command asks for confirmation and terminates the terminal's complete process tree. Terminal processes are not restored after an application restart.
+
 ## Explorer Integration
 
 On the first packaged launch, Explore Better asks whether it should become the current user's default file manager for normal filesystem folder and drive opens. Choose **Use Explore Better** to enable it, or **Keep Windows Explorer** to leave Windows unchanged. The choice is not permanent.
@@ -399,6 +415,8 @@ Explore Better prioritizes fast browsing:
 - `npm run verify:workspace-panels-ui` collapses Navigator and Preview from their headers, proves pane width and height are reclaimed, exercises vertical/horizontal/single layouts plus Focus, reloads to verify persistence, and restores both panels from the permanent dock controls.
 - `npm run verify:keyboard-workflows-ui` drives command-palette execution and Quick Search filtering entirely from the keyboard, checks focus handoff, and verifies the keyboard UI is not clipped or squished.
 - `npm run verify:accessibility` checks useful accessible names, keyboard file-list navigation, command-palette focus, and high-contrast focus styling.
+- `npm run verify:terminal` builds the lazy xterm renderer, exercises real ConPTY input/output and simultaneous pane sessions, runs hostile terminal IPC probes, verifies per-tab UI behavior and resizing, and confirms all test-owned shells are cleaned up.
+- `npm run verify:packaged-terminal` launches the unpacked release executable, requires the x64 node-pty prebuild to be outside the app archive, exercises terminal input/output and both panes, records first-prompt timing, and proves the packaged process exits cleanly.
 
 If a folder looks stale, press `R` or click Refresh.
 
@@ -419,3 +437,5 @@ If Explore Better or Windows restarts during a copy, move, delete, trash, recycl
 - If a folder does not update after external changes, enable `Auto` or press Refresh.
 - If the interface feels cramped, drag the layout separators or use `Prefs` to switch density.
 - If a command dock is too crowded, use `Toolbar` to choose a smaller visible command set, or drag the dock taller.
+- If the integrated terminal is unavailable, confirm you launched the Electron desktop app rather than browser mode. Browser mode intentionally opens an external terminal instead.
+- If a terminal does not follow a pane after navigation, wait for the command to finish or use the pending sync control; Explore Better will not inject `cd` while prompt state is unknown.

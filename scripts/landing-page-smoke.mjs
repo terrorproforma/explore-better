@@ -118,8 +118,12 @@ async function pageSnapshot(page) {
       images,
       aspectIssues,
       downloadLinks,
+      guidedDownloadLinks: document.querySelectorAll('a[href="#download"]').length,
+      checksumFileLinks: [...document.querySelectorAll('a[href*="SHA256SUMS.txt"]')].map((link) => link.href),
       relativeParentLinks: [...document.querySelectorAll('a[href^=".."]')].map((link) => link.getAttribute("href")),
-      checksum: document.querySelector("[data-checksum]")?.textContent.trim() || ""
+      checksum: document.querySelector("[data-checksum]")?.textContent.trim() || "",
+      verifyCommand: document.querySelector("[data-verify-command]")?.textContent.trim() || "",
+      unsignedDisclosure: document.querySelector("#unsigned-preview-note")?.textContent.replace(/\s+/g, " ").trim() || ""
     };
   });
 }
@@ -204,8 +208,20 @@ async function main() {
       addCheck(
         checks,
         `${viewport.name}-downloads`,
-        snapshot.downloadLinks.length >= 3 && snapshot.downloadLinks.every((href) => href.startsWith("https://github.com/")),
-        `${snapshot.downloadLinks.length} direct installer links`
+        snapshot.downloadLinks.length === 1 && snapshot.downloadLinks.every((href) => href.startsWith("https://github.com/")),
+        `${snapshot.downloadLinks.length} direct installer link after disclosure`
+      );
+      addCheck(
+        checks,
+        `${viewport.name}-guided-downloads`,
+        snapshot.guidedDownloadLinks >= 2,
+        `${snapshot.guidedDownloadLinks} prominent links route through the verification panel`
+      );
+      addCheck(
+        checks,
+        `${viewport.name}-checksum-file`,
+        snapshot.checksumFileLinks.length === 1 && snapshot.checksumFileLinks[0].startsWith("https://github.com/"),
+        snapshot.checksumFileLinks.join(", ") || "Missing SHA256SUMS.txt link"
       );
       addCheck(
         checks,
@@ -218,6 +234,26 @@ async function main() {
         `${viewport.name}-checksum`,
         snapshot.checksum === "2851cc5ab923a9a1bae9f5ee860c2be07d54b3fcd21812b50e99cc6d6d27d0a0",
         snapshot.checksum
+      );
+      addCheck(
+        checks,
+        `${viewport.name}-verify-command`,
+        snapshot.verifyCommand === "Get-FileHash .\\ExploreBetter-0.1.2-x64-setup.exe -Algorithm SHA256",
+        snapshot.verifyCommand
+      );
+      addCheck(
+        checks,
+        `${viewport.name}-unsigned-disclosure`,
+        snapshot.unsignedDisclosure.includes("Unsigned public preview") && snapshot.unsignedDisclosure.includes("Unknown publisher"),
+        snapshot.unsignedDisclosure || "Missing unsigned preview disclosure"
+      );
+
+      await page.locator('[data-copy-target="[data-verify-command]"]').click();
+      addCheck(
+        checks,
+        `${viewport.name}-copy-command`,
+        (await page.locator("[data-command-copy-status]").textContent())?.trim() === "Command copied",
+        (await page.locator("[data-command-copy-status]").textContent())?.trim() || "Missing copy status"
       );
 
       await page.locator('[data-tour-tab][data-label="Disk Map"]').click();

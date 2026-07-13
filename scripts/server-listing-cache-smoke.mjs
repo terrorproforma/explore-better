@@ -243,6 +243,12 @@ async function main() {
     const herdJoined = herdResults.filter((result) => result.cache?.source === "server-listing-inflight");
     const cold = herdOrigins.find((result) => result.cache?.stored === true) || herdOrigins[0] || herdResults[0];
     const warm = summarizeList(await timed(() => requestJson(baseUrl, route)));
+    const bypassWindowRoute = `${route}&bypassCache=true&offset=0&limit=200`;
+    const bypassWindowResults = (
+      await Promise.all(Array.from({ length: 4 }, () => requestJson(baseUrl, bypassWindowRoute)))
+    ).map((result) => summarizeList({ wallMs: 0, result }));
+    const bypassWindowOrigins = bypassWindowResults.filter((result) => result.cache?.source !== "server-listing-inflight");
+    const bypassWindowJoined = bypassWindowResults.filter((result) => result.cache?.source === "server-listing-inflight");
     const richCold = summarizeList(await timed(() => requestJson(baseUrl, richRoute)));
     const richWarm = summarizeList(await timed(() => requestJson(baseUrl, richRoute)));
     const dimensionEntry = richCold.entries.find((entry) => entry.name === "server-cache-image-0000.png");
@@ -274,6 +280,18 @@ async function main() {
     check(checks, "server-listing-warm-stamp-validated", warm.cache?.stampValidated === true, `stampValidated=${warm.cache?.stampValidated}; stamp=${JSON.stringify(warm.cache?.directoryStamp || null)}.`);
     check(checks, "server-listing-warm-budget", Number(warm.wallMs || 0) <= warmWallBudgetMs, `wall=${warm.wallMs} ms; budget=${warmWallBudgetMs} ms.`);
     check(checks, "server-listing-warm-count", warm.returned === cold.returned && warm.returned >= expectedInitialCount, `cold=${cold.returned}; warm=${warm.returned}; expected=${expectedInitialCount}.`);
+    check(
+      checks,
+      "server-listing-bypass-window-single-origin",
+      bypassWindowOrigins.length === 1 && bypassWindowJoined.length === 3,
+      `origins=${bypassWindowOrigins.length}; joined=${bypassWindowJoined.length}.`
+    );
+    check(
+      checks,
+      "server-listing-bypass-window-bounded",
+      bypassWindowResults.every((result) => result.returned === 200),
+      `returned=${bypassWindowResults.map((result) => result.returned).join(",")}.`
+    );
     check(checks, "server-rich-listing-cold-stored", richCold.cache?.stored === true, `stored=${richCold.cache?.stored}; scanned=${richCold.scanned}; dimensions=${richCold.includeDimensions}.`);
     check(checks, "server-rich-listing-dimensions", dimensionEntry?.dimensions?.width === 1 && richWarmDimensionEntry?.dimensions?.height === 1, `cold=${dimensionEntry?.dimensionText || "missing"}; warm=${richWarmDimensionEntry?.dimensionText || "missing"}.`);
     check(checks, "server-rich-listing-warm-hit", richWarm.cache?.hit === true, `hit=${richWarm.cache?.hit}; dimensions=${richWarm.cache?.includeDimensions}; links=${richWarm.cache?.includeLinks}.`);
@@ -330,6 +348,12 @@ async function main() {
         joinedSources: herdJoined.map((result) => result.cache?.source || ""),
         originScanned: herdOrigins.map((result) => result.scanned),
         originStored: herdOrigins.map((result) => result.cache?.stored === true)
+      },
+      bypassWindowHerd: {
+        count: bypassWindowResults.length,
+        origins: bypassWindowOrigins.length,
+        joined: bypassWindowJoined.length,
+        returned: bypassWindowResults.map((result) => result.returned)
       },
       cold,
       warm,

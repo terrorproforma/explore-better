@@ -51,26 +51,26 @@ document.querySelectorAll("[data-tour-tab]").forEach((tab) => {
   });
 });
 
-const copyButton = document.querySelector("[data-copy-checksum]");
-const checksum = document.querySelector("[data-checksum]");
-const copyStatus = document.querySelector("[data-copy-status]");
-
-copyButton?.addEventListener("click", async () => {
-  const value = checksum?.textContent?.trim() || "";
-  try {
-    await navigator.clipboard.writeText(value);
-    if (copyStatus) copyStatus.textContent = "Checksum copied";
-  } catch {
-    const input = document.createElement("textarea");
-    input.value = value;
-    input.style.position = "fixed";
-    input.style.opacity = "0";
-    document.body.append(input);
-    input.select();
-    document.execCommand("copy");
-    input.remove();
-    if (copyStatus) copyStatus.textContent = "Checksum copied";
-  }
+document.querySelectorAll("[data-copy-target]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const source = document.querySelector(button.dataset.copyTarget || "");
+    const status = document.querySelector(button.dataset.copyStatusTarget || "");
+    const value = source?.textContent?.trim() || "";
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      const input = document.createElement("textarea");
+      input.value = value;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.append(input);
+      input.select();
+      document.execCommand("copy");
+      input.remove();
+    }
+    if (status) status.textContent = button.dataset.copySuccess || "Copied";
+  });
 });
 
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;

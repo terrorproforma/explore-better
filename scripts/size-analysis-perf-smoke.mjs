@@ -244,6 +244,18 @@ async function analyze(baseUrl, body) {
   );
 }
 
+async function analyzeMedian(baseUrl, body, repetitions = 3) {
+  const samples = [];
+  for (let index = 0; index < repetitions; index += 1) {
+    samples.push(await analyze(baseUrl, body));
+  }
+  const ordered = [...samples].sort((left, right) => Number(left.wallMs || 0) - Number(right.wallMs || 0));
+  return {
+    ...ordered[Math.floor(ordered.length / 2)],
+    repetitions: samples.map((sample) => sample.wallMs)
+  };
+}
+
 async function runAnalyzerIsolation(baseUrl, body, fixture, options = {}) {
   const operationCount = Math.max(6, Number(options.operationCount || 24));
   const concurrency = Math.max(1, Number(options.concurrency || 6));
@@ -403,7 +415,7 @@ async function main() {
     const herdJoined = herdResults.filter((item) => item.cache?.source === "size-analysis-inflight");
     const herdCacheHits = herdResults.filter((item) => item.cache?.source === "size-analysis-cache");
     const cold = herdOriginScans[0] || herdResults.find((item) => item.cache?.hit !== true) || herdResults[0];
-    const warm = await analyze(baseUrl, body);
+    const warm = await analyzeMedian(baseUrl, body);
     check(
       checks,
       "inflight-origin-scan-count",
@@ -486,7 +498,7 @@ async function main() {
 
     const cappedBody = { ...body, maxEntries: Math.max(100, Math.floor(count / 4)) };
     const cappedCold = await analyze(baseUrl, cappedBody);
-    const cappedWarm = await analyze(baseUrl, cappedBody);
+    const cappedWarm = await analyzeMedian(baseUrl, cappedBody);
     check(
       checks,
       "capped-cold-truncated",
@@ -596,7 +608,7 @@ async function main() {
       })
     });
     const afterMutation = await analyze(baseUrl, { ...body, maxEntries: maxEntries + 2 });
-    const postMutationWarm = await analyze(baseUrl, { ...body, maxEntries: maxEntries + 2 });
+    const postMutationWarm = await analyzeMedian(baseUrl, { ...body, maxEntries: maxEntries + 2 });
 
     const sizeInvalidation = create.operation?.result?.cacheInvalidation?.sizeAnalysisInvalidation;
     check(

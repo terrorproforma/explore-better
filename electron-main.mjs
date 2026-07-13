@@ -1,12 +1,19 @@
-import { app, BrowserWindow, ipcMain, nativeImage, shell } from "electron";
+import { app, BrowserWindow, ipcMain, MessageChannelMain, nativeImage, shell } from "electron";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  createTerminalService,
+  runTerminalBroker,
+  terminalBrokerManifestFromArgv
+} from "./terminal-service.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const terminalBrokerManifest = terminalBrokerManifestFromArgv();
+const terminalBrokerMode = Boolean(terminalBrokerManifest);
 const host = process.env.HOST || "127.0.0.1";
 let port = Number(process.env.PORT || 0);
 const desktopInstanceToken =
@@ -47,9 +54,12 @@ const smokeWindowMode = process.argv.includes("--smoke-window");
 const smokeBackendRestartMode = process.argv.includes("--smoke-backend-restart");
 const smokeUpdateFeedMode = process.argv.includes("--smoke-update-feed");
 const smokeNativeHelperMode = process.argv.includes("--smoke-native-helper");
+const smokeTerminalMode = process.argv.includes("--smoke-terminal");
+const smokeTerminalSecurityMode = process.argv.includes("--smoke-terminal-security");
 const noUpdatesMode = process.argv.includes("--no-updates");
 const disableGpuMode =
   smokeMode ||
+  terminalBrokerMode ||
   process.env.EXPLORE_BETTER_DISABLE_GPU === "1" ||
   process.env.EB_DISABLE_GPU === "1";
 
@@ -86,6 +96,21 @@ let backendLastEvent = {
   message: "Backend has not been checked yet.",
   at: new Date().toISOString()
 };
+
+const terminalService = terminalBrokerMode
+  ? null
+  : createTerminalService({
+      MessageChannelMain,
+      getMainWindow: () => mainWindow,
+      getBaseUrl: () => baseUrl,
+      runtime: {
+        packaged: app.isPackaged,
+        executablePath: process.execPath,
+        appPath: app.getAppPath(),
+        userDataPath: app.getPath("userData"),
+        debug: false
+      }
+    });
 
 async function ensureDesktopPort() {
   if (port > 0 && baseUrl) return port;
@@ -400,6 +425,30 @@ ipcMain.handle("explore-better:restart-backend", () => {
   return recoverBackend("desktop-ipc");
 });
 
+ipcMain.handle("explore-better:terminal-capabilities", () => {
+  return terminalService?.capabilities() || { available: false, profiles: [], elevationAvailable: false };
+});
+
+ipcMain.handle("explore-better:terminal-create", (event, request) => {
+  if (!terminalService) throw new Error("Terminal service is unavailable.");
+  return terminalService.create(event, request);
+});
+
+ipcMain.handle("explore-better:terminal-sync-directory", (event, sessionId, cwd) => {
+  if (!terminalService) throw new Error("Terminal service is unavailable.");
+  return terminalService.syncDirectory(event, sessionId, cwd);
+});
+
+ipcMain.handle("explore-better:terminal-restart", (event, sessionId, request) => {
+  if (!terminalService) throw new Error("Terminal service is unavailable.");
+  return terminalService.restart(event, sessionId, request);
+});
+
+ipcMain.handle("explore-better:terminal-dispose", (event, sessionId) => {
+  if (!terminalService) return false;
+  return terminalService.disposeForEvent(event, sessionId);
+});
+
 async function waitForServer() {
   for (let index = 0; index < 30; index += 1) {
     if (await serverIsReady()) {
@@ -683,6 +732,7 @@ async function showLister(targetPath = null, shellMode = null) {
       preload: path.join(__dirname, "electron-preload.cjs")
     }
   });
+  const rendererWebContentsId = mainWindow.webContents.id;
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     try {
@@ -717,12 +767,16 @@ async function showLister(targetPath = null, shellMode = null) {
     event.preventDefault();
     dispatchDesktopShortcut(mainWindow, action);
   });
+  mainWindow.webContents.on("render-process-gone", () => {
+    terminalService?.disposeWebContents(rendererWebContentsId);
+  });
   mainWindow.once("ready-to-show", () => {
     if (!smokeMode) {
       mainWindow?.show();
     }
   });
   mainWindow.on("closed", () => {
+    terminalService?.disposeWebContents(rendererWebContentsId);
     mainWindow = null;
   });
   await mainWindow.loadURL(targetUrl);
@@ -781,8 +835,144 @@ async function rendererShellOpenSnapshot(targetPath, shellMode) {
   })()`);
 }
 
-const hasSingleInstanceLock = smokeMode || app.requestSingleInstanceLock();
-if (!hasSingleInstanceLock) {
+async function waitForRendererValue(expression, predicate, timeoutMs = 10000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await mainWindow?.webContents?.executeJavaScript(expression).catch(() => null);
+    if (predicate(value)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  return null;
+}
+
+async function runTerminalSmoke() {
+  if (!mainWindow?.webContents || !terminalService || terminalService.sessionCount() !== 0) return false;
+  const startupReady = await waitForRendererValue(
+    `Boolean(window.__exploreBetterStartup?.completedAt && document.querySelector('[data-terminal-toggle="left"]'))`,
+    (value) => value === true,
+    15000
+  );
+  if (!startupReady) {
+    console.log("Explore Better terminal smoke: renderer startup did not complete");
+    return false;
+  }
+  const rendererPrewarmed = await waitForRendererValue(
+    "Boolean(window.ExploreBetterTerminal?.createView)",
+    (value) => value === true,
+    10000
+  );
+  if (!rendererPrewarmed) {
+    console.log("Explore Better terminal smoke: lazy renderer did not prewarm");
+    return false;
+  }
+  const startedAt = performance.now();
+  await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-terminal-toggle="left"]')?.click()`);
+  const leftReady = await waitForRendererValue(
+    `(() => ({ visible: !document.querySelector('[data-terminal-drawer="left"]')?.hidden, textarea: Boolean(document.querySelector('[data-terminal-drawer="left"] .xterm-helper-textarea')), title: document.querySelector('[data-terminal-title="left"]')?.textContent || '', text: document.querySelector('[data-terminal-drawer="left"] .xterm-rows')?.textContent || '' }))()`,
+    (value) => value?.visible && value?.textarea && value?.title.includes("Ready") && terminalService.sessionCount() === 1,
+    12000
+  );
+  if (!leftReady) {
+    const snapshot = await mainWindow.webContents.executeJavaScript(`(() => {
+      const drawer = document.querySelector('[data-terminal-drawer="left"]');
+      return { visible: !drawer?.hidden, classes: drawer?.className || '', title: document.querySelector('[data-terminal-title="left"]')?.textContent || '', text: drawer?.querySelector('.xterm-rows')?.textContent || '', placeholder: drawer?.querySelector('.terminal-placeholder')?.textContent || '', hasRenderer: Boolean(window.ExploreBetterTerminal), startup: window.__exploreBetterStartup || null };
+    })()`).catch((error) => ({ error: error.message }));
+    console.log(`Explore Better terminal smoke left failure: sessions=${terminalService.sessionCount()} snapshot=${JSON.stringify(snapshot)}`);
+    terminalService.disposeAll();
+    return false;
+  }
+  const firstPromptMs = Math.round(performance.now() - startedAt);
+  const smokeProfile = terminalService.profileForSmoke();
+  const outputSentinel = "EB_TERMINAL_OUTPUT_OK";
+  const outputCommand = smokeProfile?.kind === "cmd"
+    ? "for %A in (OK) do @echo EB_TERMINAL_OUTPUT_%A\r"
+    : "Write-Output ('EB_TERMINAL_OUTPUT_' + 'OK')\r";
+  terminalService.writeForSmoke(outputCommand);
+  const commandOutput = await waitForRendererValue(
+    `(() => ({ title: document.querySelector('[data-terminal-title="left"]')?.textContent || '', canvas: Boolean(document.querySelector('[data-terminal-drawer="left"] .xterm canvas')) }))()`,
+    (value) => terminalService.outputForSmoke().includes(outputSentinel) && value?.title.includes("Ready") && value?.canvas,
+    10000
+  );
+  if (!commandOutput) {
+    const snapshot = await mainWindow.webContents.executeJavaScript(`(() => ({ title: document.querySelector('[data-terminal-title="left"]')?.textContent || '', text: document.querySelector('[data-terminal-drawer="left"] .xterm-rows')?.textContent || '' }))()`).catch((error) => ({ error: error.message }));
+    console.log(`Explore Better terminal smoke command failure: ${JSON.stringify(snapshot)}`);
+    terminalService.disposeAll();
+    return false;
+  }
+  const queuedCommand = smokeProfile?.kind === "cmd"
+    ? "ping -n 2 127.0.0.1 >nul & echo EB_TERMINAL_BUSY_DONE\r"
+    : "Start-Sleep -Milliseconds 600; Write-Output ('EB_TERMINAL_BUSY_' + 'DONE')\r";
+  const firstSyncPath = process.env.EXPLORE_BETTER_TERMINAL_SMOKE_FIRST_CWD || path.join(__dirname, "src");
+  const latestSyncPath = process.env.EXPLORE_BETTER_TERMINAL_SMOKE_LATEST_CWD || path.join(__dirname, "public");
+  terminalService.writeForSmoke(queuedCommand);
+  const firstQueued = terminalService.syncForSmoke(firstSyncPath);
+  const latestQueued = terminalService.syncForSmoke(latestSyncPath);
+  const folderFollow = await waitForRendererValue(
+    "true",
+    () => terminalService.outputForSmoke().includes("EB_TERMINAL_BUSY_DONE") && path.normalize(terminalService.cwdForSmoke()) === path.normalize(latestSyncPath),
+    10000
+  );
+  if (!firstQueued?.queued || !latestQueued?.queued || !folderFollow) {
+    console.log(`Explore Better terminal smoke folder follow failure: first=${JSON.stringify(firstQueued)} latest=${JSON.stringify(latestQueued)} cwd=${terminalService.cwdForSmoke()}`);
+    terminalService.disposeAll();
+    return false;
+  }
+  await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-terminal-toggle="right"]')?.click()`);
+  const dualReady = await waitForRendererValue(
+    `Boolean(!document.querySelector('[data-terminal-drawer="left"]')?.hidden && !document.querySelector('[data-terminal-drawer="right"]')?.hidden && document.querySelector('[data-terminal-drawer="right"] .xterm-helper-textarea') && document.querySelector('[data-terminal-title="right"]')?.textContent?.includes('Ready'))`,
+    (value) => value === true && terminalService.sessionCount() === 2,
+    12000
+  );
+  if (!dualReady) {
+    terminalService.disposeAll();
+    return false;
+  }
+  await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-terminal-action="close"][data-pane="left"]')?.click(); document.querySelector('[data-terminal-action="close"][data-pane="right"]')?.click()`);
+  const cleaned = await waitForRendererValue("true", () => terminalService.sessionCount() === 0, 6000);
+  console.log(`Explore Better terminal smoke: profile=${smokeProfile?.id || "unknown"} firstPromptMs=${firstPromptMs} output=${Boolean(commandOutput)} folderFollow=${Boolean(folderFollow)} dual=${Boolean(dualReady)} cleaned=${Boolean(cleaned)}`);
+  return Boolean(commandOutput && folderFollow && dualReady && cleaned);
+}
+
+async function runTerminalSecuritySmoke() {
+  if (!mainWindow?.webContents || !terminalService || terminalService.sessionCount() !== 0) return false;
+  const result = await mainWindow.webContents.executeJavaScript(`(async () => {
+    const bridge = window.exploreBetterDesktop?.terminal;
+    const capabilities = await bridge.capabilities();
+    const rejects = async (task) => { try { await task(); return false; } catch { return true; } };
+    const base = { tabId: 'security-probe-tab', cwd: ${JSON.stringify(__dirname)}, profileId: 'auto', elevation: 'standard', cols: 80, rows: 24 };
+    const [profileRejected, pathRejected, dimensionsRejected, sessionRejected] = await Promise.all([
+      rejects(() => bridge.create({ ...base, profileId: 'not-a-real-shell' })),
+      rejects(() => bridge.create({ ...base, cwd: 'C:\\\\ExploreBetter-Missing-Terminal-Path' })),
+      rejects(() => bridge.create({ ...base, cols: 1000000 })),
+      rejects(() => bridge.dispose('forged-session-id'))
+    ]);
+    const httpProbe = await fetch('/api/terminal', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    return {
+      profileRejected,
+      pathRejected,
+      dimensionsRejected,
+      sessionRejected,
+      httpRejected: httpProbe.status === 403 || httpProbe.status === 404 || httpProbe.status === 405,
+      profilesBounded: Array.isArray(capabilities.profiles) && capabilities.profiles.length <= 3,
+      noExecutablePaths: capabilities.profiles.every((profile) => Object.keys(profile).every((key) => key === 'id' || key === 'label'))
+    };
+  })()`);
+  const passed = Object.values(result || {}).every(Boolean) && terminalService.sessionCount() === 0;
+  console.log(`Explore Better terminal security smoke: passed=${passed} result=${JSON.stringify(result)} sessions=${terminalService.sessionCount()}`);
+  return passed;
+}
+
+const hasSingleInstanceLock = terminalBrokerMode || smokeMode || app.requestSingleInstanceLock();
+if (terminalBrokerMode) {
+  app.on("ready", () => {
+    runTerminalBroker(terminalBrokerManifest)
+      .then(() => app.exit(0))
+      .catch((error) => {
+        console.error(error);
+        app.exit(1);
+      });
+  });
+} else if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.setAppUserModelId("ExploreBetter.LocalFileManager");
@@ -800,7 +990,7 @@ if (!hasSingleInstanceLock) {
           if (smokeWindowMode) {
             await showLister(smokeShellTarget, smokeShellMode);
             const hasDesktopBridge = await mainWindow.webContents.executeJavaScript(
-              "Boolean(window.exploreBetterDesktop && window.exploreBetterDesktop.getPathForFile && window.exploreBetterDesktop.startFileDrag && window.exploreBetterDesktop.updateStatus && window.exploreBetterDesktop.checkForUpdates && window.exploreBetterDesktop.backendStatus && window.exploreBetterDesktop.appInfo && window.exploreBetterDesktop.restartBackend)"
+              "Boolean(window.exploreBetterDesktop && window.exploreBetterDesktop.getPathForFile && window.exploreBetterDesktop.startFileDrag && window.exploreBetterDesktop.updateStatus && window.exploreBetterDesktop.checkForUpdates && window.exploreBetterDesktop.backendStatus && window.exploreBetterDesktop.appInfo && window.exploreBetterDesktop.restartBackend && window.exploreBetterDesktop.terminal?.capabilities && window.exploreBetterDesktop.terminal?.create && window.exploreBetterDesktop.terminal?.write && window.exploreBetterDesktop.terminal?.resize && window.exploreBetterDesktop.terminal?.restart && window.exploreBetterDesktop.terminal?.dispose)"
             );
             const updateStatus = await mainWindow.webContents.executeJavaScript("window.exploreBetterDesktop.updateStatus()");
             const backendStatus = await mainWindow.webContents.executeJavaScript("window.exploreBetterDesktop.backendStatus()");
@@ -827,6 +1017,12 @@ if (!hasSingleInstanceLock) {
               return exitSmoke(1);
             }
             if (smokeNativeHelperMode && !(await runNativeHelperSmoke())) {
+              return exitSmoke(1);
+            }
+            if (smokeTerminalMode && !(await runTerminalSmoke())) {
+              return exitSmoke(1);
+            }
+            if (smokeTerminalSecurityMode && !(await runTerminalSecuritySmoke())) {
               return exitSmoke(1);
             }
             if (smokeUpdateFeedMode) {
@@ -866,6 +1062,7 @@ if (!hasSingleInstanceLock) {
     }
   });
   app.on("will-quit", () => {
+    terminalService?.disposeAll();
     stopBackendMonitor();
     stopServer().catch((error) => console.error(error));
   });

@@ -242,6 +242,16 @@ async function inspectVirtualList(page, expectedCount) {
     const windowElement = document.querySelector('[data-list="left"] [data-virtual-window]');
     const first = entries[0]?.getAttribute("data-entry-path") || "";
     const last = entries.at(-1)?.getAttribute("data-entry-path") || "";
+    const navigation = performance.getEntriesByType("navigation")[0];
+    const resources = performance
+      .getEntriesByType("resource")
+      .filter((entry) => /app-runtime|\/api\/(roots|state|shell\/locations|list)/.test(entry.name))
+      .map((entry) => ({
+        name: new URL(entry.name).pathname,
+        startMs: Math.round(entry.startTime * 10) / 10,
+        durationMs: Math.round(entry.duration * 10) / 10,
+        responseEndMs: Math.round(entry.responseEnd * 10) / 10
+      }));
     return {
       expectedCount: count,
       virtualized: Boolean(list?.classList.contains("virtualized")),
@@ -253,7 +263,11 @@ async function inspectVirtualList(page, expectedCount) {
       first,
       last,
       pathValue: document.querySelector('[data-path-input="left"]')?.value || "",
-      status: document.querySelector("#status-pill")?.textContent || ""
+      status: document.querySelector("#status-pill")?.textContent || "",
+      startupTimings: {
+        domContentLoadedMs: Math.round(Number(navigation?.domContentLoadedEventEnd || 0) * 10) / 10,
+        resources
+      }
     };
   }, expectedCount);
 }
@@ -536,7 +550,7 @@ async function main() {
       if (count >= 100000) {
         assert(
           Number(report.firstWindowPaintMs || Infinity) <= 750,
-          `${viewport.name}: median cold first visible window must paint within 750ms, got ${report.firstWindowPaintMs}ms.`
+          `${viewport.name}: median cold first visible window must paint within 750ms, got ${report.firstWindowPaintMs}ms; timings=${JSON.stringify(report.windowFirst?.startupTimings || {})}.`
         );
         assert(
           Number(report.fullHydrationMs || Infinity) <= 2000,

@@ -44,6 +44,7 @@ const coreSuites = [
   ["keyboard", "scripts/keyboard-workflows-ui-smoke.mjs", 180000],
   ["command-center", "scripts/command-center-ui-smoke.mjs", 180000],
   ["accessibility", "scripts/accessibility-verify.mjs", 180000],
+  ["terminal", "scripts/terminal-verify.mjs", 300000],
   ["windows-baseline", "scripts/windows-baseline-smoke.mjs", 300000],
   ["large-folder-100k", "scripts/large-folder-ui-verify.mjs", 600000, ["--count=100000", "--viewports=desktop", "--output=large-folder-100k-ui-latest.json", "--screenshot-prefix=large-folder-100k-ui"]],
   ["release-readiness", "scripts/release-readiness-smoke.mjs", 180000],
@@ -116,6 +117,9 @@ function freeLoopbackPort() {
 async function runSuite([name, script, timeoutMs, extraArgs = []]) {
   if (name === "perf-guard") {
     await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  if (name === "large-folder-100k") {
+    await new Promise((resolve) => setTimeout(resolve, 8000));
   }
   const suitePort = await freeLoopbackPort();
   return new Promise((resolve) => {

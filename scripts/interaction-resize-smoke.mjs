@@ -238,7 +238,7 @@ async function verifyDoubleClick(page) {
 async function main() {
   await fs.mkdir(artifactsDir, { recursive: true });
   await prepareFixture();
-  const port = Number(optionValue("--port", process.env.PORT || 54500 + Math.floor(Math.random() * 9000)));
+  const port = Number(optionValue("--port", process.env.PORT || 47000 + Math.floor(Math.random() * 2500)));
   const baseUrl = `http://127.0.0.1:${port}`;
   let serverOutput = "";
   const server = spawn(process.execPath, ["server.mjs"], {
@@ -276,6 +276,11 @@ async function main() {
     assert((await rootFile.count()) === 1, "Expected one root-file.txt row for compact status testing.");
     await rootFile.click();
     await page.waitForFunction(() => document.querySelector("#selection-readout")?.classList.contains("active"));
+    await page.waitForFunction(
+      () => (document.getElementById("inspector")?.getBoundingClientRect().width || 0) >= 180,
+      null,
+      { timeout: 1500 }
+    );
     const selectedStatus = await readGeometry(page);
     assert(selectedStatus.inspector.width >= 180, `Selecting a file should restore Preview, found ${selectedStatus.inspector.width}px.`);
     assert(selectedStatus.dockStatus.selection.text.includes("1 selected"), `Selection status should compactly show one selected item: ${selectedStatus.dockStatus.selection.text}`);

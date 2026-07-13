@@ -291,11 +291,35 @@ function trendableMetrics(checks) {
 }
 
 function trendMethodology(guardReport) {
-  return Number(guardReport.repetitions) > 1 ? "fresh-process-median-v1" : "single-process-v1";
+  const prefix = Number(guardReport.repetitions) > 1 ? "fresh-process-median-v2" : "single-process-v2";
+  const environment = guardReport.environment || {};
+  const storage = environment.oneDrive?.fixtureWithinSyncRoot ? "onedrive" : "local";
+  return `${prefix}:${storage}:${environment.activeProcessLoad || "unknown"}`;
 }
 
 function entryMethodology(entry) {
   return entry.methodology || "single-process-v1";
+}
+
+function aggregateEnvironment(benchmarks) {
+  const latest = benchmarks.at(-1)?.environment || {};
+  const cpuSamples = benchmarks
+    .map((benchmark) => Number(benchmark.environment?.systemCpuLoadPercent))
+    .filter(Number.isFinite);
+  const systemCpuLoadPercent = rounded(median(cpuSamples));
+  const activeProcessLoad = systemCpuLoadPercent === null
+    ? "unknown"
+    : systemCpuLoadPercent < 20
+      ? "light"
+      : systemCpuLoadPercent < 50
+        ? "moderate"
+        : "heavy";
+  return {
+    ...latest,
+    systemCpuLoadPercent,
+    activeProcessLoad,
+    cpuLoadSamples: cpuSamples.map(rounded)
+  };
 }
 
 function historyMetricValues(history, metricName, methodology) {
@@ -356,7 +380,8 @@ function buildTrendReport(history, guardReport, benchmark) {
     environment: {
       platform: benchmark.platform,
       cpuCount: benchmark.cpuCount,
-      node: benchmark.node
+      node: benchmark.node,
+      ...benchmark.environment
     },
     comparisons,
     regressions,
@@ -374,7 +399,8 @@ function historyEntryFromReports(guardReport, benchmark, trendReport) {
     environment: {
       platform: benchmark.platform,
       cpuCount: benchmark.cpuCount,
-      node: benchmark.node
+      node: benchmark.node,
+      ...benchmark.environment
     },
     counts: {
       runs: (benchmark.runs || []).map((run) => run.count),
@@ -501,6 +527,7 @@ async function main() {
   }
 
   const benchmark = benchmarks[benchmarks.length - 1];
+  const environment = aggregateEnvironment(benchmarks);
   const checks = aggregateCheckRuns(checkRuns);
   const failures = checks.filter((check) => check.status === "fail");
   const guardReport = {
@@ -508,15 +535,17 @@ async function main() {
     status: failures.length ? "fail" : "pass",
     repetitions,
     sampleGeneratedAt: benchmarks.map((sample) => sample.generatedAt),
+    environment,
     budgets,
     benchmark: benchmarkJsonPath,
     checks,
     failures
   };
   const existingHistory = await readTrendHistory();
-  const trendReport = buildTrendReport(existingHistory, guardReport, benchmark);
+  const trendBenchmark = { ...benchmark, environment };
+  const trendReport = buildTrendReport(existingHistory, guardReport, trendBenchmark);
   const savedHistoryEntries = await appendTrendHistory(
-    historyEntryFromReports(guardReport, benchmark, trendReport),
+    historyEntryFromReports(guardReport, trendBenchmark, trendReport),
     trendHistoryLimit()
   );
   trendReport.savedHistoryEntries = savedHistoryEntries;

@@ -454,7 +454,9 @@ function sanitizeLayoutSizes(source = {}) {
     rightPaneWeight: clampNumber(raw.rightPaneWeight, 0.45, 3.5, 1),
     topPaneWeight: clampNumber(raw.topPaneWeight, 0.45, 3.5, 1),
     bottomPaneWeight: clampNumber(raw.bottomPaneWeight, 0.45, 3.5, 1),
-    dockHeight: clampNumber(raw.dockHeight, 34, 280, 44)
+    dockHeight: clampNumber(raw.dockHeight, 34, 280, 44),
+    leftTerminalHeight: clampNumber(raw.leftTerminalHeight, 140, 720, 220),
+    rightTerminalHeight: clampNumber(raw.rightTerminalHeight, 140, 720, 220)
   };
 }
 
@@ -476,6 +478,13 @@ function sanitizeSettings(settings) {
     autoRefresh: raw.autoRefresh !== false,
     showHidden: raw.showHidden !== false,
     linkedNavigation: raw.linkedNavigation === true,
+    terminalDefaultProfile: String(raw.terminalDefaultProfile || "auto").slice(0, 80),
+    terminalDefaultElevation: raw.terminalDefaultElevation === "administrator" ? "administrator" : "standard",
+    terminalFollowDirectory: raw.terminalFollowDirectory !== false,
+    terminalTheme: ["dark", "light", "high-contrast"].includes(raw.terminalTheme) ? raw.terminalTheme : "dark",
+    terminalFontSize: Math.round(clampNumber(raw.terminalFontSize, 10, 20, 12)),
+    terminalCursor: ["block", "bar", "underline"].includes(raw.terminalCursor) ? raw.terminalCursor : "block",
+    terminalScrollback: Math.round(clampNumber(raw.terminalScrollback, 1000, 50000, 10000)),
     layoutSizes: sanitizeLayoutSizes(raw.layoutSizes),
     toolbarActions: sanitizeToolbarActions(raw.toolbarActions),
     toolbarOrder: sanitizeToolbarOrder(raw.toolbarOrder)
@@ -537,11 +546,13 @@ function uniqueBackgroundIndexRoots(roots) {
   return clean;
 }
 
+const serializedJsonBody = Symbol("serializedJsonBody");
+
 function sendJson(res, status, payload) {
   if (res.writableEnded || res.destroyed) {
     return;
   }
-  const body = JSON.stringify(payload);
+  const body = payload?.[serializedJsonBody] || JSON.stringify(payload);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
@@ -778,6 +789,13 @@ return listing.entries
       autoRefresh: true,
       showHidden: true,
       linkedNavigation: false,
+      terminalDefaultProfile: "auto",
+      terminalDefaultElevation: "standard",
+      terminalFollowDirectory: true,
+      terminalTheme: "dark",
+      terminalFontSize: 12,
+      terminalCursor: "block",
+      terminalScrollback: 10000,
       layoutSizes: sanitizeLayoutSizes(),
       toolbarActions: [],
       toolbarOrder: []
@@ -5020,7 +5038,9 @@ function directoryListingInFlightKey(context) {
     stamp.mtimeUs ?? "",
     stamp.ctimeUs ?? "",
     stamp.size ?? "",
-    context?.labelStamp || ""
+    context?.labelStamp || "",
+    context?.windowOptions?.offset ?? "full",
+    context?.windowOptions?.limit ?? "full"
   ].join("\u001e");
 }
 
@@ -5736,7 +5756,6 @@ async function listDirectory(targetPath, options = {}) {
   let listingCacheContext = null;
   let labelState = null;
   if (
-    !bypassCache &&
     directoryListingCacheEligible(targetStats, {
       priority,
       includeDimensions,
@@ -5765,6 +5784,7 @@ async function listDirectory(targetPath, options = {}) {
       includeLinks,
       includeAttributes,
       includeSignature,
+      windowOptions,
       watchRecord,
       watchVersion: Number(watchRecord?.version || 0),
       dirStamp: directoryListingCacheStamp(targetStats),
@@ -5776,9 +5796,13 @@ async function listDirectory(targetPath, options = {}) {
       labelState = await readLabelState();
       listingCacheContext.labelStamp = labelState.labelStamp;
       listingCacheContext.probeMs = elapsedMs(cacheProbeStart);
-      const cachedListing = readDirectoryListingCache(listingCacheContext);
-      if (cachedListing) {
-        return cachedListing;
+      if (!bypassCache) {
+        const cachedListing = readDirectoryListingCache(listingCacheContext);
+        if (cachedListing) {
+          return cachedListing;
+        }
+      } else {
+        listingCacheContext.skipReason = "bypass";
       }
     } else {
       listingCacheContext.probeMs = elapsedMs(cacheProbeStart);
@@ -14865,7 +14889,7 @@ function cachedSizeAnalysisReport(cached, startedAt) {
     ...(cached.report.summary || {}),
     elapsedMs: elapsedMs(startedAt)
   };
-  return {
+  const report = {
     ...cached.report,
     summary,
     cache: {
@@ -14877,6 +14901,10 @@ function cachedSizeAnalysisReport(cached, startedAt) {
       cacheKey: cached.cacheKey
     }
   };
+  if (cached.serializedBody) {
+    Object.defineProperty(report, serializedJsonBody, { value: cached.serializedBody });
+  }
+  return report;
 }
 
 function readSizeAnalysisCache(context, startedAt) {
@@ -14905,11 +14933,27 @@ function rememberSizeAnalysisCache(report, context) {
   }
   const { cache, ...cacheableReport } = report;
   const now = Date.now();
+  const serializedBody = JSON.stringify({
+    ...cacheableReport,
+    summary: {
+      ...(cacheableReport.summary || {}),
+      elapsedMs: 0
+    },
+    cache: {
+      hit: true,
+      source: "size-analysis-cache",
+      ageMs: 0,
+      ttlMs: sizeAnalysisCacheTtlMs,
+      originalElapsedMs: cacheableReport.summary?.elapsedMs ?? null,
+      cacheKey: context.cacheKey
+    }
+  });
   sizeAnalysisCache.set(context.cacheKey, {
     cacheKey: context.cacheKey,
     rootPath: context.rootPath,
     rootStamp: context.rootStamp,
     report: cacheableReport,
+    serializedBody,
     cachedAt: now,
     lastAccess: now
   });
@@ -19793,12 +19837,19 @@ function safeStaticPath(urlPath) {
 }
 
 async function serveStatic(req, res, url) {
-  const file = safeStaticPath(url.pathname);
+  let file = safeStaticPath(url.pathname);
   if (!file) {
     return sendError(res, 403, "Static path is outside the public directory.");
   }
   try {
-    const stats = await fs.stat(file);
+    let stats;
+    try {
+      stats = await fs.stat(file);
+    } catch (error) {
+      if (error.code !== "ENOENT" || url.pathname !== "/generated/app-runtime.js") throw error;
+      file = path.join(publicDir, "app.js");
+      stats = await fs.stat(file);
+    }
     if (!stats.isFile()) {
       return sendError(res, 404, "Static file not found.");
     }
@@ -19846,30 +19897,41 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-export function startServer() {
+let serverStartPromise = null;
+
+export async function startServer() {
   if (server.listening) {
-    return Promise.resolve(server);
+    return server;
   }
-  warmNativeFilesystemHelper().catch((error) => {
-    console.warn(`Could not warm native filesystem helper: ${error.message}`);
-  });
-  return new Promise((resolve, reject) => {
-    const onError = (error) => {
-      server.off("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      console.log(`Explore Better running at http://${host}:${port}`);
-      syncBackgroundIndexWatchersFromState().catch((error) => {
-        console.warn(`Could not start background index watchers: ${error.message}`);
-      });
-      resolve(server);
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(port, host);
-  });
+  if (serverStartPromise) return serverStartPromise;
+  serverStartPromise = (async () => {
+    await readCachedState();
+    warmNativeFilesystemHelper().catch((error) => {
+      console.warn(`Could not warm native filesystem helper: ${error.message}`);
+    });
+    return new Promise((resolve, reject) => {
+      const onError = (error) => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        console.log(`Explore Better running at http://${host}:${port}`);
+        syncBackgroundIndexWatchersFromState().catch((error) => {
+          console.warn(`Could not start background index watchers: ${error.message}`);
+        });
+        resolve(server);
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(port, host);
+    });
+  })();
+  try {
+    return await serverStartPromise;
+  } finally {
+    serverStartPromise = null;
+  }
 }
 
 export function stopServer() {

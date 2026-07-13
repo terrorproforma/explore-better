@@ -1,0 +1,81 @@
+name: Build attested Windows release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      EXPLORE_BETTER_DISABLE_STATE_WATCH: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.23.4
+          cache-dependency-path: native/fshelper/go.mod
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - name: Confirm release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          if ($env:GITHUB_REF_NAME -ne "v$packageVersion") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version $packageVersion"
+          }
+      - name: Build installer and update metadata
+        run: |
+          npm run package:installer
+          npm run verify:packaged-terminal
+          npm run build:update-feed
+          npm run build:release-checksums
+          npm run verify:release-checksums
+      - name: Record current Authenticode status
+        run: npm run verify:production-signing
+      - name: Attest release checksums
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/SHA256SUMS.txt
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ExploreBetter-${{ github.ref_name }}-windows-x64
+          if-no-files-found: error
+          path: |
+            dist/ExploreBetter-*-x64-setup.exe
+            dist/ExploreBetter-*-x64-setup.exe.blockmap
+            dist/update-feed/latest.yml
+            dist/SHA256SUMS.txt
+            artifacts/production-signing-latest.md
+      - name: Create or update draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $installer = Get-ChildItem -LiteralPath dist -Filter "ExploreBetter-*-x64-setup.exe" | Select-Object -First 1
+          $blockmap = Get-ChildItem -LiteralPath dist -Filter "ExploreBetter-*-x64-setup.exe.blockmap" | Select-Object -First 1
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --draft --verify-tag --generate-notes --title "Explore Better $tag"
+          }
+          gh release upload $tag --clobber `
+            $installer.FullName `
+            $blockmap.FullName `
+            dist/update-feed/latest.yml `
+            dist/SHA256SUMS.txt `
+            artifacts/production-signing-latest.md

@@ -314,6 +314,11 @@ async function main() {
       id: "unpacked-exe",
       label: "Unpacked desktop executable",
       path: path.join(workspace, "dist", "win-unpacked", unpackedExeName)
+    },
+    {
+      id: "native-helper",
+      label: "Packaged native filesystem helper",
+      path: path.join(workspace, "dist", "win-unpacked", "resources", "native", "explore-better-fs.exe")
     }
   ];
   const files = [];
@@ -347,13 +352,25 @@ async function main() {
     if (artifact && artifact.sha256 !== file.sha256) bundleMismatches.push(file.id);
   }
   if (bundle) {
-    requireCheck(
-      checks,
-      bundleMismatches.length === 0,
-      "signing-targets-match-bundle",
-      "Signing targets match the current release bundle",
-      bundleMismatches.length ? `Hash mismatch for ${bundleMismatches.join(", ")}.` : `${files.length} target hash(es) match.`
-    );
+    const bundleGeneratedAt = Date.parse(bundle.generatedAt || "");
+    const bundleIsStale = Number.isFinite(bundleGeneratedAt) && files.some((file) => file.mtimeMs > bundleGeneratedAt + 1000);
+    if (bundleIsStale) {
+      addCheck(
+        checks,
+        "warn",
+        "signing-targets-match-bundle",
+        "Signing targets match the current release bundle",
+        "The existing release bundle predates the current packaged binaries; regenerate it before publishing."
+      );
+    } else {
+      requireCheck(
+        checks,
+        bundleMismatches.length === 0,
+        "signing-targets-match-bundle",
+        "Signing targets match the current release bundle",
+        bundleMismatches.length ? `Hash mismatch for ${bundleMismatches.join(", ")}.` : `${files.length} target hash(es) match.`
+      );
+    }
   }
 
   const payloadPath = path.join(artifactsDir, "production-signing-payload.json");
