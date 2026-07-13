@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { createServer } from "node:net";
 import path from "node:path";
 import { chromium } from "playwright-core";
 import { clickDockAction } from "./ui-helpers.mjs";
@@ -63,11 +64,11 @@ async function requestJson(baseUrl, route, options = {}) {
   return data;
 }
 
-async function waitForServer(baseUrl, child) {
+async function waitForServer(baseUrl, child, getOutput) {
   const started = Date.now();
   while (Date.now() - started < 10000) {
     if (child.exitCode !== null) {
-      throw new Error(`Server exited early with ${child.exitCode}`);
+      throw new Error(`Server exited early with ${child.exitCode} at ${baseUrl}: ${getOutput()}`);
     }
     try {
       await requestJson(baseUrl, "/api/roots");
@@ -76,7 +77,32 @@ async function waitForServer(baseUrl, child) {
       await new Promise((resolve) => setTimeout(resolve, 120));
     }
   }
-  throw new Error(`Server did not start at ${baseUrl}`);
+  throw new Error(`Server did not start at ${baseUrl}: ${getOutput()}`);
+}
+
+async function availablePort() {
+  const probe = createServer();
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const address = probe.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise((resolve, reject) => probe.close((error) => (error ? reject(error) : resolve())));
+  if (!port) throw new Error("Windows did not assign an available layout-test port.");
+  return port;
+}
+
+async function stopServer(child) {
+  if (!child || child.exitCode !== null) return;
+  child.kill();
+  await new Promise((resolve) => {
+    const timeout = setTimeout(resolve, 1500);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
 }
 
 async function prepareFixture() {
@@ -751,7 +777,8 @@ async function verifySpeedTelemetry(page) {
 async function main() {
   await fs.mkdir(artifactsDir, { recursive: true });
   await prepareFixture();
-  const port = Number(optionValue("--port", process.env.PORT || 48000 + Math.floor(Math.random() * 10000)));
+  const requestedPort = optionValue("--port", process.env.PORT || "");
+  const port = requestedPort ? Number(requestedPort) : await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const server = spawn(process.execPath, ["server.mjs"], {
     cwd: workspace,
@@ -768,7 +795,7 @@ async function main() {
 
   const browser = await chromium.launch({ executablePath: edgePath(), headless: true });
   try {
-    await waitForServer(baseUrl, server);
+    await waitForServer(baseUrl, server, () => serverOutput.trim());
     await requestJson(baseUrl, "/api/state", {
       method: "POST",
       body: JSON.stringify({ settings: { layoutSizes: stressLayoutSizes }, favorites: stressFavorites })
@@ -843,7 +870,7 @@ async function main() {
     }
   } finally {
     await browser.close().catch(() => {});
-    server.kill();
+    await stopServer(server);
     await fs.rm(runRoot, { recursive: true, force: true }).catch(() => {});
   }
 }
