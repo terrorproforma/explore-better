@@ -236,7 +236,20 @@ Drag built-in command dock buttons to reorder them. Use `Toolbar` to decide whic
 
 ## Explorer Integration
 
-Use `Integrate` to generate or inspect Explorer replacement files, context-menu handlers, default folder handlers, shortcuts, native-window launch settings, and cleanup tools. Integration is current-user scoped and reversible through the generated restore/cleanup actions.
+On the first packaged launch, Explore Better asks whether it should become the current user's default file manager for normal filesystem folder and drive opens. Choose **Use Explore Better** to enable it, or **Keep Windows Explorer** to leave Windows unchanged. The choice is not permanent.
+
+To enable it later:
+
+1. Open `Integrate` from the command shelf or Command Center.
+2. Choose **Make Default**.
+3. Confirm the current-user change. Explore Better saves the exact existing shell values before installing its handlers.
+4. Optionally install the Win+E helper if you also want Explore Better to claim that shortcut after sign-in.
+
+The default integration covers normal folder and drive opens, right-click **Open in Explore Better**, right-clicking a folder background, and **Open file location in Explore Better** on files. Programs that ask the Windows shell to open a folder normally can therefore arrive in Explore Better. A program that explicitly launches `explorer.exe` is hard-coded to Windows Explorer and will still open Explorer; safely replacing or renaming the Windows system executable is not supported.
+
+To undo the change, open `Integrate` and choose **Restore Previous**. Explore Better restores the exact backed-up current-user values, including a pre-existing third-party default handler, and removes only its own keys. **Clean Integrations** can remove optional shortcuts and helpers as well. Windows Explorer remains installed throughout.
+
+The Integration Center also generates or inspects Explorer replacement files, context-menu handlers, shortcuts, native-window launch settings, status, and cleanup tools. Integration is current-user scoped and does not require the main application to run as administrator.
 
 Run `npm run build:icon` before packaging if icon source changed. It regenerates the branded Windows PNG/ICO assets used by the desktop build.
 
@@ -266,9 +279,9 @@ Run `npm run verify:auto-update-feed` to start a local generic update feed and p
 
 Packaged public builds use the GitHub Releases feed by default. `EXPLORE_BETTER_UPDATE_URL` or `EB_UPDATE_URL` can override it for development and private deployments; source-mode desktop runs do not contact the public feed unless an override is configured.
 
-Run `npm run verify:shell-rehearsal` to test the install/remove mechanics under isolated temporary `%LOCALAPPDATA%`, `%APPDATA%`, `%USERPROFILE%`, and OneDrive/Desktop paths. It installs the packaged app copy, installs/removes Start Menu/Desktop shortcuts and the optional Win+E startup helper, checks generated registry files target the installed app, and intentionally does not import HKCU registry files into the real shell.
+Run `npm run verify:shell-rehearsal` to test the install/remove mechanics under isolated temporary `%LOCALAPPDATA%`, `%APPDATA%`, `%USERPROFILE%`, and OneDrive/Desktop paths. It installs the packaged app copy, installs/removes Start Menu/Desktop shortcuts and the optional Win+E startup helper, checks generated folder, drive, background, and file-location registry handlers target the installed app, and intentionally does not import HKCU registry files into the real shell.
 
-Run `npm run verify:shell-current-user` to perform a real current-user HKCU shell-handler install/revert trial. It uses isolated app-data folders for the generated files and app copy, imports the generated context-menu and default-folder handler files into the real current-user shell keys, verifies Explore Better is enabled, runs the installed desktop handler against a real target folder in smoke mode, then restores the pre-trial shell registry snapshot before exiting.
+Run `npm run verify:shell-current-user` to perform a real current-user HKCU shell-handler install/revert trial. It uses isolated app-data folders for the generated files and app copy, imports the generated context-menu and default-folder handler files into the real current-user shell keys, verifies all four handler entry points are enabled, opens a real target folder, confirms **Open file location** opens the parent and selects the requested file, calls the same **Restore Previous** API used by the UI, then compares the complete restored registry snapshot with the pre-trial state.
 
 ## Performance Notes
 

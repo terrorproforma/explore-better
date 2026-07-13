@@ -2497,6 +2497,40 @@
       <div id="trash-results" class="trash-results"></div>
     </dialog>
 
+    <dialog
+      class="default-explorer-dialog"
+      id="default-explorer-dialog"
+      aria-labelledby="default-explorer-title"
+      aria-describedby="default-explorer-description"
+    >
+      <div class="dialog-head">
+        <strong id="default-explorer-title">Default File Manager</strong>
+      </div>
+      <div class="default-explorer-body">
+        <p id="default-explorer-description">
+          Use Explore Better when Windows opens filesystem folders and drives for your account?
+        </p>
+        <ul>
+          <li>Backs up the current folder and drive handlers before changing them.</li>
+          <li>Adds Open in Explore Better commands for folders, drives, backgrounds, and file locations.</li>
+          <li>Keeps Windows Explorer installed and restores the previous handlers on request.</li>
+        </ul>
+        <label class="default-explorer-option">
+          <input type="checkbox" id="default-explorer-win-e" />
+          <span>Start the optional Win+E helper at sign-in</span>
+        </label>
+        <p class="default-explorer-limit">
+          Programs that explicitly run explorer.exe will still open Windows Explorer.
+        </p>
+      </div>
+      <div class="default-explorer-actions">
+        <button type="button" data-default-explorer-choice="keep">Keep Windows Explorer</button>
+        <button type="button" class="primary-command" data-default-explorer-choice="default">
+          Use Explore Better
+        </button>
+      </div>
+    </dialog>
+
     <dialog class="integration-dialog" id="integration-dialog">
       <div class="dialog-head">
         <strong>Explorer Integration</strong>
@@ -2515,6 +2549,15 @@
           <span class="field-label">Win+E</span>
           <code id="integration-wine">Not installed</code>
         </div>
+      </div>
+      <div class="integration-default-action">
+        <div>
+          <span class="field-label">Default folder and drive opens</span>
+          <strong id="integration-default-action-status">Windows Explorer</strong>
+          <small>Apps that explicitly run explorer.exe are controlled by Windows and are not redirected.</small>
+        </div>
+        <button class="primary-command" data-integration-action="folderDefault">Make Default</button>
+        <button data-integration-action="removeFolderDefault">Restore Previous</button>
       </div>
       <div class="integration-steps" id="integration-steps"></div>
       <div class="integration-preflight" id="integration-preflight"></div>
@@ -2597,12 +2640,10 @@
         <button data-integration-action="shortcuts">Install Shortcuts</button>
         <button data-integration-action="shortcutsRemove">Remove Shortcuts</button>
         <button data-integration-action="backupShell">Backup Now</button>
-        <button data-integration-action="restoreShell">Restore Previous</button>
+        <button data-integration-action="restoreShell">Restore Backup</button>
         <button data-integration-action="cleanupIntegration">Clean Integrations</button>
         <button data-integration-action="contextMenu">Install Menu</button>
         <button data-integration-action="removeContextMenu">Remove Menu</button>
-        <button data-integration-action="folderDefault">Set Default</button>
-        <button data-integration-action="removeFolderDefault">Clear Default</button>
         <button data-integration-action="winEInstall">Install Win+E</button>
         <button data-integration-action="winERemove">Remove Win+E</button>
       </div>

@@ -30,6 +30,9 @@ contextBridge.exposeInMainWorld("exploreBetterDesktop", {
   backendStatus() {
     return ipcRenderer.invoke("explore-better:backend-status");
   },
+  appInfo() {
+    return ipcRenderer.invoke("explore-better:app-info");
+  },
   restartBackend() {
     return ipcRenderer.invoke("explore-better:restart-backend");
   }

@@ -251,6 +251,19 @@ button:focus-visible {
   outline: none;
 }
 
+button.primary-command {
+  border-color: #246a45;
+  background: var(--green);
+  color: #ffffff;
+  font-weight: 750;
+}
+
+button.primary-command:hover,
+button.primary-command:focus-visible {
+  border-color: #174f33;
+  background: #276f49;
+}
+
 .app-shell {
   --topbar-height: 56px;
   --dock-height: clamp(38px, var(--user-dock-height, 44px), min(260px, 38vh));
@@ -4580,6 +4593,7 @@ textarea:focus {
 .flat-dialog,
 .duplicates-dialog,
 .compare-dialog,
+.default-explorer-dialog,
 .integration-dialog {
   width: min(760px, calc(100vw - 28px));
   border: 1px solid var(--line-strong);
@@ -4821,6 +4835,7 @@ textarea:focus {
 .flat-dialog::backdrop,
 .duplicates-dialog::backdrop,
 .compare-dialog::backdrop,
+.default-explorer-dialog::backdrop,
 .integration-dialog::backdrop {
   background: rgba(16, 19, 18, 0.34);
 }
@@ -9900,11 +9915,85 @@ textarea:focus {
   width: min(1080px, calc(100vw - 28px));
 }
 
+.default-explorer-dialog {
+  width: min(560px, calc(100vw - 28px));
+}
+
+.default-explorer-body {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px 10px;
+}
+
+.default-explorer-body p,
+.default-explorer-body ul {
+  margin: 0;
+}
+
+.default-explorer-body ul {
+  display: grid;
+  gap: 8px;
+  padding-left: 22px;
+}
+
+.default-explorer-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+  font-weight: 700;
+}
+
+.default-explorer-limit {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.default-explorer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 20px 18px;
+}
+
 .integration-summary {
   display: grid;
   grid-template-columns: 1.2fr 0.7fr 1fr;
   gap: 10px;
   padding: 12px 12px 0;
+}
+
+.integration-default-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 12px;
+  background: #f7faf8;
+}
+
+.integration-default-action > div {
+  min-width: 0;
+}
+
+.integration-default-action strong,
+.integration-default-action small {
+  display: block;
+  margin-top: 4px;
+}
+
+.integration-default-action small {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .integration-summary > div {
@@ -11342,6 +11431,19 @@ textarea:focus {
 }
 
 @media (max-width: 760px) {
+  .integration-default-action {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .integration-default-action small {
+    white-space: normal;
+  }
+
+  .default-explorer-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
   .app-shell.inspector-auto-collapsed:not(.inspector-off):not(.focus-files) .workbench,
   .app-shell.inspector-auto-collapsed:not(.inspector-off):not(.focus-files) .workbench.layout-horizontal {
     grid-template-columns: minmax(0, 1fr);

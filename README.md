@@ -53,7 +53,9 @@ The current public preview is not Authenticode-signed because a trusted producti
 
 ### Explorer Integration
 
-Explorer replacement features are disabled by default. The in-app **Integration Center** can install current-user shortcuts and shell handlers, show their status, back up the values it changes, and remove the integration again. Explore Better can be used as a standalone file manager without changing Explorer.
+Explorer replacement features are opt-in. On the first packaged launch, Explore Better offers to become the current user's default handler for normal filesystem folder and drive opens. Choosing **Use Explore Better** backs up the exact existing shell values, installs folder, drive, folder-background, and **Open file location in Explore Better** handlers, and leaves Windows Explorer installed.
+
+You can make the same change later from **Integrate** > **Make Default**, add the optional Win+E sign-in helper, or choose **Restore Previous** to put the backed-up handlers back exactly as they were. Applications that ask Windows to open a folder normally can use Explore Better; applications that explicitly execute `explorer.exe` are hard-coded to Windows Explorer and cannot be redirected safely. Explore Better also works as a standalone file manager without changing any defaults.
 
 ## Feature Modules
 
@@ -147,8 +149,9 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 - ZIP browsing as read-only virtual folders without extracting first.
 - Windows file clipboard and drag/drop interoperability with Explorer and the desktop.
 - Recycle Bin browsing and native restore support.
-- Optional current-user context menus, folder handlers, shortcuts, startup behavior, and Win+E helper.
-- Integration backup, status reporting, launch tests, rollback, and cleanup from one center.
+- First-launch opt-in plus current-user folder, drive, folder-background, and file-location handlers.
+- Optional shortcuts, startup behavior, and Win+E helper.
+- Exact integration backup, status reporting, launch tests, rollback, and cleanup from one center.
 
 ### Native Windows Filesystem Provider
 
@@ -170,12 +173,13 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 ## First-Run Workflow
 
 1. Launch Explore Better from the Start Menu or desktop shortcut.
-2. Open a source folder in one pane and a destination folder in the other.
-3. Double-click folders to navigate, or use `Enter`, breadcrumbs, history, and the path bar.
-4. Use `F5` to copy or `F6` to move the current selection to the opposite pane.
-5. Open **Ops** to inspect progress, retry remaining work, recover an interrupted operation, or undo a supported action.
-6. Open **Disk Map** to scan the active folder and drill into its largest branches.
-7. Open **Command** or press `Ctrl+P` to find every action without exposing every control in the toolbar.
+2. Choose whether normal Windows folder and drive opens should use Explore Better. This can be changed later under **Integrate**.
+3. Open a source folder in one pane and a destination folder in the other.
+4. Double-click folders to navigate, or use `Enter`, breadcrumbs, history, and the path bar.
+5. Use `F5` to copy or `F6` to move the current selection to the opposite pane.
+6. Open **Ops** to inspect progress, retry remaining work, recover an interrupted operation, or undo a supported action.
+7. Open **Disk Map** to scan the active folder and drill into its largest branches.
+8. Open **Command** or press `Ctrl+P` to find every action without exposing every control in the toolbar.
 
 The [user manual](USER_MANUAL.md) covers all primary controls, keyboard workflows, resizing, file operations, Disk Map, scripting, recovery, and Explorer integration.
 

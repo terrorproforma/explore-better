@@ -335,6 +335,36 @@ const shellRegistrySnapshotSpec = [
     key: "HKCU\\Software\\Classes\\Drive\\shell\\ExploreBetter\\command",
     kind: "ownedKey",
     values: [{ id: "default", name: null }]
+  },
+  {
+    id: "directoryBackgroundExploreBetter",
+    key: "HKCU\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter",
+    kind: "ownedKey",
+    values: [
+      { id: "default", name: null },
+      { id: "icon", name: "Icon" }
+    ]
+  },
+  {
+    id: "directoryBackgroundExploreBetterCommand",
+    key: "HKCU\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter\\command",
+    kind: "ownedKey",
+    values: [{ id: "default", name: null }]
+  },
+  {
+    id: "fileLocationExploreBetter",
+    key: "HKCU\\Software\\Classes\\*\\shell\\ExploreBetterLocation",
+    kind: "ownedKey",
+    values: [
+      { id: "default", name: null },
+      { id: "icon", name: "Icon" }
+    ]
+  },
+  {
+    id: "fileLocationExploreBetterCommand",
+    key: "HKCU\\Software\\Classes\\*\\shell\\ExploreBetterLocation\\command",
+    kind: "ownedKey",
+    values: [{ id: "default", name: null }]
   }
 ];
 const retryableOperationTypes = new Set([
@@ -1036,7 +1066,7 @@ async function updateStateBackupFromCurrent() {
   );
   try {
     await fs.writeFile(tempFile, text, "utf8");
-    await renameStateFileWithRetry(tempFile, stateBackupFile);
+    await renamePathWithRetry(tempFile, stateBackupFile);
     return true;
   } catch (error) {
     await fs.rm(tempFile, { force: true }).catch(() => {});
@@ -1468,7 +1498,7 @@ async function writeState(state) {
   }
   await updateStateBackupFromCurrent();
   try {
-    await renameStateFileWithRetry(tempFile, stateFile);
+    await renamePathWithRetry(tempFile, stateFile);
   } catch (error) {
     await fs.rm(tempFile, { force: true }).catch(() => {});
     throw error;
@@ -1477,11 +1507,11 @@ async function writeState(state) {
   return cloneState(updateStateCache(nextState, stat, stateContentHash(text)));
 }
 
-function transientFileReplaceError(error) {
+function transientPathRenameError(error) {
   return ["EBUSY", "EPERM", "EACCES"].includes(error?.code);
 }
 
-async function renameStateFileWithRetry(source, dest, attempts = 8) {
+async function renamePathWithRetry(source, dest, attempts = 8) {
   let lastError = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -1489,7 +1519,7 @@ async function renameStateFileWithRetry(source, dest, attempts = 8) {
       return;
     } catch (error) {
       lastError = error;
-      if (!transientFileReplaceError(error) || attempt === attempts - 1) {
+      if (!transientPathRenameError(error) || attempt === attempts - 1) {
         throw error;
       }
       await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
@@ -12792,24 +12822,43 @@ async function readRegistryValueSnapshot(key, name = null) {
   return { keyExists: true, ...parseRegistryValue(result.stdout, name) };
 }
 
+async function createShellRegistryEntry(spec) {
+  const keyExists = await registryKeyExists(spec.key);
+  const values = {};
+  for (const valueSpec of spec.values) {
+    values[valueSpec.id] = await readRegistryValueSnapshot(spec.key, valueSpec.name);
+  }
+  return {
+    id: spec.id,
+    key: spec.key,
+    kind: spec.kind,
+    keyExists,
+    values
+  };
+}
+
+function absentShellRegistryEntry(spec) {
+  return {
+    id: spec.id,
+    key: spec.key,
+    kind: spec.kind,
+    keyExists: false,
+    values: Object.fromEntries(
+      spec.values.map((valueSpec) => [
+        valueSpec.id,
+        { keyExists: false, valueExists: false, type: null, value: null }
+      ])
+    )
+  };
+}
+
 async function createShellRegistryBackup(mode = "manual") {
   const entries = [];
   for (const spec of shellRegistrySnapshotSpec) {
-    const keyExists = await registryKeyExists(spec.key);
-    const values = {};
-    for (const valueSpec of spec.values) {
-      values[valueSpec.id] = await readRegistryValueSnapshot(spec.key, valueSpec.name);
-    }
-    entries.push({
-      id: spec.id,
-      key: spec.key,
-      kind: spec.kind,
-      keyExists,
-      values
-    });
+    entries.push(await createShellRegistryEntry(spec));
   }
   return {
-    version: 1,
+    version: 2,
     id: crypto.randomUUID(),
     mode,
     createdAt: new Date().toISOString(),
@@ -12866,14 +12915,83 @@ async function saveShellRegistryBackup(mode = "manual") {
   return savedBackup;
 }
 
+async function ensureShellRegistryBackup(mode = "integration") {
+  const state = await readState();
+  const existing = state.integration?.registryBackup;
+  if (existing?.entries?.length && !existing.restoredAt) {
+    const existingIds = new Set(existing.entries.map((entry) => entry.id));
+    const missingSpecs = shellRegistrySnapshotSpec.filter((spec) => !existingIds.has(spec.id));
+    if (!missingSpecs.length) return existing;
+    const upgraded = {
+      ...existing,
+      version: 2,
+      upgradedAt: new Date().toISOString(),
+      entries: [...existing.entries]
+    };
+    for (const spec of missingSpecs) {
+      upgraded.entries.push(await createShellRegistryEntry(spec));
+    }
+    upgraded.restoreRegPath = await writeShellRestoreFile(upgraded);
+    await mutateState((nextState) => {
+      nextState.integration = {
+        ...nextState.integration,
+        registryBackup: upgraded
+      };
+    });
+    return upgraded;
+  }
+  return saveShellRegistryBackup(mode);
+}
+
+async function removeRegistryKeyWhenEmpty(key) {
+  const query = await runProcess("reg.exe", ["query", key]);
+  if (query.code !== 0) {
+    return { key, removed: false, missing: true };
+  }
+  const canonicalKey = registryFileKey(key).toLowerCase();
+  const remaining = String(query.stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => line.toLowerCase() !== canonicalKey);
+  if (remaining.length > 0) {
+    return { key, removed: false, empty: false };
+  }
+  const removal = await runProcess("reg.exe", ["delete", key, "/f"]);
+  if (removal.code !== 0) {
+    throw new Error(removal.stderr || removal.stdout || `Unable to remove empty registry key ${key}.`);
+  }
+  return { key, removed: true, empty: true };
+}
+
 async function restoreShellRegistryBackup() {
   const state = await readState();
-  const backup = state.integration?.registryBackup;
+  let backup = state.integration?.registryBackup;
   if (!backup?.entries?.length) {
     throw new Error("No shell registry backup has been captured yet.");
   }
+  const backupIds = new Set(backup.entries.map((entry) => entry.id));
+  const legacyMissingSpecs = shellRegistrySnapshotSpec.filter((spec) => !backupIds.has(spec.id));
+  if (legacyMissingSpecs.length) {
+    const missingSharedKeys = legacyMissingSpecs.filter((spec) => spec.kind !== "ownedKey");
+    if (missingSharedKeys.length) {
+      throw new Error("The shell backup is missing shared Windows handler values and cannot be restored safely.");
+    }
+    backup = {
+      ...backup,
+      version: 2,
+      upgradedAt: new Date().toISOString(),
+      entries: [...backup.entries, ...legacyMissingSpecs.map(absentShellRegistryEntry)]
+    };
+  }
   const restoreRegPath = await writeShellRestoreFile(backup);
   const result = await importRegistryFile(restoreRegPath);
+  const emptyKeyCleanup = [];
+  for (const entry of backup.entries) {
+    if (entry.kind === "defaultOnly" && !entry.keyExists) {
+      emptyKeyCleanup.push(await removeRegistryKeyWhenEmpty(entry.key));
+    }
+  }
   const restoredAt = new Date().toISOString();
   await mutateState((nextState) => {
     nextState.integration = {
@@ -12888,7 +13006,8 @@ async function restoreShellRegistryBackup() {
   return {
     ...result,
     restoredAt,
-    backupId: backup.id
+    backupId: backup.id,
+    emptyKeyCleanup
   };
 }
 
@@ -12944,11 +13063,11 @@ function packagedAppPath() {
   return existsSync(candidate) ? candidate : null;
 }
 
-function integrationShellCommand(launcherPath, launchMode, shellOpenMode) {
+function integrationShellCommand(launcherPath, launchMode, shellOpenMode, targetArgument = "%1") {
   const installed = launchMode === "native" ? installedAppCurrentPath() : null;
   if (installed) {
     return {
-      command: `"${installed}" "--shell-mode=${shellOpenMode}" "%1"`,
+      command: `"${installed}" "--shell-mode=${shellOpenMode}" "${targetArgument}"`,
       kind: "installed",
       target: installed
     };
@@ -12956,13 +13075,13 @@ function integrationShellCommand(launcherPath, launchMode, shellOpenMode) {
   const packagedApp = launchMode === "native" ? packagedAppPath() : null;
   if (packagedApp) {
     return {
-      command: `"${packagedApp}" "--shell-mode=${shellOpenMode}" "%1"`,
+      command: `"${packagedApp}" "--shell-mode=${shellOpenMode}" "${targetArgument}"`,
       kind: "packaged",
       target: packagedApp
     };
   }
   return {
-    command: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${launcherPath}" "%1"`,
+    command: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${launcherPath}" "${targetArgument}"`,
     kind: "launcher",
     target: launcherPath
   };
@@ -12982,7 +13101,7 @@ async function installPackagedApp() {
     verbatimSymlinks: true
   });
   await fs.rm(installedAppRoot, { recursive: true, force: true });
-  await fs.rename(stagingRoot, installedAppRoot);
+  await renamePathWithRetry(stagingRoot, installedAppRoot, 12);
   const installed = installedAppPath();
   await mutateState((state) => {
     state.integration = {
@@ -13035,6 +13154,7 @@ async function writeIntegrationFiles() {
   const repoPath = __dirname;
   const desktopDir = userDesktopPath();
   const shellCommand = integrationShellCommand(launcherPath, launchMode, shellOpenMode);
+  const backgroundShellCommand = integrationShellCommand(launcherPath, launchMode, shellOpenMode, "%V");
   const shellIcon = shellCommand.kind === "launcher" ? "imageres.dll,-5302" : shellCommand.target;
   const scriptContent = `param(
   [string]$TargetPath = $PWD.Path,
@@ -13322,12 +13442,28 @@ if (Test-Path -LiteralPath $ShortcutPath) {
 
 [HKEY_CURRENT_USER\\Software\\Classes\\Drive\\shell\\ExploreBetter\\command]
 @="${escapeReg(shellCommand.command)}"
+
+[HKEY_CURRENT_USER\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter]
+@="Open this folder in Explore Better"
+"Icon"="${escapeReg(shellIcon)}"
+
+[HKEY_CURRENT_USER\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter\\command]
+@="${escapeReg(backgroundShellCommand.command)}"
+
+[HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\ExploreBetterLocation]
+@="Open file location in Explore Better"
+"Icon"="${escapeReg(shellIcon)}"
+
+[HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\ExploreBetterLocation\\command]
+@="${escapeReg(shellCommand.command)}"
 `;
 
   const removeContextMenuReg = `Windows Registry Editor Version 5.00
 
 [-HKEY_CURRENT_USER\\Software\\Classes\\Directory\\shell\\ExploreBetter]
 [-HKEY_CURRENT_USER\\Software\\Classes\\Drive\\shell\\ExploreBetter]
+[-HKEY_CURRENT_USER\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter]
+[-HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\ExploreBetterLocation]
 `;
 
   const folderDefaultReg = `Windows Registry Editor Version 5.00
@@ -13351,6 +13487,20 @@ if (Test-Path -LiteralPath $ShortcutPath) {
 
 [HKEY_CURRENT_USER\\Software\\Classes\\Drive\\shell]
 @="ExploreBetter"
+
+[HKEY_CURRENT_USER\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter]
+@="Open this folder in Explore Better"
+"Icon"="${escapeReg(shellIcon)}"
+
+[HKEY_CURRENT_USER\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter\\command]
+@="${escapeReg(backgroundShellCommand.command)}"
+
+[HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\ExploreBetterLocation]
+@="Open file location in Explore Better"
+"Icon"="${escapeReg(shellIcon)}"
+
+[HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\ExploreBetterLocation\\command]
+@="${escapeReg(shellCommand.command)}"
 `;
 
   const removeFolderDefaultReg = `Windows Registry Editor Version 5.00
@@ -13360,6 +13510,11 @@ if (Test-Path -LiteralPath $ShortcutPath) {
 
 [HKEY_CURRENT_USER\\Software\\Classes\\Drive\\shell]
 @=-
+
+[-HKEY_CURRENT_USER\\Software\\Classes\\Directory\\shell\\ExploreBetter]
+[-HKEY_CURRENT_USER\\Software\\Classes\\Drive\\shell\\ExploreBetter]
+[-HKEY_CURRENT_USER\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter]
+[-HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\ExploreBetterLocation]
 `;
 
   const readme = `Explore Better integration files
@@ -17971,6 +18126,12 @@ async function getIntegrationStatus() {
   const driveCommand = await readRegistryDefault(
     "HKCU\\Software\\Classes\\Drive\\shell\\ExploreBetter\\command"
   );
+  const directoryBackgroundCommand = await readRegistryDefault(
+    "HKCU\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter\\command"
+  );
+  const fileLocationCommand = await readRegistryDefault(
+    "HKCU\\Software\\Classes\\*\\shell\\ExploreBetterLocation\\command"
+  );
   const directoryDefault = await readRegistryDefault("HKCU\\Software\\Classes\\Directory\\shell");
   const driveDefault = await readRegistryDefault("HKCU\\Software\\Classes\\Drive\\shell");
   const files = {
@@ -17992,10 +18153,14 @@ async function getIntegrationStatus() {
     registryRestoreReg: await pathExists(paths.registryRestoreRegPath)
   };
   const registry = {
-    contextMenuInstalled: Boolean(directoryCommand && driveCommand),
+    contextMenuInstalled: Boolean(
+      directoryCommand && driveCommand && directoryBackgroundCommand && fileLocationCommand
+    ),
     folderDefaultEnabled: directoryDefault === "ExploreBetter" && driveDefault === "ExploreBetter",
     directoryCommand,
     driveCommand,
+    directoryBackgroundCommand,
+    fileLocationCommand,
     directoryDefault,
     driveDefault,
     shellBackup: shellBackupReady
@@ -18992,6 +19157,17 @@ async function handleApi(req, res, url) {
   if (route === "POST /api/integration/apply") {
     const body = await readJson(req);
     const paths = integrationPaths();
+    if (body.mode === "removeFolderDefault") {
+      const status = await getIntegrationStatus();
+      if (status.registry?.shellBackup?.available) {
+        const restored = await restoreShellRegistryBackup();
+        return sendJson(res, 200, {
+          ...restored,
+          restoredBackup: true,
+          status: await getIntegrationStatus()
+        });
+      }
+    }
     const modeToFile = {
       contextMenu: paths.contextMenuRegPath,
       removeContextMenu: paths.contextMenuRemoveRegPath,
@@ -19006,7 +19182,7 @@ async function handleApi(req, res, url) {
       await writeIntegrationFiles();
     }
     const backup = ["contextMenu", "folderDefault"].includes(body.mode)
-      ? await saveShellRegistryBackup(body.mode)
+      ? await ensureShellRegistryBackup(body.mode)
       : null;
     const result = await importRegistryFile(file);
     return sendJson(res, 200, { ...result, backup, status: await getIntegrationStatus() });

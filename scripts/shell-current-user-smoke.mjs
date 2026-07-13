@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { createServer } from "node:net";
 import path from "node:path";
 
 const workspace = process.cwd();
@@ -20,7 +21,11 @@ const registryKeys = [
   "HKCU\\Software\\Classes\\Directory\\shell\\ExploreBetter",
   "HKCU\\Software\\Classes\\Directory\\shell\\ExploreBetter\\command",
   "HKCU\\Software\\Classes\\Drive\\shell\\ExploreBetter",
-  "HKCU\\Software\\Classes\\Drive\\shell\\ExploreBetter\\command"
+  "HKCU\\Software\\Classes\\Drive\\shell\\ExploreBetter\\command",
+  "HKCU\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter",
+  "HKCU\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter\\command",
+  "HKCU\\Software\\Classes\\*\\shell\\ExploreBetterLocation",
+  "HKCU\\Software\\Classes\\*\\shell\\ExploreBetterLocation\\command"
 ];
 let serverOutput = "";
 
@@ -32,8 +37,21 @@ function optionValue(name, fallback = "") {
   return index === -1 ? fallback : process.argv[index + 1] || fallback;
 }
 
-function randomPort() {
-  return 56000 + Math.floor(Math.random() * 6000);
+function availablePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.unref();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const selectedPort = typeof address === "object" && address ? address.port : 0;
+      probe.close((error) => {
+        if (error) reject(error);
+        else if (!selectedPort) reject(new Error("Windows did not assign a loopback port."));
+        else resolve(selectedPort);
+      });
+    });
+  });
 }
 
 function keepFixture() {
@@ -344,11 +362,12 @@ async function main() {
   await fs.mkdir(path.join(oneDriveRoot, "Desktop"), { recursive: true });
   await seedState();
 
-  const port = Number(optionValue("--port", process.env.PORT || randomPort()));
+  const port = Number(optionValue("--port", process.env.PORT || String(await availablePort())));
   const baseUrl = `http://127.0.0.1:${port}`;
   const server = startServer(port);
   let beforeSnapshot = null;
   let afterApplySnapshot = null;
+  let apiRestoreSnapshot = null;
   let afterRestoreSnapshot = null;
   let beforeStatus = null;
   let afterApplyStatus = null;
@@ -377,6 +396,35 @@ async function main() {
       "Original HKCU shell backup copied before registry imports",
       restoreCopyPath
     );
+    const legacyState = JSON.parse(await fs.readFile(statePath, "utf8"));
+    const newHandlerEntryIds = new Set([
+      "directoryBackgroundExploreBetter",
+      "directoryBackgroundExploreBetterCommand",
+      "fileLocationExploreBetter",
+      "fileLocationExploreBetterCommand"
+    ]);
+    legacyState.integration.registryBackup = {
+      ...legacyState.integration.registryBackup,
+      version: 1,
+      entries: legacyState.integration.registryBackup.entries.filter((entry) => !newHandlerEntryIds.has(entry.id))
+    };
+    await fs.writeFile(statePath, JSON.stringify(legacyState, null, 2), "utf8");
+    let observedLegacyBackup = false;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const observedState = await requestJson(baseUrl, "/api/state");
+      if (observedState.integration?.registryBackup?.version === 1) {
+        observedLegacyBackup = true;
+        break;
+      }
+    }
+    requireCheck(
+      checks,
+      observedLegacyBackup,
+      "legacy-backup-seeded",
+      "Legacy shell backup fixture is observed before install",
+      "Version 1 backup omits the new background and file-location handlers"
+    );
 
     const install = await requestJson(baseUrl, "/api/integration/app-package", {
       method: "POST",
@@ -400,9 +448,24 @@ async function main() {
       method: "POST",
       body: JSON.stringify({ mode: "folderDefault" })
     });
+    const upgradedBackupIds = new Set((contextApply.backup?.entries || []).map((entry) => entry.id));
+    requireCheck(
+      checks,
+      contextApply.backup?.version === 2 && [...newHandlerEntryIds].every((id) => upgradedBackupIds.has(id)),
+      "legacy-backup-upgraded",
+      "Legacy backup is upgraded before new handlers are installed",
+      `${upgradedBackupIds.size} registry snapshot entries at version ${contextApply.backup?.version || "missing"}`
+    );
     afterApplyStatus = defaultApply.status;
     afterApplySnapshot = await registrySnapshot();
-    const commandTarget = `${afterApplyStatus.registry?.directoryCommand || ""}\n${afterApplyStatus.registry?.driveCommand || ""}`;
+    const commandTarget = [
+      afterApplyStatus.registry?.directoryCommand,
+      afterApplyStatus.registry?.driveCommand,
+      afterApplyStatus.registry?.directoryBackgroundCommand,
+      afterApplyStatus.registry?.fileLocationCommand
+    ]
+      .filter(Boolean)
+      .join("\n");
     requireCheck(
       checks,
       contextApply.ok === true &&
@@ -425,12 +488,14 @@ async function main() {
 
     const shellOpenTarget = path.join(runRoot, "ShellOpenTarget");
     await fs.mkdir(shellOpenTarget, { recursive: true });
-    await fs.writeFile(path.join(shellOpenTarget, "opened-by-handler.txt"), "handler fixture", "utf8");
+    const shellOpenFile = path.join(shellOpenTarget, "opened-by-handler.txt");
+    await fs.writeFile(shellOpenFile, "handler fixture", "utf8");
     shellOpenSmoke = await runCommand(installedApp, ["--smoke", "--smoke-window", "--shell-mode=activeNewTab", shellOpenTarget], {
       timeoutMs: 90000,
       env: {
         HOST: "127.0.0.1",
-        PORT: String(port)
+        PORT: String(await availablePort()),
+        EXPLORE_BETTER_USER_DATA_DIR: path.join(runRoot, "ElectronUserData")
       }
     });
     requireCheck(
@@ -445,6 +510,49 @@ async function main() {
           ? "Installed app shell-open smoke timed out."
           : shellOpenSmoke.error || shellOpenSmoke.stderr || shellOpenSmoke.stdout || `exit ${shellOpenSmoke.code}`
     );
+
+    const fileLocationSmoke = await runCommand(
+      installedApp,
+      ["--smoke", "--smoke-window", "--shell-mode=activeNewTab", shellOpenFile],
+      {
+        timeoutMs: 90000,
+        env: {
+          HOST: "127.0.0.1",
+          PORT: String(await availablePort()),
+          EXPLORE_BETTER_USER_DATA_DIR: path.join(runRoot, "ElectronFileLocationUserData")
+        }
+      }
+    );
+    requireCheck(
+      checks,
+      fileLocationSmoke.code === 0 &&
+        /Explore Better shell-open smoke: matched=true selected=true/i.test(
+          `${fileLocationSmoke.stdout}\n${fileLocationSmoke.stderr}`
+        ),
+      "installed-file-location-reveal",
+      "Installed file-location handler opens the parent folder and selects the file",
+      fileLocationSmoke.code === 0
+        ? `Selected ${shellOpenFile}`
+        : fileLocationSmoke.timedOut
+          ? "Installed app file-location smoke timed out."
+          : fileLocationSmoke.error ||
+            fileLocationSmoke.stderr ||
+            fileLocationSmoke.stdout ||
+            `exit ${fileLocationSmoke.code}`
+    );
+
+    const apiRestore = await requestJson(baseUrl, "/api/integration/apply", {
+      method: "POST",
+      body: JSON.stringify({ mode: "removeFolderDefault" })
+    });
+    apiRestoreSnapshot = await registrySnapshot();
+    requireCheck(
+      checks,
+      apiRestore.restoredBackup === true && registrySnapshotsMatch(beforeSnapshot, apiRestoreSnapshot).length === 0,
+      "api-restores-original-shell",
+      "Default removal restores the exact original HKCU shell snapshot",
+      apiRestore.restoredBackup === true ? "Before/restore snapshots match" : "Backup restore was not used"
+    );
   } catch (error) {
     addCheck(checks, "fail", "current-user-shell-install", "Current-user shell install phase", error.stack || error.message);
   } finally {
@@ -453,6 +561,11 @@ async function main() {
         await importRegistryFile(restoreCopyPath);
         await deleteRegistryKeyIfAbsentBefore("HKCU\\Software\\Classes\\Directory\\shell\\ExploreBetter", beforeSnapshot);
         await deleteRegistryKeyIfAbsentBefore("HKCU\\Software\\Classes\\Drive\\shell\\ExploreBetter", beforeSnapshot);
+        await deleteRegistryKeyIfAbsentBefore(
+          "HKCU\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter",
+          beforeSnapshot
+        );
+        await deleteRegistryKeyIfAbsentBefore("HKCU\\Software\\Classes\\*\\shell\\ExploreBetterLocation", beforeSnapshot);
         await deleteRegistryKeyIfAbsentBefore("HKCU\\Software\\Classes\\Directory\\shell", beforeSnapshot);
         await deleteRegistryKeyIfAbsentBefore("HKCU\\Software\\Classes\\Drive\\shell", beforeSnapshot);
         restored = true;
@@ -523,6 +636,7 @@ async function main() {
     registry: {
       before: beforeSnapshot,
       afterApply: afterApplySnapshot,
+      apiRestore: apiRestoreSnapshot,
       afterRestore: afterRestoreSnapshot,
       mismatchedKeys,
       mismatchedStatus

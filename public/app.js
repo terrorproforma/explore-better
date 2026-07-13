@@ -19584,6 +19584,17 @@ function renderIntegration() {
   document.getElementById("integration-default").textContent = registry.folderDefaultEnabled
     ? `Default handler: ${integration.folderDefaultRegPath || ""}`
     : `Not default: ${integration.folderDefaultRegPath || ""}`;
+  document.getElementById("integration-default-action-status").textContent = registry.folderDefaultEnabled
+    ? "Explore Better is the current-user default"
+    : "Windows Explorer or the previous handler remains the default";
+  const makeDefaultButton = document.querySelector('[data-integration-action="folderDefault"]');
+  const restoreDefaultButton = document.querySelector('[data-integration-action="removeFolderDefault"]');
+  if (makeDefaultButton) {
+    makeDefaultButton.disabled = registry.folderDefaultEnabled === true;
+  }
+  if (restoreDefaultButton) {
+    restoreDefaultButton.disabled = !shellBackup.available;
+  }
   document.getElementById("integration-backup").textContent = shellBackup.available
     ? `${shellBackup.mode || "manual"} backup: ${formatDate(Date.parse(shellBackup.createdAt))}${
         shellBackup.restoredAt ? ` / restored ${formatDate(Date.parse(shellBackup.restoredAt))}` : ""
@@ -19682,6 +19693,80 @@ async function openIntegrationDialog() {
   document.getElementById("integration-dialog").showModal();
 }
 
+async function markDefaultExplorerPromptSeen() {
+  app.state.settings = {
+    ...(app.state.settings || {}),
+    defaultExplorerPromptSeen: true
+  };
+  await saveStateNow();
+}
+
+async function applyDefaultExplorerChoice(choice) {
+  const dialog = document.getElementById("default-explorer-dialog");
+  if (choice === "keep") {
+    await markDefaultExplorerPromptSeen();
+    dialog.close();
+    showToast("Windows Explorer remains the default");
+    return;
+  }
+
+  const buttons = [...dialog.querySelectorAll("[data-default-explorer-choice]")];
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+  try {
+    const defaultResult = await request("/api/integration/apply", {
+      method: "POST",
+      body: JSON.stringify({ mode: "folderDefault" })
+    });
+    let winEResult = null;
+    let winEError = "";
+    if (document.getElementById("default-explorer-win-e").checked) {
+      try {
+        winEResult = await request("/api/integration/win-e", {
+          method: "POST",
+          body: JSON.stringify({ mode: "install" })
+        });
+      } catch (error) {
+        winEError = error.message;
+      }
+    }
+    await syncStateAndChrome();
+    await markDefaultExplorerPromptSeen();
+    document.getElementById("integration-output").textContent = JSON.stringify(
+      { default: defaultResult, winE: winEResult, winEError: winEError || null },
+      null,
+      2
+    );
+    dialog.close();
+    showToast(
+      winEError ? "Default set; Win+E helper: " + winEError : "Explore Better is now the folder default"
+    );
+  } finally {
+    buttons.forEach((button) => {
+      button.disabled = false;
+    });
+  }
+}
+
+async function maybeShowDefaultExplorerPrompt() {
+  const bridge = window.exploreBetterDesktop;
+  if (!bridge?.appInfo || app.state?.settings?.defaultExplorerPromptSeen === true) {
+    return;
+  }
+  if (app.integrationStatus?.registry?.folderDefaultEnabled) {
+    return;
+  }
+  const info = await bridge.appInfo();
+  if (!info?.packaged || info.smoke) {
+    return;
+  }
+  const dialog = document.getElementById("default-explorer-dialog");
+  if (dialog && !dialog.open) {
+    dialog.showModal();
+  }
+}
+
 async function generateIntegrationFiles() {
   const result = await request("/api/integration/generate", { method: "POST" });
   document.getElementById("integration-output").textContent = JSON.stringify(result, null, 2);
@@ -19774,7 +19859,12 @@ async function applyIntegration(mode) {
 
   if (mode === "folderDefault") {
     const ok = confirm(
-      "Back up current shell settings, then set Explore Better as the current-user default folder and drive open handler?"
+      "Back up the exact current-user shell settings, then use Explore Better for folder and drive opens?"
+    );
+    if (!ok) return;
+  } else if (mode === "removeFolderDefault") {
+    const ok = confirm(
+      "Restore the previous current-user folder, drive, and Explore Better shell settings from the captured backup?"
     );
     if (!ok) return;
   } else if (mode === "contextMenu") {
@@ -23558,6 +23648,15 @@ function wireEvents() {
       }
     }
 
+    const defaultExplorerButton = event.target.closest("[data-default-explorer-choice]");
+    if (defaultExplorerButton) {
+      try {
+        await applyDefaultExplorerChoice(defaultExplorerButton.dataset.defaultExplorerChoice);
+      } catch (error) {
+        showToast(error.message);
+      }
+    }
+
     const integrationButton = event.target.closest("[data-integration-action]");
     if (integrationButton) {
       try {
@@ -24220,7 +24319,10 @@ async function init() {
     completedAt: Date.now()
   };
   loadIntegrationStatus()
-    .then(() => renderIntegration())
+    .then(async () => {
+      renderIntegration();
+      await maybeShowDefaultExplorerPrompt();
+    })
     .catch((error) => console.warn(`Could not load integration status: ${error.message}`));
 }
 

@@ -289,6 +289,29 @@ async function main() {
       "Generated registry files target installed app",
       installedApp || "missing"
     );
+    const generatedShellText = `${generatedFileText.contextMenuRegPath || ""}\n${
+      generatedFileText.folderDefaultRegPath || ""
+    }`;
+    requireCheck(
+      checks,
+      generatedShellText.includes("Directory\\Background\\shell\\ExploreBetter") &&
+        generatedShellText.includes("*\\shell\\ExploreBetterLocation") &&
+        generatedShellText.includes("%V") &&
+        generatedShellText.includes("%1"),
+      "complete-shell-entry-points",
+      "Generated handlers cover folders, drives, backgrounds, and file locations",
+      "Directory/Drive use %1, folder backgrounds use %V, and file-location commands use %1"
+    );
+    requireCheck(
+      checks,
+      generatedFileText.contextMenuRemoveRegPath?.includes("Directory\\Background\\shell\\ExploreBetter") &&
+        generatedFileText.contextMenuRemoveRegPath?.includes("*\\shell\\ExploreBetterLocation") &&
+        generatedFileText.folderDefaultRemoveRegPath?.includes("Directory\\Background\\shell\\ExploreBetter") &&
+        generatedFileText.folderDefaultRemoveRegPath?.includes("*\\shell\\ExploreBetterLocation"),
+      "complete-shell-cleanup",
+      "Generated cleanup removes every Explore Better handler",
+      "Folder, drive, background, and file-location keys are covered"
+    );
 
     const shortcuts = await requestJson(baseUrl, "/api/integration/shortcuts", {
       method: "POST",

@@ -33,6 +33,7 @@ const coreSuites = [
   ["size-analysis-cancel", "scripts/size-analysis-cancel-smoke.mjs", 120000],
   ["size-analysis-ui", "scripts/size-analysis-ui-smoke.mjs", 120000],
   ["interaction-resize", "scripts/interaction-resize-smoke.mjs", 180000],
+  ["default-explorer-ui", "scripts/default-explorer-ui-smoke.mjs", 120000],
   ["adaptive-pane-chrome", "scripts/adaptive-pane-chrome-ui-smoke.mjs", 180000],
   ["workspace-panels-ui", "scripts/workspace-panels-ui-smoke.mjs", 180000],
   ["startup-recovery-ui", "scripts/startup-recovery-ui-smoke.mjs", 120000],

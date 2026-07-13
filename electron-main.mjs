@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, nativeImage, shell } from "electron";
 import { spawn } from "node:child_process";
-import { randomBytes, randomInt } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -8,17 +8,17 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const host = process.env.HOST || "127.0.0.1";
-const port = Number(process.env.PORT || randomInt(43000, 62000));
+let port = Number(process.env.PORT || 0);
 const desktopInstanceToken =
   process.env.EXPLORE_BETTER_DESKTOP_INSTANCE_TOKEN || randomBytes(24).toString("base64url");
 process.env.HOST = host;
-process.env.PORT = String(port);
+if (port > 0) process.env.PORT = String(port);
 process.env.EXPLORE_BETTER_DESKTOP_INSTANCE_TOKEN = desktopInstanceToken;
 if (app.isPackaged && !process.env.EXPLORE_BETTER_WORKSPACE_ROOT) {
   process.env.EXPLORE_BETTER_WORKSPACE_ROOT = app.getPath("desktop");
   process.env.EXPLORE_BETTER_WORKSPACE_LABEL = "Desktop";
 }
-const baseUrl = `http://${host}:${port}`;
+let baseUrl = port > 0 ? `http://${host}:${port}` : "";
 const dragIconPath = path.join(__dirname, "public", "drag-file.png");
 const publicUpdateFeedUrl = "https://github.com/terrorproforma/explore-better/releases/latest/download";
 const updateFeedUrl =
@@ -86,6 +86,27 @@ let backendLastEvent = {
   message: "Backend has not been checked yet.",
   at: new Date().toISOString()
 };
+
+async function ensureDesktopPort() {
+  if (port > 0 && baseUrl) return port;
+  port = await new Promise((resolve, reject) => {
+    const probe = http.createServer();
+    probe.unref();
+    probe.once("error", reject);
+    probe.listen(0, host, () => {
+      const address = probe.address();
+      const selectedPort = typeof address === "object" && address ? address.port : 0;
+      probe.close((error) => {
+        if (error) reject(error);
+        else if (!selectedPort) reject(new Error("Windows did not assign a loopback port."));
+        else resolve(selectedPort);
+      });
+    });
+  });
+  process.env.PORT = String(port);
+  baseUrl = `http://${host}:${port}`;
+  return port;
+}
 
 function isLikelyPathArgument(value) {
   return Boolean(value && !value.startsWith("--") && value !== "." && value !== __dirname);
@@ -367,6 +388,14 @@ ipcMain.handle("explore-better:backend-status", () => {
   return backendStatus();
 });
 
+ipcMain.handle("explore-better:app-info", () => {
+  return {
+    packaged: app.isPackaged,
+    smoke: smokeMode,
+    version: app.getVersion()
+  };
+});
+
 ipcMain.handle("explore-better:restart-backend", () => {
   return recoverBackend("desktop-ipc");
 });
@@ -382,6 +411,7 @@ async function waitForServer() {
 }
 
 async function ensureServer() {
+  await ensureDesktopPort();
   if (await serverIsReady()) {
     rememberBackendEvent("ready", "Backend already answered health check.", { kind: "existing" });
     return;
@@ -704,6 +734,7 @@ async function rendererShellOpenSnapshot(targetPath, shellMode) {
   }
   return mainWindow.webContents.executeJavaScript(`(() => {
     const target = ${JSON.stringify(path.resolve(targetPath))};
+    const targetParent = ${JSON.stringify(path.dirname(path.resolve(targetPath)))};
     const expectedMode = ${JSON.stringify(shellMode || "")};
     const normalize = (value) => String(value || "").replace(/\\\\+$/, "").toLowerCase();
     const started = Date.now();
@@ -716,10 +747,31 @@ async function rendererShellOpenSnapshot(targetPath, shellMode) {
         const activePath = activeInput?.value || "";
         const leftPath = leftInput?.value || "";
         const rightPath = rightInput?.value || "";
-        const rows = document.querySelectorAll(\`.pane[data-pane="\${activePane || "left"}"] [data-entry-path]\`).length;
-        const matched = normalize(activePath) === normalize(target) || normalize(leftPath) === normalize(target) || normalize(rightPath) === normalize(target);
+        const paneSelector = \`.pane[data-pane="\${activePane || "left"}"]\`;
+        const entryRows = [...document.querySelectorAll(\`\${paneSelector} [data-entry-path]\`)];
+        const selectedRow = entryRows.find((row) => normalize(row.dataset.entryPath) === normalize(target));
+        const selected = Boolean(
+          selectedRow &&
+          (selectedRow.classList.contains("selected") || selectedRow.getAttribute("aria-selected") === "true")
+        );
+        const pathMatched = normalize(activePath) === normalize(target) || normalize(leftPath) === normalize(target) || normalize(rightPath) === normalize(target);
+        const parentMatched = normalize(activePath) === normalize(targetParent) || normalize(leftPath) === normalize(targetParent) || normalize(rightPath) === normalize(targetParent);
+        const matched = pathMatched || (parentMatched && selected);
         if (matched || Date.now() - started > 10000) {
-          resolve({ target, expectedMode, activePane, activePath, leftPath, rightPath, rows, matched });
+          resolve({
+            target,
+            targetParent,
+            expectedMode,
+            activePane,
+            activePath,
+            leftPath,
+            rightPath,
+            rows: entryRows.length,
+            selected,
+            selectedPath: selectedRow?.dataset.entryPath || "",
+            parentMatched,
+            matched
+          });
           return;
         }
         setTimeout(tick, 120);
@@ -748,7 +800,7 @@ if (!hasSingleInstanceLock) {
           if (smokeWindowMode) {
             await showLister(smokeShellTarget, smokeShellMode);
             const hasDesktopBridge = await mainWindow.webContents.executeJavaScript(
-              "Boolean(window.exploreBetterDesktop && window.exploreBetterDesktop.getPathForFile && window.exploreBetterDesktop.startFileDrag && window.exploreBetterDesktop.updateStatus && window.exploreBetterDesktop.checkForUpdates && window.exploreBetterDesktop.backendStatus && window.exploreBetterDesktop.restartBackend)"
+              "Boolean(window.exploreBetterDesktop && window.exploreBetterDesktop.getPathForFile && window.exploreBetterDesktop.startFileDrag && window.exploreBetterDesktop.updateStatus && window.exploreBetterDesktop.checkForUpdates && window.exploreBetterDesktop.backendStatus && window.exploreBetterDesktop.appInfo && window.exploreBetterDesktop.restartBackend)"
             );
             const updateStatus = await mainWindow.webContents.executeJavaScript("window.exploreBetterDesktop.updateStatus()");
             const backendStatus = await mainWindow.webContents.executeJavaScript("window.exploreBetterDesktop.backendStatus()");
@@ -763,7 +815,7 @@ if (!hasSingleInstanceLock) {
             if (smokeShellTarget) {
               const shellOpenSnapshot = await rendererShellOpenSnapshot(smokeShellTarget, smokeShellMode);
               console.log(
-                `Explore Better shell-open smoke: matched=${shellOpenSnapshot?.matched === true} active=${shellOpenSnapshot?.activePane || ""} rows=${
+                `Explore Better shell-open smoke: matched=${shellOpenSnapshot?.matched === true} selected=${shellOpenSnapshot?.selected === true} active=${shellOpenSnapshot?.activePane || ""} rows=${
                   shellOpenSnapshot?.rows || 0
                 } target=${smokeShellTarget}`
               );

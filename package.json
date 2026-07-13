@@ -1,6 +1,6 @@
 {
   "name": "explore-better",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",
@@ -115,6 +115,7 @@
     "verify:speed-index-ui": "node scripts/speed-index-ui-smoke.mjs",
     "verify:search-background-ui": "node scripts/search-background-ui-smoke.mjs",
     "verify:interaction-resize": "node scripts/interaction-resize-smoke.mjs",
+    "verify:default-explorer-ui": "node scripts/default-explorer-ui-smoke.mjs",
     "verify:adaptive-pane-chrome": "node scripts/adaptive-pane-chrome-ui-smoke.mjs",
     "verify:workspace-panels-ui": "node scripts/workspace-panels-ui-smoke.mjs",
     "verify:pane-activity": "node scripts/pane-activity-ui-smoke.mjs",
