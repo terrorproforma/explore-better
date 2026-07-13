@@ -43,6 +43,7 @@ body.nav-open {
 img {
   display: block;
   max-width: 100%;
+  height: auto;
 }
 
 a {
@@ -552,8 +553,8 @@ h3 {
 
 .tour-stage img {
   width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
+  height: auto;
+  object-fit: contain;
   object-position: top;
 }
 
@@ -589,6 +590,12 @@ h3 {
 
 .analyzer-visual img {
   width: 100%;
+  height: auto;
+}
+
+.integration-visual img {
+  width: 100%;
+  height: auto;
 }
 
 .analyzer-details {

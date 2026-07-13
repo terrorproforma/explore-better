@@ -43,6 +43,8 @@ document.querySelectorAll("[data-tour-tab]").forEach((tab) => {
     if (tourImage) {
       tourImage.src = tab.dataset.src || tourImage.src;
       tourImage.alt = tab.dataset.alt || "Explore Better product screen";
+      if (tab.dataset.width) tourImage.width = Number(tab.dataset.width);
+      if (tab.dataset.height) tourImage.height = Number(tab.dataset.height);
     }
     if (tourLabel) tourLabel.textContent = tab.dataset.label || "Product view";
     if (tourCaption) tourCaption.textContent = tab.dataset.caption || "";

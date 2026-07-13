@@ -87,8 +87,24 @@ async function pageSnapshot(page) {
       src: image.getAttribute("src"),
       complete: image.complete,
       naturalWidth: image.naturalWidth,
-      naturalHeight: image.naturalHeight
+      naturalHeight: image.naturalHeight,
+      renderedWidth: Math.round(image.getBoundingClientRect().width),
+      renderedHeight: Math.round(image.getBoundingClientRect().height)
     }));
+    const aspectIssues = [...document.images]
+      .filter((image) => image.naturalWidth >= 300 && !image.classList.contains("hero__media"))
+      .map((image) => {
+        const rect = image.getBoundingClientRect();
+        const naturalRatio = image.naturalWidth / image.naturalHeight;
+        const renderedRatio = rect.width / rect.height;
+        return {
+          src: image.getAttribute("src"),
+          natural: `${image.naturalWidth}x${image.naturalHeight}`,
+          rendered: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
+          ratioDelta: Math.abs(renderedRatio - naturalRatio) / naturalRatio
+        };
+      })
+      .filter((image) => !Number.isFinite(image.ratioDelta) || image.ratioDelta > 0.02);
     const downloadLinks = [...document.querySelectorAll('a[href*="ExploreBetter-0.1.2-x64-setup.exe"]')].map(
       (link) => link.href
     );
@@ -100,6 +116,7 @@ async function pageSnapshot(page) {
       viewportWidth,
       offenders,
       images,
+      aspectIssues,
       downloadLinks,
       relativeParentLinks: [...document.querySelectorAll('a[href^=".."]')].map((link) => link.getAttribute("href")),
       checksum: document.querySelector("[data-checksum]")?.textContent.trim() || ""
@@ -178,6 +195,14 @@ async function main() {
       );
       addCheck(
         checks,
+        `${viewport.name}-image-aspect-ratios`,
+        snapshot.aspectIssues.length === 0,
+        snapshot.aspectIssues.length
+          ? JSON.stringify(snapshot.aspectIssues)
+          : "All content screenshots preserve their natural aspect ratio"
+      );
+      addCheck(
+        checks,
         `${viewport.name}-downloads`,
         snapshot.downloadLinks.length >= 3 && snapshot.downloadLinks.every((href) => href.startsWith("https://github.com/")),
         `${snapshot.downloadLinks.length} direct installer links`
@@ -202,6 +227,40 @@ async function main() {
         (await page.locator("[data-tour-image]").getAttribute("src")) === "assets/disk-map.png" &&
           (await page.locator("[data-tour-label]").textContent())?.trim() === "Disk Map",
         "Disk Map tab updates the product stage"
+      );
+
+      const tourAspectResults = [];
+      for (const label of ["Dual panes", "Disk Map", "Command Center", "Integration"]) {
+        await page.locator(`[data-tour-tab][data-label="${label}"]`).click();
+        const ratio = await page.locator("[data-tour-image]").evaluate(async (image) => {
+          if (!image.complete) {
+            await new Promise((resolve) => {
+              image.addEventListener("load", resolve, { once: true });
+              image.addEventListener("error", resolve, { once: true });
+            });
+          }
+          const rect = image.getBoundingClientRect();
+          const naturalRatio = image.naturalWidth / image.naturalHeight;
+          const renderedRatio = rect.width / rect.height;
+          return {
+            src: image.getAttribute("src"),
+            natural: `${image.naturalWidth}x${image.naturalHeight}`,
+            rendered: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
+            ratioDelta: Math.abs(renderedRatio - naturalRatio) / naturalRatio
+          };
+        });
+        tourAspectResults.push({ label, ...ratio });
+      }
+      const distortedTourImages = tourAspectResults.filter(
+        (image) => !Number.isFinite(image.ratioDelta) || image.ratioDelta > 0.02
+      );
+      addCheck(
+        checks,
+        `${viewport.name}-tour-image-aspect-ratios`,
+        distortedTourImages.length === 0,
+        distortedTourImages.length
+          ? JSON.stringify(distortedTourImages)
+          : tourAspectResults.map((image) => `${image.label}: ${image.rendered}`).join(", ")
       );
 
       if (viewport.name === "mobile") {
