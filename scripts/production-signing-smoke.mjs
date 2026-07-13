@@ -126,14 +126,20 @@ function limitedAppend(current, chunk, limit = 64000) {
 function runPowerShell(script, env = {}) {
   return new Promise((resolve) => {
     const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const childEnv = { ...process.env, ...env };
+    const executable =
+      process.platform === "win32"
+        ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        : "pwsh";
+    if (process.platform === "win32") delete childEnv.PSModulePath;
     let stdout = "";
     let stderr = "";
     let settled = false;
     let child = null;
     try {
-      child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], {
+      child = spawn(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], {
         cwd: workspace,
-        env: { ...process.env, ...env },
+        env: childEnv,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true
       });
@@ -170,6 +176,7 @@ function runPowerShell(script, env = {}) {
 
 function signatureScript() {
   return `$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 $Payload = Get-Content -Raw -LiteralPath $env:EB_PRODUCTION_SIGNING_PAYLOAD | ConvertFrom-Json
 $Results = @()
 foreach ($Target in $Payload.targets) {
