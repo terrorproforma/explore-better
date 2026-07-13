@@ -2,10 +2,19 @@
   "name": "explore-better",
   "version": "0.1.0",
   "private": true,
+  "license": "UNLICENSED",
   "type": "module",
   "main": "electron-main.mjs",
   "author": "Explore Better",
-  "description": "A local dual-pane Windows file manager prototype inspired by power-user Explorer replacements.",
+  "description": "A fast dual-pane Windows file manager with tabs, scripting, transactional operations, Explorer integration, and a visual disk analyzer.",
+  "homepage": "https://github.com/terrorproforma/explore-better",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/terrorproforma/explore-better.git"
+  },
+  "bugs": {
+    "url": "https://github.com/terrorproforma/explore-better/issues"
+  },
   "scripts": {
     "start": "node server.mjs",
     "desktop": "electron .",
@@ -137,11 +146,17 @@
     "playwright-core": "^1.61.1"
   },
   "build": {
-    "appId": "local.explorebetter.filemanager",
+    "appId": "io.github.terrorproforma.explorebetter",
     "productName": "Explore Better",
     "directories": {
       "output": "dist"
     },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://github.com/terrorproforma/explore-better/releases/latest/download"
+      }
+    ],
     "files": [
       "electron-main.mjs",
       "electron-preload.cjs",

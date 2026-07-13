@@ -6,6 +6,8 @@ Navigator and Preview have independent panel buttons in their headers and in the
 
 ## Starting The App
 
+For normal use, download `ExploreBetter-0.1.0-x64-setup.exe` from the [latest GitHub release](https://github.com/terrorproforma/explore-better/releases/latest). This initial public preview is unsigned, so verify the release SHA-256 before accepting any Windows SmartScreen prompt. The installer is per-user by default and does not require the main app to run as administrator.
+
 From the project folder:
 
 ```powershell
@@ -262,7 +264,7 @@ Run `npm run verify:native-shell-readiness` when you want one native-shell check
 
 Run `npm run verify:auto-update-feed` to start a local generic update feed and prove the desktop updater bridge can check a configured feed and report an available version without downloading it.
 
-The desktop updater bridge is disabled until an update feed is configured with `EXPLORE_BETTER_UPDATE_URL` or `EB_UPDATE_URL`. With no feed, desktop smoke tests still verify that update status is callable but no network update check is attempted. Production builds still need a real hosted update feed.
+Packaged public builds use the GitHub Releases feed by default. `EXPLORE_BETTER_UPDATE_URL` or `EB_UPDATE_URL` can override it for development and private deployments; source-mode desktop runs do not contact the public feed unless an override is configured.
 
 Run `npm run verify:shell-rehearsal` to test the install/remove mechanics under isolated temporary `%LOCALAPPDATA%`, `%APPDATA%`, `%USERPROFILE%`, and OneDrive/Desktop paths. It installs the packaged app copy, installs/removes Start Menu/Desktop shortcuts and the optional Win+E startup helper, checks generated registry files target the installed app, and intentionally does not import HKCU registry files into the real shell.
 
@@ -272,7 +274,7 @@ Run `npm run verify:shell-current-user` to perform a real current-user HKCU shel
 
 - Large local Windows folders are enumerated once by the bundled normal-user Win32 helper; small folders, UNC paths, rich link/dimension views, and helper failures automatically use the Node provider.
 - When a folder saved in the previous session no longer exists, startup opens the nearest existing parent and saves that recovered location. A path explicitly supplied by Explorer, the command line, or a launch URL is never silently changed.
-- After the first 80 entries, full background hydration uses columnar helper transport and the versioned browser-facing `compact-v1` payload to avoid repeated paths, field names, and trailing defaults. The initial slice still covers several screens while avoiding unnecessary startup work. Identical simultaneous pane hydrations share one transfer and one immutable expanded/sorted result, including a reused numeric filename collator.
+- After the first 48 entries, full background hydration uses columnar helper transport and the dictionary-backed browser-facing `compact-v2` payload to avoid repeated paths, field names, metadata strings, and trailing defaults. The initial slice covers normal viewports while avoiding unnecessary startup work. Identical simultaneous pane hydrations share one transfer and one immutable expanded/sorted result, including a reused numeric filename collator.
 - SOURCE and TARGET each have an independent activity chip. It shows loading, bounded large-folder progress, final item count and elapsed time, cache reuse, or a pane-specific error while preserving the last usable rows.
 
 Explore Better prioritizes fast browsing:

@@ -20,7 +20,9 @@ if (app.isPackaged && !process.env.EXPLORE_BETTER_WORKSPACE_ROOT) {
 }
 const baseUrl = `http://${host}:${port}`;
 const dragIconPath = path.join(__dirname, "public", "drag-file.png");
-const updateFeedUrl = process.env.EXPLORE_BETTER_UPDATE_URL || process.env.EB_UPDATE_URL || "";
+const publicUpdateFeedUrl = "https://github.com/terrorproforma/explore-better/releases/latest/download";
+const updateFeedUrl =
+  process.env.EXPLORE_BETTER_UPDATE_URL || process.env.EB_UPDATE_URL || (app.isPackaged ? publicUpdateFeedUrl : "");
 const userDataDir = process.env.EXPLORE_BETTER_USER_DATA_DIR || process.env.EB_USER_DATA_DIR || "";
 
 if (userDataDir) {
