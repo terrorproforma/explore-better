@@ -17,6 +17,7 @@ const mimeTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
   ".png": "image/png",
   ".svg": "image/svg+xml"
 };
@@ -130,20 +131,16 @@ async function pageSnapshot(page, installerName) {
 
 async function releaseExpectations() {
   const pkg = JSON.parse(await fs.readFile(path.join(workspace, "package.json"), "utf8"));
+  const release = JSON.parse(await fs.readFile(path.join(siteRoot, "release.json"), "utf8"));
   const version = String(pkg.version || "").trim();
-  const installerName = `ExploreBetter-${version}-x64-setup.exe`;
-  let checksum = "";
-  try {
-    const checksumText = await fs.readFile(path.join(workspace, "dist", "SHA256SUMS.txt"), "utf8");
-    const record = checksumText
-      .split(/\r?\n/)
-      .map((line) => line.trim().split(/\s+/, 2))
-      .find(([, name]) => name === installerName);
-    checksum = record?.[0] || "";
-  } catch {
-    // Source-only checks still validate that the published page carries a SHA-256 value.
+  if (release.version !== version) {
+    throw new Error(`site/release.json version ${release.version || "missing"} does not match package version ${version}.`);
   }
-  return { version, installerName, checksum };
+  return {
+    version,
+    installerName: String(release.installer || ""),
+    checksum: String(release.sha256 || "")
+  };
 }
 
 function markdownReport(report) {
