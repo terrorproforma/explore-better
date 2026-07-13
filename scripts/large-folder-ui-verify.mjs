@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { chromium } from "playwright-core";
@@ -7,7 +8,7 @@ import { chromium } from "playwright-core";
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-const runRoot = path.join(artifactsDir, `large-folder-ui-${stamp}`);
+const runRoot = path.join(os.tmpdir(), `explore-better-large-folder-ui-${stamp}`);
 const fixtureRoot = path.join(runRoot, "fixture");
 const appData = path.join(runRoot, "appdata");
 let serverOutput = "";
@@ -32,6 +33,18 @@ function keepFixture() {
 function countOption() {
   const value = Number(optionValue("--count", process.env.EB_LARGE_UI_COUNT || "10000"));
   return Number.isInteger(value) && value > 0 ? value : 10000;
+}
+
+function repetitionCount(count) {
+  const fallback = count >= 100000 ? 3 : 1;
+  const value = Number(optionValue("--repetitions", process.env.EB_LARGE_UI_REPETITIONS || String(fallback)));
+  return Number.isInteger(value) ? Math.min(5, Math.max(1, value)) : fallback;
+}
+
+function median(values) {
+  const sorted = values.map(Number).filter(Number.isFinite).sort((left, right) => left - right);
+  if (!sorted.length) return null;
+  return sorted[Math.floor(sorted.length / 2)];
 }
 
 function selectedViewports() {
@@ -173,6 +186,7 @@ async function inspectHeader(page) {
     const clippedText = (element, area) => {
       if (element.matches("input, select, textarea")) return false;
       if (area === "breadcrumbs") return false;
+      if (element.classList.contains("pane-command")) return false;
       if (area === "file-head") {
         const title = element.querySelector(".column-title");
         return Boolean(title && title.textContent.trim().length > 2 && title.scrollWidth > title.clientWidth + 4);
@@ -187,7 +201,7 @@ async function inspectHeader(page) {
         const rect = element.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) continue;
         const text = (element.innerText || element.textContent || element.value || "").trim().replace(/\s+/g, " ");
-        const isIcon = text.length <= 2;
+        const isIcon = text.length <= 2 || element.classList.contains("icon-button") || element.classList.contains("pane-command");
         const minWidth = area === "breadcrumbs" ? (isIcon ? 20 : 30) : isIcon ? 24 : 36;
         const minHeight = area === "breadcrumbs" ? 20 : 24;
         const clipped = clippedText(element, area);
@@ -244,7 +258,7 @@ async function inspectVirtualList(page, expectedCount) {
   }, expectedCount);
 }
 
-async function setupWindowFirstProbe(page, fixture) {
+async function setupWindowFirstProbe(page, fixture, options = {}) {
   const probe = {
     requests: [],
     fullResolvers: [],
@@ -266,13 +280,19 @@ async function setupWindowFirstProbe(page, fixture) {
         isWindow,
         offset: requestUrl.searchParams.get("offset") || "",
         limit: requestUrl.searchParams.get("limit") || "",
+        format: requestUrl.searchParams.get("format") || "",
         url: route.request().url()
       });
       if (!isWindow && probe.requests.some((request) => request.isWindow) && !probe.released) {
         await new Promise((resolve) => probe.fullResolvers.push(resolve));
       }
     }
-    await route.continue();
+    if (isFixture && options.bypassCache) {
+      requestUrl.searchParams.set("bypassCache", "true");
+      await route.continue({ url: requestUrl.toString() });
+    } else {
+      await route.continue();
+    }
   });
   return probe;
 }
@@ -290,7 +310,7 @@ async function runViewport(page, baseUrl, fixture, viewport, count, options = {}
   });
 
   await page.setViewportSize({ width: viewport.width, height: viewport.height });
-  const windowProbe = await setupWindowFirstProbe(page, fixture);
+  const windowProbe = await setupWindowFirstProbe(page, fixture, { bypassCache: options.bypassCache });
   let windowFirst = null;
   let firstWindowPaint = null;
   let fullHydration = null;
@@ -336,9 +356,27 @@ async function runViewport(page, baseUrl, fixture, viewport, count, options = {}
     `${viewport.name}: browser should request a full-list hydration after the window.`
   );
   assert(
+      windowProbe.requests.filter((request) => !request.isWindow).every((request) => request.format === "compact-v2"),
+      `${viewport.name}: full-list hydration should use compact-v2.`
+  );
+  assert(
     windowFirst?.renderedRows > 0 && windowFirst.renderedRows <= 220 && !windowFirst.virtualized,
     `${viewport.name}: first paint should show the bounded listing window, got ${JSON.stringify(windowFirst)}.`
   );
+  if (count >= 100000 && options.enforcePerformance !== false) {
+    assert(
+      /[0-9,]+\+ items/i.test(windowFirst?.status || ""),
+      `${viewport.name}: cold streaming window should expose an unknown-total progress state, got ${windowFirst?.status}.`
+    );
+    assert(
+      Number(firstWindowPaint?.wallMs || Infinity) <= 750,
+      `${viewport.name}: cold first visible window must paint within 750ms, got ${firstWindowPaint?.wallMs}ms.`
+    );
+    assert(
+      Number(fullHydration?.wallMs || Infinity) <= 2000,
+      `${viewport.name}: full hydration must finish within 2000ms after first paint, got ${fullHydration?.wallMs}ms.`
+    );
+  }
 
   const header = await inspectHeader(page);
   const virtualInitial = await inspectVirtualList(page, count);
@@ -397,7 +435,7 @@ async function runViewport(page, baseUrl, fixture, viewport, count, options = {}
     );
   }
 
-  const screenshot = path.join(artifactsDir, `${screenshotPrefix()}-${viewport.name}.png`);
+  const screenshot = path.join(artifactsDir, `${screenshotPrefix()}-${viewport.name}${options.evidenceSuffix || ""}.png`);
   await page.screenshot({ path: screenshot, fullPage: true });
   return {
     viewport,
@@ -409,7 +447,8 @@ async function runViewport(page, baseUrl, fixture, viewport, count, options = {}
     listingRequests: windowProbe.requests.map((request) => ({
       isWindow: request.isWindow,
       offset: request.offset,
-      limit: request.limit
+      limit: request.limit,
+      format: request.format
     })),
     header,
     virtualInitial,
@@ -425,13 +464,25 @@ async function runViewport(page, baseUrl, fixture, viewport, count, options = {}
 async function main() {
   await fs.mkdir(artifactsDir, { recursive: true });
   const count = countOption();
-  const fixture = await prepareFixture(count);
+  const repetitions = repetitionCount(count);
+  const fixtureOption = optionValue("--fixture", process.env.EB_LARGE_UI_FIXTURE || "");
+  const fixture = fixtureOption ? path.resolve(fixtureOption) : await prepareFixture(count);
+  if (fixtureOption) {
+    await fs.access(fixture);
+  }
   await fs.mkdir(appData, { recursive: true });
   const port = Number(optionValue("--port", process.env.PORT || "49331"));
   const baseUrl = `http://127.0.0.1:${port}`;
   const server = spawn(process.execPath, ["server.mjs"], {
     cwd: workspace,
-    env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), LOCALAPPDATA: appData, APPDATA: appData },
+    env: {
+      ...process.env,
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      LOCALAPPDATA: appData,
+      APPDATA: appData,
+      EXPLORE_BETTER_NATIVE_HELPER_WARMUP: "1"
+    },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
   });
@@ -445,27 +496,71 @@ async function main() {
   let browser = null;
   try {
     await waitForServer(baseUrl, server);
-    const coldList = await timed("api-cold-list", async () =>
-      requestJson(baseUrl, `/api/list?path=${encodeURIComponent(fixture)}&showHidden=true`)
-    );
-    const warmList = await timed("api-warm-list", async () =>
-      requestJson(baseUrl, `/api/list?path=${encodeURIComponent(fixture)}&showHidden=true`)
-    );
-    assert(coldList.result.entries.length >= count, `API cold list should return at least ${count} entries.`);
-    assert(warmList.result.entries.length >= count, `API warm list should return at least ${count} entries.`);
-
     browser = await chromium.launch({ executablePath: edgePath(), headless: true });
     const reports = [];
     const activeViewports = selectedViewports();
     for (const [index, viewport] of activeViewports.entries()) {
-      const page = await browser.newPage();
-      try {
-        reports.push(await runViewport(page, baseUrl, fixture, viewport, count, { exerciseInteractions: index === 0 }));
-      } finally {
-        await page.close().catch(() => {});
+      const samples = [];
+      for (let repetition = 0; repetition < repetitions; repetition += 1) {
+        const page = await browser.newPage();
+        try {
+          samples.push(
+            await runViewport(page, baseUrl, fixture, viewport, count, {
+              bypassCache: repetitions > 1,
+              enforcePerformance: repetitions === 1,
+              exerciseInteractions: index === 0 && repetition === 0,
+              evidenceSuffix: repetitions > 1 ? `-run-${repetition + 1}` : ""
+            })
+          );
+        } finally {
+          await page.close().catch(() => {});
+        }
       }
-      console.log(`${viewport.name}: virtualized ${reports.at(-1).virtualInitial.renderedRows} rendered row(s)`);
+      const report = {
+        ...samples[0],
+        navigateMs: median(samples.map((sample) => sample.navigateMs)),
+        firstWindowPaintMs: median(samples.map((sample) => sample.firstWindowPaintMs)),
+        fullHydrationMs: median(samples.map((sample) => sample.fullHydrationMs)),
+        consoleErrors: samples.flatMap((sample) => sample.consoleErrors),
+        pageErrors: samples.flatMap((sample) => sample.pageErrors),
+        repetitions: samples.map((sample, repetition) => ({
+          repetition: repetition + 1,
+          navigateMs: sample.navigateMs,
+          firstWindowPaintMs: sample.firstWindowPaintMs,
+          fullHydrationMs: sample.fullHydrationMs,
+          windowRows: sample.windowFirst?.renderedRows || 0,
+          virtualRows: sample.virtualInitial?.renderedRows || 0,
+          screenshot: sample.screenshot
+        }))
+      };
+      if (count >= 100000) {
+        assert(
+          Number(report.firstWindowPaintMs || Infinity) <= 750,
+          `${viewport.name}: median cold first visible window must paint within 750ms, got ${report.firstWindowPaintMs}ms.`
+        );
+        assert(
+          Number(report.fullHydrationMs || Infinity) <= 2000,
+          `${viewport.name}: median cold full hydration must finish within 2000ms, got ${report.fullHydrationMs}ms.`
+        );
+      }
+      reports.push(report);
+      console.log(
+        `${viewport.name}: ${repetitions} run median first paint ${report.firstWindowPaintMs} ms, hydration ${report.fullHydrationMs} ms, virtualized ${report.virtualInitial.renderedRows} rendered row(s)`
+      );
     }
+
+    const coldList = await timed("api-cold-list", async () =>
+      requestJson(baseUrl, `/api/list?path=${encodeURIComponent(fixture)}&showHidden=true&bypassCache=true`)
+    );
+    const warmList = await timed("api-warm-list", async () =>
+      requestJson(baseUrl, `/api/list?path=${encodeURIComponent(fixture)}&showHidden=true`)
+    );
+    const compactWarmList = await timed("api-compact-v2-warm-list", async () =>
+      requestJson(baseUrl, `/api/list?path=${encodeURIComponent(fixture)}&showHidden=true&format=compact-v2`)
+    );
+    assert(coldList.result.entries.length >= count, `API cold list should return at least ${count} entries.`);
+    assert(warmList.result.entries.length >= count, `API warm list should return at least ${count} entries.`);
+    assert(compactWarmList.result.entryRows.length >= count, `API compact-v2 warm list should return at least ${count} rows.`);
 
     const consoleErrors = reports.flatMap((report) =>
       report.consoleErrors.map((message) => ({ viewport: report.viewport.name, message }))
@@ -479,18 +574,21 @@ async function main() {
     const output = {
       generatedAt: new Date().toISOString(),
       count,
+      repetitions,
       fixture,
       api: {
         coldWallMs: coldList.wallMs,
         warmWallMs: warmList.wallMs,
+        compactV2WarmWallMs: compactWarmList.wallMs,
         coldTiming: coldList.result.timing,
-        warmTiming: warmList.result.timing
+        warmTiming: warmList.result.timing,
+        compactV2WarmTiming: compactWarmList.result.timing
       },
       reports
     };
     const outputPath = path.join(artifactsDir, outputName());
     await fs.writeFile(outputPath, JSON.stringify(output, null, 2), "utf8");
-    console.log(`api cold ${coldList.wallMs} ms, warm ${warmList.wallMs} ms`);
+    console.log(`api cold ${coldList.wallMs} ms, warm ${warmList.wallMs} ms, compact-v2 warm ${compactWarmList.wallMs} ms`);
     console.log(`wrote ${outputPath}`);
   } finally {
     await browser?.close().catch(() => {});

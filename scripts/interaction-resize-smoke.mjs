@@ -111,11 +111,44 @@ async function readGeometry(page) {
             y: Math.round(box.y * 10) / 10,
             width: Math.round(box.width * 10) / 10,
             height: Math.round(box.height * 10) / 10,
+            right: Math.round(box.right * 10) / 10,
             bottom: Math.round(box.bottom * 10) / 10
           }
         : null;
     };
+    const actionStrip = document.querySelector(".dock-action-strip");
+    const actionStripRect = actionStrip?.getBoundingClientRect?.();
+    const visibleActions = [...document.querySelectorAll(".dock-action-strip > button:not([hidden]), .saved-command-strip > button:not([hidden])")]
+      .filter((element) => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          actionStripRect &&
+          box.bottom > actionStripRect.top + 1 &&
+          box.top < actionStripRect.bottom - 1
+        );
+      });
+    const visibleActionRows = new Set(visibleActions.map((element) => Math.round(element.getBoundingClientRect().top)));
     const style = getComputedStyle(document.querySelector(".app-shell"));
+    const status = (selector) => {
+      const element = document.querySelector(selector);
+      const box = element?.getBoundingClientRect?.();
+      return element && box
+        ? {
+            text: element.innerText.trim().replace(/\s+/g, " "),
+            title: element.getAttribute("title") || "",
+            aria: element.getAttribute("aria-label") || "",
+            active: element.classList.contains("active"),
+            x: Math.round(box.x * 10) / 10,
+            right: Math.round(box.right * 10) / 10,
+            width: Math.round(box.width * 10) / 10
+          }
+        : null;
+    };
+    const dockContext = document.querySelector(".dock-context");
+    const dockContextBox = dockContext?.getBoundingClientRect?.();
     return {
       layoutClass: document.querySelector(".workbench")?.className || "",
       activePath: document.querySelector('[data-path-input="left"]')?.value || "",
@@ -124,6 +157,22 @@ async function readGeometry(page) {
       rightPane: rect('.pane[data-pane="right"]'),
       inspector: rect(".inspector"),
       dock: rect(".command-dock"),
+      dockContext: rect(".dock-context"),
+      dockActions: rect(".dock-action-strip"),
+      dockModes: rect(".dock-mode-strip"),
+      visibleDockActions: visibleActions.length,
+      visibleDockActionRows: visibleActionRows.size,
+      dockStatus: {
+        selection: status("#selection-readout"),
+        clipboard: status("#clipboard-readout"),
+        operations: status("#operation-readout"),
+        contained:
+          Boolean(dockContextBox) &&
+          [...document.querySelectorAll(".dock-context > *")].every((element) => {
+            const box = element.getBoundingClientRect();
+            return box.left >= dockContextBox.left - 0.75 && box.right <= dockContextBox.right + 0.75;
+          })
+      },
       leftList: rect('.pane[data-pane="left"] .file-list'),
       vars: {
         navWidth: style.getPropertyValue("--nav-width").trim(),
@@ -215,6 +264,37 @@ async function main() {
     await clickLayout(page, "vertical");
     const initial = await readGeometry(page);
     const initialState = await requestJson(baseUrl, "/api/state");
+    assert(initial.visibleDockActionRows === 1, `Compact dock should expose one action row, found ${initial.visibleDockActionRows}.`);
+    assert(initial.dockContext.width <= 232, `Compact status area should stay at or below 232px, found ${initial.dockContext.width}px.`);
+    assert(initial.dockActions.width >= 600, `Command area should retain at least 600px, found ${initial.dockActions.width}px.`);
+    assert(initial.dockStatus.contained, "Every compact status control should remain inside the status area.");
+    assert(initial.dockStatus.selection.aria.includes("pane"), "Selection status should expose its pane in the accessible label.");
+    assert(initial.dockStatus.clipboard.aria.includes("Clipboard"), "Clipboard status should expose full accessible detail.");
+    assert(initial.dockStatus.operations.aria.includes("Activate to open operations"), "Operations status should describe its action.");
+
+    const rootFile = page.locator('.pane[data-pane="left"] [data-entry-path]').filter({ hasText: "root-file.txt" });
+    assert((await rootFile.count()) === 1, "Expected one root-file.txt row for compact status testing.");
+    await rootFile.click();
+    await page.waitForFunction(() => document.querySelector("#selection-readout")?.classList.contains("active"));
+    const selectedStatus = await readGeometry(page);
+    assert(selectedStatus.inspector.width >= 180, `Selecting a file should restore Preview, found ${selectedStatus.inspector.width}px.`);
+    assert(selectedStatus.dockStatus.selection.text.includes("1 selected"), `Selection status should compactly show one selected item: ${selectedStatus.dockStatus.selection.text}`);
+    assert(selectedStatus.dockStatus.selection.aria.includes("1 selected"), "Selection status accessible detail should report the selected count.");
+    assert(selectedStatus.dockStatus.selection.title.includes(fixture), "Selection status title should retain the full active path.");
+    await rootFile.press("Control+C");
+    await page.waitForFunction(() => document.querySelector("#clipboard-readout")?.classList.contains("active"));
+    const clipboardStatus = await readGeometry(page);
+    assert(clipboardStatus.dockStatus.clipboard.text === "Copy 1", `Clipboard status should compactly show Copy 1: ${clipboardStatus.dockStatus.clipboard.text}`);
+    assert(clipboardStatus.dockStatus.clipboard.aria.includes("root-file.txt"), "Clipboard accessible detail should name the copied file.");
+    assert(clipboardStatus.dockStatus.contained, "Active compact status controls should remain contained.");
+    await page.locator("#selection-readout").click();
+    assert(
+      await page.evaluate(() => document.activeElement?.matches?.('.file-list[data-list="left"]')),
+      "Selection status should focus the active pane list."
+    );
+    await page.locator("#operation-readout").click();
+    await page.locator("#ops-dialog[open]").waitFor({ state: "visible", timeout: 5000 });
+    await page.locator('[data-close-dialog="ops-dialog"]').click();
 
     await dragHandle(page, '[data-layout-resize="nav"]', 72, 0);
     const afterNav = await readGeometry(page);
@@ -227,8 +307,8 @@ async function main() {
 
     await dragHandle(page, '[data-layout-resize="panes"]', 96, 0);
     const afterPanes = await readGeometry(page);
-    assert(afterPanes.leftPane.width >= initial.leftPane.width + 45, `Left pane width did not grow enough: ${initial.leftPane.width} -> ${afterPanes.leftPane.width}.`);
-    assert(afterPanes.rightPane.width <= initial.rightPane.width - 25, `Right pane width did not shrink enough: ${initial.rightPane.width} -> ${afterPanes.rightPane.width}.`);
+    assert(afterPanes.leftPane.width >= afterNav.leftPane.width + 45, `Left pane width did not grow enough: ${afterNav.leftPane.width} -> ${afterPanes.leftPane.width}.`);
+    assert(afterPanes.rightPane.width <= afterNav.rightPane.width - 25, `Right pane width did not shrink enough: ${afterNav.rightPane.width} -> ${afterPanes.rightPane.width}.`);
     const paneState = await waitForState(
       baseUrl,
       (state) => state.settings?.layoutSizes?.leftPaneWeight > state.settings?.layoutSizes?.rightPaneWeight,
@@ -238,8 +318,8 @@ async function main() {
     await dragHandle(page, '[data-layout-resize="inspector"]', -76, 0);
     const afterInspector = await readGeometry(page);
     assert(
-      afterInspector.inspector.width >= initial.inspector.width + 40,
-      `Inspector width did not grow enough: ${initial.inspector.width} -> ${afterInspector.inspector.width}.`
+      afterInspector.inspector.width >= afterPanes.inspector.width + 40,
+      `Inspector width did not grow enough: ${afterPanes.inspector.width} -> ${afterInspector.inspector.width}.`
     );
     const inspectorState = await waitForState(
       baseUrl,
@@ -259,6 +339,22 @@ async function main() {
     await dragHandle(page, '[data-layout-resize="dock"]', 0, -92);
     const afterTallDock = await readGeometry(page);
     assert(afterTallDock.dock.height >= 160, `Dock should resize past the old 140px ceiling: ${afterTallDock.dock.height}.`);
+    assert(
+      afterTallDock.visibleDockActionRows >= 3,
+      `Tall dock should reveal at least three wrapped action rows, found ${afterTallDock.visibleDockActionRows}.`
+    );
+    assert(
+      afterTallDock.visibleDockActionRows > initial.visibleDockActionRows,
+      `Tall dock should reveal more action rows: ${initial.visibleDockActionRows} -> ${afterTallDock.visibleDockActionRows}.`
+    );
+    for (const [label, zone] of [
+      ["context", afterTallDock.dockContext],
+      ["actions", afterTallDock.dockActions],
+      ["modes", afterTallDock.dockModes]
+    ]) {
+      assert(zone && zone.width >= 80 && zone.height >= 30, `Dock ${label} zone should remain reachable after resize.`);
+      assert(zone.y >= afterTallDock.dock.y - 1 && zone.bottom <= afterTallDock.dock.bottom + 1, `Dock ${label} zone escaped the dock.`);
+    }
     const tallDockState = await waitForState(
       baseUrl,
       (state) => state.settings?.layoutSizes?.dockHeight >= 160,
@@ -318,6 +414,12 @@ async function main() {
         paneResize: true,
         inspectorResize: true,
         dockResize: true,
+        dockWrappedRows: afterTallDock.visibleDockActionRows,
+        compactStatusContained: clipboardStatus.dockStatus.contained,
+        compactStatusSelection: selectedStatus.dockStatus.selection,
+        compactStatusClipboard: clipboardStatus.dockStatus.clipboard,
+        dockSelectionFocus: true,
+        dockOperationsOpen: true,
         paneRowResize: true,
         doubleClickFolder: doubleClick
       }
@@ -335,7 +437,10 @@ Verified:
 - Navigator drag changed width from ${initial.nav.width}px to ${afterNav.nav.width}px.
 - Pane splitter changed left/right widths from ${initial.leftPane.width}px/${initial.rightPane.width}px to ${afterPanes.leftPane.width}px/${afterPanes.rightPane.width}px.
 - Preview drag changed width from ${initial.inspector.width}px to ${afterInspector.inspector.width}px.
-- Command dock drag changed height from ${initial.dock.height}px to ${afterDock.dock.height}px, then proved the taller dock ceiling at ${afterTallDock.dock.height}px.
+- Command dock drag changed height from ${initial.dock.height}px to ${afterDock.dock.height}px, then revealed ${afterTallDock.visibleDockActionRows} wrapped action rows at ${afterTallDock.dock.height}px while keeping context and modes anchored.
+- Compact status controls used ${initial.dockContext.width}px, left ${initial.dockActions.width}px for commands, stayed contained, and exposed full selection/clipboard/operations detail to assistive technology.
+- Selecting and copying \`root-file.txt\` changed the visible statuses to \`${selectedStatus.dockStatus.selection.text}\` and \`${clipboardStatus.dockStatus.clipboard.text}\`.
+- Dock status controls focused the active file list and opened Operations recovery.
 - Horizontal pane row drag kept the left file list clickable at ${afterRows.leftList.height}px.
 - Double-click opened \`${doubleClick.targetPath}\` and showed \`inside.txt\`.
 - Reload restored horizontal layout and resized geometry from persisted state.
@@ -350,6 +455,7 @@ Artifacts:
     console.log(`pane widths: ${initial.leftPane.width}/${initial.rightPane.width} -> ${afterPanes.leftPane.width}/${afterPanes.rightPane.width}`);
     console.log(`preview width: ${initial.inspector.width} -> ${afterInspector.inspector.width}`);
     console.log(`dock height: ${initial.dock.height} -> ${afterDock.dock.height} -> ${afterTallDock.dock.height}`);
+    console.log(`dock action rows: ${initial.visibleDockActionRows} -> ${afterTallDock.visibleDockActionRows}`);
     console.log(`row list height: ${afterRows.leftList.height}`);
     console.log("double-click ok");
     console.log(`wrote ${latestJsonPath}`);

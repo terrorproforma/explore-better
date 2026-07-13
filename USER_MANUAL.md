@@ -2,6 +2,8 @@
 
 Explore Better is a local dual-pane Windows file manager for power users. It is built for fast folder browsing, tabbed workflows, bulk file operations, previewing, scripting, and optional Explorer-style shell integration.
 
+Navigator and Preview have independent panel buttons in their headers and in the right side of the command dock. Hiding either panel immediately gives its space to the file panes, and the choice persists after restart. `Focus` still hides both panels temporarily without changing those individual choices; both panel actions are also available from `Ctrl+P` Command.
+
 ## Starting The App
 
 From the project folder:
@@ -26,6 +28,8 @@ npm run package:win
 ```
 
 Then launch the generated portable executable from `dist`.
+
+Packaged launches default to your Windows Desktop as the stable workspace root. A folder opened through shell integration remains authoritative, and advanced deployments can override the root with `EXPLORE_BETTER_WORKSPACE_ROOT`.
 
 For an unsigned installer build:
 
@@ -96,10 +100,27 @@ The window has five main regions:
 - Navigator: favorites, aliases, Windows Shell locations, drives, folder tree, and recent folders.
 - Left pane and right pane: independent file listings with tabs.
 - Preview: inspector for selected files and folders.
-- Command dock: global tools such as Search, Analyzer, Compare, Transfer, Layouts, Tools, Script, and Integration.
-- Status bar: load status, operation count, clipboard state, selection size, and folder load timing.
+- Top bar: roots plus direct access to Search, Disk Map, Operations, and the complete Command palette.
+- Command shelf: a compact workstation strip by default, divided into active-pane status, customizable actions, and always-reachable workspace modes. Drag its top edge upward to reveal additional wrapped action rows instead of a blank panel. Only the middle action zone scrolls when necessary, so selection, clipboard, Operations, Auto, Hidden, Link, and pane layout stay anchored.
+- Pane command strip: the familiar folder-plus, pencil, copy, move, recycle, and ellipsis icons keep both pane toolbars the same width in every layout. Hover for the complete action and destination; selection-dependent icons enable only when the pane has a selection.
+- Focus: click `Focus` or press `F9` to hide Navigator, Preview, roots, and secondary brand text while keeping Search, Disk Map, Operations, Command, both panes, status, and the command shelf available. Press `F9` again to restore the full workstation.
+- Status controls: choose the selection summary to return keyboard focus to the active file list, or choose the operation count to open Operations and recovery directly.
 
 Drag the separators between Navigator, panes, and Preview to resize them. In horizontal split mode, drag the separator between the upper and lower panes. Drag the top edge of the command dock to make the command area taller or shorter. Sizes are saved automatically.
+
+Horizontal split automatically uses shallow-pane chrome so more rows remain visible. Tabs, navigation, actions, and column headings become shorter, while the breadcrumb trail moves behind the trail button beside Refresh. Choose that button to open the complete clickable breadcrumb path over the listing; choosing an ancestor navigates normally, and `Escape` closes the trail without changing pane size.
+
+The active pane is marked `SOURCE`; the opposite pane is marked `TARGET`. Copy and Move arrows point toward the actual destination: left/right in side-by-side mode and up/down in horizontal mode. Clicking or selecting within the other pane swaps the roles immediately. Rename, Copy, Move, Recycle, Bulk Rename, Label, App Trash, and Permanent Delete remain disabled until that pane has a selection; their hover and screen-reader descriptions explain what must be selected and where transfers will go.
+
+## Command Center
+
+Open `Command` or press `Ctrl+P` to reach every built-in action, saved tool, and saved script without expanding the command shelf. Search accepts full words, fragments, or compact initials. Results prioritize exact matches, pins, and recent usage before grouping the remaining actions by task.
+
+Use `All` for the complete registry, `Recent` for the latest 12 executed actions, and `Pinned` for a personal shortlist. The bookmark control beside a result pins it; `Ctrl+D` toggles the active result from the keyboard. Pins and recents are stored locally and persist after restart. Arrow keys change the active result and `Enter` runs it. Existing custom hotkeys appear on their matching result.
+
+Each pane keeps Filter, view mode, New Folder, Rename, Copy, Move, and Recycle visible. Choose `More` in that pane for Kind/Label filters, New File, Bulk Rename, Columns, recursive Folder Sizes, Format, Label, App Trash, and Permanent Delete. This keeps file rows visible while preserving the complete pane action set.
+
+Choose `Focus` in the top bar, run `Toggle focus workspace` from Command, or press `F9` to hide Navigator and Preview and give their space to the file panes. Focus works with vertical, horizontal, and single-pane layouts, persists after restart, and restores the existing Navigator/Preview widths and settings when toggled off.
 
 ## Basic Browsing
 
@@ -130,17 +151,13 @@ Each pane has its own tabs, path, history, filters, columns, sort order, and vie
 - `L` on a tab locks it; navigating from a locked tab opens a branch tab.
 - Use `Layouts` to save and restore a full two-pane workspace.
 - Use `Tab Groups` to save only the active pane's tab set.
-- Use the `V`, `H`, and `1` layout buttons for vertical split, horizontal split, and single-pane focus.
+- Use the three pane-layout icons for vertical split, horizontal split, and single-pane focus. Their tooltips include the `Ctrl+Shift+1/2/3` shortcuts.
 
 ## Filtering And Views
 
 Use the filter box in each pane to narrow visible items by name. The kind and label dropdowns further restrict the pane.
 
-View buttons:
-
-- `D`: Details view.
-- `C`: Compact view.
-- `T`: Tile view with lazy image thumbnails.
+The three view icons switch between Details, Compact, and Tiles. Tiles load image thumbnails lazily; each icon has an accessible name and tooltip.
 
 Use `Cols` or `Columns` to choose Details columns such as Size, Dim, Attr, Link, Target, Label, Notes, Parent, and timestamps. Drag a Details header edge to resize a column; widths are saved with tabs, layouts, folder formats, and display presets. Right-click a Details header to autosize, show/hide columns, reset widths, apply presets such as Media or Code, sort, or save a folder format.
 
@@ -183,7 +200,7 @@ Operations appear in `Ops`, where supported work can be paused, resumed, retried
 - `Hashes`: create or verify checksum manifests.
 - `Archive`: create ZIP files or extract selected ZIPs. Double-clicking a ZIP opens it for read-only browsing in the pane.
 - `Sizes`: calculate recursive folder sizes.
-- `Analyzer`: scan a folder or selected item for logical bytes, allocated bytes, drive used/free context, a scan-complete strip with extension color bands, a folder tree with percent-of-parent bars, a file-type chart with color swatches and categories, top files, and a WizTree-style colored file map. On local Windows volumes the bundled normal-user Go helper uses `GetCompressedFileSizeW` and labels the result `Exact` with its cluster size; network, unsupported, or helper-fallback scans are explicitly labeled `Estimated`. Hover a map block to see the file/type/logical/allocated size share; click a concrete file block to open its parent in the active pane and select it. Duplicate cold scans of the same target coalesce into one filesystem walk, repeat scans of the same unchanged target use a short warm cache, and app file operations/scripts invalidate matching analyzer cache entries before the next scan. Use `Active` to load the active pane path, adjust the entry cap for huge trees, and leave `Follow links` off unless you intentionally want junctions/symlinks traversed.
+- `Disk Map` in the top bar opens a full-window map workspace; `Analyzer` in the command dock opens the complete overview. Both scan the active folder or another path for logical bytes, allocated bytes, drive used/free context, a scan-complete strip with extension color bands, a folder tree with percent-of-parent bars, a file-type chart with color swatches and categories, top files, and a hierarchical WizTree-style map. Use the `Map` and `Overview` tabs to reclaim most of the window for the chart or restore all tables without rescanning. `Size by` changes rectangle area between logical and allocated bytes. `Color by` changes the live legend and chart between file types and stable top-folder branches. Folder rectangles contain their child folders and files, so the chart preserves directory structure instead of flattening every file into one level. Hover a block to inspect its type, logical size, allocated size, and share. Click once to pin a selection; double-click a folder group to focus it in the map, or double-click a concrete file to open its parent and select it in the active pane. `Root`, `Up`, clickable breadcrumbs, `Focus`, and `Open` provide explicit navigation without losing the scan. With the map focused, use the arrow keys to move selection, `Enter` or `Space` to focus/open it, `Backspace` to move up, `Home` to return to the scan root, `O` to open the selection in the active pane, and `Escape` to clear selection. On local Windows volumes the bundled normal-user Go helper performs one bounded native traversal, resolves exact allocated bytes through a cancellable worker pool, and returns compact root-relative columns instead of making Node walk and stat every path again. Network, unsupported, or helper-fallback scans are explicitly labeled `Estimated`. Duplicate cold scans of the same target coalesce into one filesystem walk; repeat unchanged scans use a short warm cache and preserve the existing tables and map instead of rebuilding identical UI. App file operations and scripts invalidate matching Analyzer cache entries before the next scan. Use `Active` to load the active pane path, adjust the entry cap for huge trees, and leave `Follow links` off unless you intentionally want junctions/symlinks traversed.
 
 Virtual result panes behave like normal panes for preview, selection, reveal, and many file operations. ZIP virtual panes are read-only until you extract the archive.
 
@@ -205,7 +222,7 @@ Use `Backup` to export or restore configuration packages.
 
 ## Preview And Editing
 
-The inspector previews folders, text, images, PDFs, audio, and video. Use `Viewer` for a larger preview window with neighboring-file navigation. Use `Edit` for quick editing of small text files with undoable saves.
+The inspector previews folders, text, images, PDFs, audio, and video. By default, an empty Preview collapses to a narrow rail and restores its saved width as soon as you select an item; turn off `Collapse empty Preview` in Preferences to keep it pinned open. Use `Viewer` for a larger preview window with neighboring-file navigation. Use `Edit` for quick editing of small text files with undoable saves.
 
 ## Scripting And Tools
 
@@ -253,6 +270,11 @@ Run `npm run verify:shell-current-user` to perform a real current-user HKCU shel
 
 ## Performance Notes
 
+- Large local Windows folders are enumerated once by the bundled normal-user Win32 helper; small folders, UNC paths, rich link/dimension views, and helper failures automatically use the Node provider.
+- When a folder saved in the previous session no longer exists, startup opens the nearest existing parent and saves that recovered location. A path explicitly supplied by Explorer, the command line, or a launch URL is never silently changed.
+- After the first 80 entries, full background hydration uses columnar helper transport and the versioned browser-facing `compact-v1` payload to avoid repeated paths, field names, and trailing defaults. The initial slice still covers several screens while avoiding unnecessary startup work. Identical simultaneous pane hydrations share one transfer and one immutable expanded/sorted result, including a reused numeric filename collator.
+- SOURCE and TARGET each have an independent activity chip. It shows loading, bounded large-folder progress, final item count and elapsed time, cache reuse, or a pane-specific error while preserving the last usable rows.
+
 Explore Better prioritizes fast browsing:
 
 - Folder listing uses bounded concurrent metadata work.
@@ -269,13 +291,13 @@ Explore Better prioritizes fast browsing:
 - Shell Browser namespace reads use bounded provider timeouts and short warm caching so slow Network providers do not repeatedly stall browsing.
 - Tile thumbnails and viewer thumbnails use versioned raw-file URLs so unchanged images can reuse browser cache entries.
 - `npm run perf:bench` measures cold list, warm list, pane-style filter latency, live search latency, folder-index search, background-index search, opt-in background text-content indexing, optional network-path timings, and thumbnail-ish image metadata cache timings.
-- `npm run perf:guard` runs a smaller repeatable benchmark and fails when core speed budgets are exceeded. It writes `artifacts\perf-guard-latest.json` and `.md`, appends trendable metrics to `artifacts\perf-trend-history.jsonl`, and writes `artifacts\perf-trend-latest.json` plus `.md` so regressions are visible against historical medians.
+- `npm run perf:guard` runs three fresh measured repetitions by default, uses numeric medians for speed budgets and trend history, requires functional cache/index assertions in every repetition, and fails when core speed budgets are exceeded. It writes `artifacts\perf-guard-latest.json` and `.md`, appends trendable metrics to `artifacts\perf-trend-history.jsonl`, and writes `artifacts\perf-trend-latest.json` plus `.md` so regressions are visible against historical medians.
 - `npm run verify:speed-health` reads the latest speed evidence and writes one scorecard for startup, 100k stress, Windows-native enumeration baseline, server listing cache, browser cache, thumbnails, large folders, UNC paths, background indexes, visible Speed/Search UI, and trend headroom.
 - `npm run verify:startup-latency` measures cold backend startup, `/api/roots` readiness, first HTML/CSS/JS responses, first folder list, browser DOMContentLoaded, and first visible file rows.
 - `npm run verify:goal` audits the latest goal-critical artifacts across performance, background index/cache, native shell coverage, operations, metadata cache, UAC, scripting, accessibility/layout, crash recovery, release readiness, and release integrity. It fails on missing, stale, or failing evidence and warns when external proof is still missing, such as an attached MTP device, signing certificate, or hosted update feed.
 - `npm run verify:perf-100k` runs the dedicated 100k-file stress gate with cold/warm list, warm-list cache-hit/scanned-row, pane-filter, search, folder-index, active-index scanned-row, and background-index budgets.
-- `npm run verify:windows-baseline` compares generated 1k/10k/100k folders against Windows-native `.NET DirectoryInfo.EnumerateFileSystemInfos`, proving full warm app listings reuse cache with zero scanned rows, windowed warm listings return only the first viewport slice, and active-index search scans only the narrowed candidate set while native enumeration scans the full folder.
-- `npm run verify:large-folder-ui` and `npm run verify:large-folder-100k-ui` prove browser panes paint a bounded first listing window before hydrating the full folder, then switch to virtualized rows for the complete 10k/100k entry set.
+- `npm run verify:windows-baseline` compares generated 1k/10k/100k folders against Windows-native `.NET DirectoryInfo.EnumerateFileSystemInfos`, proving full warm app listings reuse cache with zero scanned rows, cold first paint streams only the first viewport slice before the exact native total is known, and active-index search scans only the narrowed candidate set.
+- `npm run verify:large-folder-ui` and `npm run verify:large-folder-100k-ui` open the browser before warming the listing cache, prove panes paint a bounded first listing window before hydrating the full folder, then switch to virtualized rows for the complete 10k/100k entry set. The 100k gate requires true-cold first visible rows within 750ms, full hydration within 2s, and no more than 60 rendered virtual rows.
 - `npm run verify:server-listing-cache` proves duplicate cold folder requests coalesce into one in-flight disk scan, unchanged folder revisits and rich thumbnail/link metadata revisits are served from the server listing cache with zero scanned rows, then writes a new file and verifies the watcher invalidates and re-warms both cache variants.
 - `npm run verify:folder-index-token-search` builds a 20k-file active folder index, proves exact token search scans only the narrowed candidate set, and verifies repeat searches hit the warm index cache.
 - `npm run verify:mixed-load` runs concurrent foreground folder lists, name searches, content searches, raw file reads, and roots calls against one fixture, then fails if correctness or p95/max latency budgets regress.
@@ -345,16 +367,21 @@ Explore Better prioritizes fast browsing:
 - `npm run verify:interaction-resize` drags the navigator, pane splitter, preview, command dock, and horizontal pane-row handles in a browser, proves geometry changes persist through `/api/state` and reload, and checks double-click folder open after resizing.
 - `npm run verify:layout` opens the app in browser viewports with crowded long-name favorites and fails if header/root-strip, toolbar, or dock controls are unreachable, outside their containers, clipped, or squished.
 - `npm run verify:pane-layout-no-scrollbars` opens crowded dual-pane browser layouts and fails if the path bar, breadcrumbs, toolbar, or details header become scrollable or spill outside their pane chrome.
-- `npm run verify:size-analysis-ui` drives the Analyzer through the browser UI, verifies the visible Cancel button restores controls from an active scan, checks folder/file/extension totals plus allocated-size/category fields, verifies file-type swatches, hovers and clicks a treemap block to select the real file, and audits the Analyzer for clipped controls or unwanted inner scrollbars.
+- `npm run verify:size-analysis-ui` drives the Analyzer through the browser UI, verifies the visible Cancel button restores controls from an active scan, checks folder/file/extension totals plus allocated-size/category fields, requires hierarchical folder groups in the treemap, verifies file-type swatches, pinned selection, folder drill-down, Root/Up reset, keyboard selection, and explicit file opening, then audits the Analyzer for clipped controls or unwanted inner scrollbars.
 - `npm run verify:size-analysis-perf` builds a 10k-file Analyzer fixture, fires a concurrent cold Analyzer herd to prove duplicate requests coalesce into one filesystem walk, proves foreground list, active-index search, and roots requests stay responsive while an uncached Analyzer scan is running, proves repeat scans return from the Analyzer cache, then creates a file through the app API and proves the cache is invalidated and re-warmed.
 - `npm run verify:size-analysis-cancel` starts duplicate Analyzer scans, aborts the origin request, proves the active duplicate restarts instead of inheriting the abort, keeps foreground list/roots requests responsive after cancellation, and verifies the recovered scan warms the Analyzer cache.
 - `npm run verify:security-boundary` proves hostile-origin and invalid-Host requests cannot mutate files, the browser capability is required, CSP is present, and browser transfer applies require a current preview token.
 - `npm run verify:transactional-operations` injects a directory staging-rename failure and a cross-volume source-delete failure, then proves original-byte restoration and no-recopy source-removal recovery.
 - `npm run verify:native-helper` verifies the Go helper protocol, exact Windows allocation metadata, volume geometry, enumeration/tree scan, and cancellation response.
+- `npm run verify:packaged-native-helper` launches `dist\\win-unpacked\\Explore Better.exe` against an isolated fixture, verifies the bundled Go helper matches the source helper hash, and requires Analyzer output to report `native-go-helper`, exact allocation, and `win32-get-compressed-file-size`.
+- `npm run verify:native-listing-provider` compares Win32 browse metadata with Node, separately proves bounded native requests serialize only their requested prefix while retaining the complete visible count, verifies successive complete requests reuse the same helper process, validates columnar helper transport plus trimmed compact browser rows, and proves a broken helper falls back to a complete Node listing. Normal pane first paint uses the faster helper-independent streaming window before that exact native hydration.
+- `npm run verify:pane-activity` holds one pane mid-hydration while the other completes, then verifies independent progress, active-pane global status ownership, accessible busy/error states, preserved rows, and crowded-layout fit.
 - `npm run verify:all` runs the release-critical checks sequentially and writes one timestamped readiness report under `artifacts\acceptance`; `npm run verify:all:full` adds the entire verification fleet.
 - `npm run verify:action-inventory` writes the control/keyboard action inventory and pending Computer Use evidence matrix used for physical acceptance passes.
 - `npm run verify:large-folder-ui` opens a 10k-entry browser fixture, proves virtualized row rendering stays bounded, checks stressed header layout, and verifies filtering plus virtual scrolling.
-- `npm run verify:large-folder-100k-ui` opens a 100k-entry browser fixture on desktop, proves virtualized row rendering stays bounded, and verifies the client filter path still responds.
+- `npm run verify:large-folder-100k-ui` opens a cold 100k-entry browser fixture on desktop, enforces the 750ms first-window and 2s hydration gates, proves virtualized row rendering stays bounded, and verifies the client filter path still responds.
+- `npm run verify:startup-recovery-ui` removes a saved deep folder, proves startup recovers both panes and persists the nearest existing ancestor, checks Focus/root overflow and stable icon widths at 1280x720, and confirms an explicit missing launch target still reports an error.
+- `npm run verify:workspace-panels-ui` collapses Navigator and Preview from their headers, proves pane width and height are reclaimed, exercises vertical/horizontal/single layouts plus Focus, reloads to verify persistence, and restores both panels from the permanent dock controls.
 - `npm run verify:keyboard-workflows-ui` drives command-palette execution and Quick Search filtering entirely from the keyboard, checks focus handoff, and verifies the keyboard UI is not clipped or squished.
 - `npm run verify:accessibility` checks useful accessible names, keyboard file-list navigation, command-palette focus, and high-contrast focus styling.
 

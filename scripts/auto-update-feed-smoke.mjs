@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 
 const workspace = process.cwd();
@@ -21,8 +22,16 @@ function optionValue(name, fallback = "") {
   return index === -1 ? fallback : process.argv[index + 1] || fallback;
 }
 
-function randomPort() {
-  return 58000 + Math.floor(Math.random() * 5000);
+function freeLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      probe.close((error) => (error ? reject(error) : resolve(port)));
+    });
+  });
 }
 
 function keepFixture() {
@@ -92,8 +101,10 @@ async function startFeedServer(port) {
       resolve();
     });
   });
+  const address = server.address();
+  const listeningPort = typeof address === "object" && address ? address.port : port;
   return {
-    url: `http://127.0.0.1:${port}/`,
+    url: `http://127.0.0.1:${listeningPort}/`,
     requests,
     close() {
       return new Promise((resolve) => server.close(resolve));
@@ -197,8 +208,10 @@ async function main() {
   await fs.mkdir(appData, { recursive: true });
   await fs.mkdir(artifactsDir, { recursive: true });
   const version = optionValue("--version", process.env.EB_UPDATE_FEED_VERSION || "0.1.1");
-  const feedPort = Number(optionValue("--feed-port", process.env.EB_UPDATE_FEED_PORT || randomPort()));
-  const appPort = Number(optionValue("--app-port", process.env.PORT || randomPort()));
+  const configuredFeedPort = optionValue("--feed-port", process.env.EB_UPDATE_FEED_PORT || "");
+  const configuredAppPort = optionValue("--app-port", process.env.PORT || "");
+  const feedPort = configuredFeedPort ? Number(configuredFeedPort) : 0;
+  const appPort = configuredAppPort ? Number(configuredAppPort) : await freeLoopbackPort();
   const feedInfo = await prepareFeed(version);
   const feed = await startFeedServer(feedPort);
   const command = process.platform === "win32" ? "cmd.exe" : "npm";

@@ -184,6 +184,7 @@ async function main() {
   let browser = null;
   let commandPalette = {};
   let layout = null;
+  let focusWorkspace = null;
   let quickSearch = null;
   let keyboardLayout = null;
   try {
@@ -229,6 +230,69 @@ async function main() {
       "palette-result-focus",
       commandPalette.horizontal.focusedId === "command-input",
       `Palette focus id: ${commandPalette.horizontal.focusedId}.`
+    );
+
+    commandPalette.focus = await pressCommand(page, "focus workspace");
+    focusWorkspace = await waitForResult(
+      page,
+      () => {
+        const shell = document.querySelector(".app-shell");
+        return {
+          ok: shell?.classList.contains("focus-files"),
+          enabled: shell?.classList.contains("focus-files") === true,
+          navDisplay: getComputedStyle(document.querySelector(".nav-rail")).display,
+          inspectorDisplay: getComputedStyle(document.querySelector(".inspector")).display
+        };
+      },
+      "focus command execution"
+    );
+    check(
+      checks,
+      "palette-executes-focus-workspace",
+      focusWorkspace.enabled && focusWorkspace.navDisplay === "none" && focusWorkspace.inspectorDisplay === "none",
+      JSON.stringify(focusWorkspace)
+    );
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector('.pane[data-pane="left"] [data-entry-path]', { timeout: 10000 });
+    const focusPersisted = await waitForResult(
+      page,
+      () => {
+        const shell = document.querySelector(".app-shell");
+        return {
+          ok: shell?.classList.contains("focus-files"),
+          enabled: shell?.classList.contains("focus-files") === true,
+          pressed: document.querySelector('[data-topbar-action="focus"]')?.getAttribute("aria-pressed")
+        };
+      },
+      "focus persistence after reload"
+    );
+    focusWorkspace.persisted = focusPersisted;
+    check(
+      checks,
+      "focus-workspace-persists-reload",
+      focusPersisted.enabled && focusPersisted.pressed === "true",
+      JSON.stringify(focusPersisted)
+    );
+    await page.keyboard.press("F9");
+    const focusRestored = await waitForResult(
+      page,
+      () => {
+        const shell = document.querySelector(".app-shell");
+        return {
+          ok: !shell?.classList.contains("focus-files"),
+          enabled: shell?.classList.contains("focus-files") === true,
+          navDisplay: getComputedStyle(document.querySelector(".nav-rail")).display,
+          inspectorDisplay: getComputedStyle(document.querySelector(".inspector")).display
+        };
+      },
+      "F9 focus restore"
+    );
+    focusWorkspace.restored = focusRestored;
+    check(
+      checks,
+      "f9-restores-full-workspace",
+      !focusRestored.enabled && focusRestored.navDisplay !== "none" && focusRestored.inspectorDisplay !== "none",
+      JSON.stringify(focusRestored)
     );
 
     commandPalette.quickSearch = await pressCommand(page, "quick search current");
@@ -315,6 +379,7 @@ async function main() {
     fixture,
     commandPalette,
     layout,
+    focusWorkspace,
     quickSearch,
     keyboardLayout,
     consoleMessages,

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,6 +23,55 @@ type request struct {
 	Path       string `json:"path,omitempty"`
 	TargetID   string `json:"targetId,omitempty"`
 	MaxEntries int    `json:"maxEntries,omitempty"`
+	ShowHidden *bool  `json:"showHidden,omitempty"`
+	Compact    bool   `json:"compact,omitempty"`
+}
+
+type browseEntry struct {
+	Name       string `json:"n"`
+	Attributes uint32 `json:"a"`
+	Size       uint64 `json:"s,omitempty"`
+	Modified   int64  `json:"m"`
+	Created    int64  `json:"c"`
+	Accessed   int64  `json:"x"`
+}
+
+type browseColumns struct {
+	Format     string   `json:"format"`
+	Names      []string `json:"n"`
+	Attributes []uint32 `json:"a"`
+	Sizes      []uint64 `json:"s"`
+	Modified   []int64  `json:"m"`
+	Created    []int64  `json:"c"`
+	Accessed   []int64  `json:"x"`
+}
+
+func newBrowseColumns(capacity int) browseColumns {
+	return browseColumns{
+		Format:     "columns-v1",
+		Names:      make([]string, 0, capacity),
+		Attributes: make([]uint32, 0, capacity),
+		Sizes:      make([]uint64, 0, capacity),
+		Modified:   make([]int64, 0, capacity),
+		Created:    make([]int64, 0, capacity),
+		Accessed:   make([]int64, 0, capacity),
+	}
+}
+
+func (columns *browseColumns) append(entry browseEntry) {
+	columns.Names = append(columns.Names, entry.Name)
+	columns.Attributes = append(columns.Attributes, entry.Attributes)
+	columns.Sizes = append(columns.Sizes, entry.Size)
+	columns.Modified = append(columns.Modified, entry.Modified)
+	columns.Created = append(columns.Created, entry.Created)
+	columns.Accessed = append(columns.Accessed, entry.Accessed)
+}
+
+func browseEntriesPayload(items []browseEntry, columns browseColumns, compact bool) interface{} {
+	if compact {
+		return columns
+	}
+	return items
 }
 
 type response struct {
@@ -40,14 +90,65 @@ type wireError struct {
 }
 
 type fileEntry struct {
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	Directory   bool   `json:"directory"`
-	Logical     int64  `json:"logicalBytes"`
-	Allocated   uint64 `json:"allocatedBytes"`
-	Modified    int64  `json:"modifiedMs"`
-	Allocation  string `json:"allocatedSource"`
-	Accuracy    string `json:"allocationAccuracy"`
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Directory  bool   `json:"directory"`
+	Logical    int64  `json:"logicalBytes"`
+	Allocated  uint64 `json:"allocatedBytes"`
+	Modified   int64  `json:"modifiedMs"`
+	Allocation string `json:"allocatedSource"`
+	Accuracy   string `json:"allocationAccuracy"`
+}
+
+type treeScanMetadata struct {
+	Items       []fileEntry
+	FileIndexes []int
+	Logical     uint64
+	Files       int
+	Folders     int
+	Skipped     int
+	Scanned     int
+	Truncated   bool
+}
+
+type treeColumns struct {
+	Format      string   `json:"format"`
+	Root        string   `json:"root"`
+	Paths       []string `json:"p"`
+	Directories []int    `json:"d"`
+	Logical     []int64  `json:"s"`
+	Allocated   []uint64 `json:"a"`
+	Modified    []int64  `json:"m"`
+}
+
+func compactTreeEntries(root string, items []fileEntry) treeColumns {
+	cleanRoot := filepath.Clean(root)
+	prefix := cleanRoot + string(os.PathSeparator)
+	columns := treeColumns{
+		Format:      "columns-v1",
+		Root:        cleanRoot,
+		Paths:       make([]string, 0, len(items)),
+		Directories: make([]int, 0, len(items)),
+		Logical:     make([]int64, 0, len(items)),
+		Allocated:   make([]uint64, 0, len(items)),
+		Modified:    make([]int64, 0, len(items)),
+	}
+	for _, item := range items {
+		directory := 0
+		if item.Directory {
+			directory = 1
+		}
+		itemPath := item.Path
+		if strings.HasPrefix(itemPath, prefix) {
+			itemPath = itemPath[len(prefix):]
+		}
+		columns.Paths = append(columns.Paths, itemPath)
+		columns.Directories = append(columns.Directories, directory)
+		columns.Logical = append(columns.Logical, item.Logical)
+		columns.Allocated = append(columns.Allocated, item.Allocated)
+		columns.Modified = append(columns.Modified, item.Modified)
+	}
+	return columns
 }
 
 type writer struct {
@@ -108,63 +209,87 @@ func scanTree(ctx context.Context, req request, out *writer) (map[string]interfa
 	if maxEntries <= 0 || maxEntries > 500000 {
 		maxEntries = 500000
 	}
-	items := make([]fileEntry, 0, min(maxEntries, 10000))
-	var logical uint64
-	var allocated uint64
-	var files int
-	var folders int
-	var skipped int
-	err := filepath.WalkDir(req.Path, func(itemPath string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			skipped++
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		if itemPath == req.Path {
-			return nil
-		}
-		if entry.IsDir() {
-			folders++
-			return nil
-		}
-		if files >= maxEntries {
-			return filepath.SkipAll
-		}
-		info, infoErr := entry.Info()
-		if infoErr != nil {
-			skipped++
-			return nil
-		}
-		value, source, accuracy, allocationErr := allocatedSize(itemPath, info.Size())
-		if allocationErr != nil {
-			value = uint64(max(info.Size(), 0))
-			source = "logical-size-fallback"
-			accuracy = "estimated"
-			skipped++
-		}
-		items = append(items, fileEntry{Name: entry.Name(), Path: itemPath, Logical: info.Size(), Allocated: value, Modified: info.ModTime().UnixMilli(), Allocation: source, Accuracy: accuracy})
-		files++
-		logical += uint64(max(info.Size(), 0))
-		allocated += value
-		if files%1000 == 0 {
-			out.send(response{Version: protocolVersion, ID: req.ID, Type: "progress", OK: true, Data: map[string]interface{}{"files": files, "folders": folders, "logicalBytes": logical, "allocatedBytes": allocated}})
-		}
-		return nil
-	})
+	metadataStarted := time.Now()
+	metadata, err := collectTreeEntries(ctx, req.Path, maxEntries)
 	if err != nil {
 		return nil, err
 	}
+	metadataMs := float64(time.Since(metadataStarted).Microseconds()) / 1000
+	items := metadata.Items
+	fileIndexes := metadata.FileIndexes
+	logical := metadata.Logical
+	files := metadata.Files
+	folders := metadata.Folders
+	skipped := metadata.Skipped
+	scanned := metadata.Scanned
+	truncated := metadata.Truncated
+	var allocated uint64
+
+	allocationStarted := time.Now()
+	workerCount := min(max(4, runtime.GOMAXPROCS(0)*4), 32)
+	jobs := make(chan int, workerCount*4)
+	var workers sync.WaitGroup
+	var progressMu sync.Mutex
+	processed := 0
+	for worker := 0; worker < workerCount; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				item := &items[index]
+				value, source, accuracy, allocationErr := allocatedSize(item.Path, item.Logical)
+				failed := allocationErr != nil
+				if failed {
+					value = uint64(max(item.Logical, 0))
+					source = "logical-size-fallback"
+					accuracy = "estimated"
+				}
+				item.Allocated = value
+				item.Allocation = source
+				item.Accuracy = accuracy
+				progressMu.Lock()
+				allocated += value
+				if failed {
+					skipped++
+				}
+				processed++
+				if processed%1000 == 0 {
+					out.send(response{Version: protocolVersion, ID: req.ID, Type: "progress", OK: true, Data: map[string]interface{}{"files": processed, "folders": folders, "logicalBytes": logical, "allocatedBytes": allocated}})
+				}
+				progressMu.Unlock()
+			}
+		}()
+	}
+	for _, index := range fileIndexes {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			workers.Wait()
+			return nil, ctx.Err()
+		case jobs <- index:
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	allocationMs := float64(time.Since(allocationStarted).Microseconds()) / 1000
 	volume, volumeErr := volumeInfo(req.Path)
 	if volumeErr != nil {
 		volume = map[string]interface{}{"clusterSize": 0, "allocationAccuracy": "unknown", "error": volumeErr.Error()}
 	}
+	entries := interface{}(items)
+	wireFormat := "objects-v1"
+	if req.Compact {
+		entries = compactTreeEntries(req.Path, items)
+		wireFormat = "columns-v1"
+	}
 	return map[string]interface{}{
-		"path": req.Path, "entries": items, "files": files, "folders": folders, "skipped": skipped,
-		"logicalBytes": logical, "allocatedBytes": allocated, "truncated": files >= maxEntries, "volume": volume,
+		"path": req.Path, "entries": entries, "files": files, "folders": folders, "skipped": skipped,
+		"logicalBytes": logical, "allocatedBytes": allocated, "scannedEntries": scanned,
+		"truncated": truncated || scanned >= maxEntries, "entryLimitMode": "all-entries", "wireFormat": wireFormat, "volume": volume,
+		"timing": map[string]interface{}{"enumerationMs": metadataMs, "allocationMs": allocationMs, "allocationWorkers": workerCount},
 	}, nil
 }
 
@@ -175,6 +300,8 @@ func handle(ctx context.Context, req request, out *writer) (interface{}, error) 
 	switch req.Op {
 	case "hello":
 		return map[string]interface{}{"protocolVersion": protocolVersion, "platform": runtime.GOOS, "architecture": runtime.GOARCH}, nil
+	case "browse":
+		return browseDirectory(ctx, req.Path, req.MaxEntries, req.ShowHidden, req.Compact)
 	case "enumerate":
 		return enumerate(ctx, req.Path, req.MaxEntries)
 	case "volume-info":

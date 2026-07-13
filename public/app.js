@@ -58,9 +58,14 @@ const app = {
     controller: null,
     requestId: 0,
     treemapRects: [],
-    treemapHover: null
+    treemapHover: null,
+    treemapSelection: null,
+    treemapFocusPath: "",
+    viewMode: "overview",
+    sizeMode: "logical",
+    colorMode: "type"
   },
-  pathSuggest: { paneName: null, items: [], activeIndex: 0, requestId: 0 },
+  pathSuggest: { paneName: null, items: [], activeIndex: 0, keyboardSelected: false, requestId: 0 },
   breadcrumbMenu: { paneName: null, path: null, entries: [], loading: false, error: null, requestId: 0, x: 0, y: 0 },
   selectMask: { paneName: "left", pattern: "" },
   lastLabelColor: "teal",
@@ -82,7 +87,7 @@ const app = {
   duplicateResult: null,
   textEditor: null,
   viewer: { paneName: "left", path: null, entries: [], index: -1, preview: null },
-  commandPalette: { items: [], activeIndex: 0 },
+  commandPalette: { items: [], activeIndex: 0, view: "all", pins: new Set(), recents: [], loaded: false },
   operationDetails: { id: null, selectedRemaining: new Set(), selectedBackups: new Set() },
   fileBasket: { selected: new Set() },
   trashBrowser: {
@@ -96,8 +101,8 @@ const app = {
   },
   folderTree: { expanded: new Set(), nodes: new Map(), loading: new Set(), leafPaths: new Set() },
   paneLoads: {
-    left: { id: 0, controller: null },
-    right: { id: 0, controller: null }
+    left: { id: 0, controller: null, phase: "idle", text: "Ready", detail: "Left pane ready" },
+    right: { id: 0, controller: null, phase: "idle", text: "Ready", detail: "Right pane ready" }
   },
   virtualLists: { left: null, right: null },
   virtualRenderFrames: { left: null, right: null },
@@ -105,10 +110,15 @@ const app = {
   thumbnailObservers: { left: null, right: null },
   listingCache: new Map(),
   listingCacheGeneration: 0,
+  listingHydrations: new Map(),
+  inspectorRenderToken: 0,
+  inspectorPreviewController: null,
   listingPrefetch: { queue: [], queued: new Set(), active: new Map() },
   visibleEntryCache: new WeakMap(),
+  sharedVisibleEntryCache: new WeakMap(),
   visibleEntryIndexes: new WeakMap(),
   visibleEntryPathSets: new WeakMap(),
+  currentLabelEntriesCache: new WeakMap(),
   operationPollTimer: null,
   operationPollBusy: false,
   autoRefreshTimer: null,
@@ -202,10 +212,11 @@ const viewerPreviewTypes = new Set(["image", "text", "pdf", "audio", "video"]);
 const viewerPreviewKinds = new Set(["Image", "Text", "Audio", "Video"]);
 const listingCacheTtlMs = 8000;
 const listingCacheMaxEntries = 24;
-const listingWindowInitialLimit = 200;
+const listingWindowInitialLimit = 48;
 const listingPrefetchMaxActive = 2;
 const listingPrefetchMaxQueue = 8;
 const listingPrefetchDelayMs = 120;
+const paneValueCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
 const layoutSizeDefaults = {
   navWidth: 236,
   inspectorWidth: 300,
@@ -274,6 +285,7 @@ const kindFilterOptions = [
 ];
 const kindFilterValues = new Set(kindFilterOptions.map((option) => option.value));
 const favoriteColorValues = new Set(["teal", "gold", "ember", "violet", "green", "black"]);
+const commandCenterStorageKey = "explore-better-command-center-v1";
 
 const commands = [
   {
@@ -490,6 +502,21 @@ const commands = [
     run: () => cycleViewMode(app.activePane)
   },
   {
+    name: "Toggle focus workspace",
+    detail: "Hides or restores Navigator and Preview so file panes use the full window. F9.",
+    run: () => toggleFocusMode()
+  },
+  {
+    name: "Toggle navigator pane",
+    detail: "Shows or hides Navigator while preserving Preview and the file-pane layout.",
+    run: () => toggleWorkspacePanel("navigator")
+  },
+  {
+    name: "Toggle preview pane",
+    detail: "Shows or hides Preview while preserving Navigator and the file-pane layout.",
+    run: () => toggleWorkspacePanel("preview")
+  },
+  {
     name: "Choose details columns",
     detail: "Configures the metadata columns shown in the active details pane.",
     run: () => openColumnsDialog(app.activePane)
@@ -612,7 +639,12 @@ const commands = [
   {
     name: "Open size analyzer",
     detail: "Scans the active folder into top folders, extensions, files, and a treemap chart.",
-    run: () => openSizeAnalysisDialog(app.activePane)
+    run: () => openSizeAnalysisDialog(app.activePane, "overview")
+  },
+  {
+    name: "Open Disk Map",
+    detail: "Opens the hierarchical nested treemap for disk usage analysis.",
+    run: () => openSizeAnalysisDialog(app.activePane, "map")
   },
   {
     name: "Compare panes",
@@ -839,13 +871,107 @@ function isAbortError(error) {
   return error?.name === "AbortError";
 }
 
-function beginPaneLoad(paneName) {
+function compactPaneActivityCount(value) {
+  const count = Math.max(0, Number(value || 0));
+  if (count >= 1_000_000) {
+    return `${(count / 1_000_000).toFixed(count >= 10_000_000 ? 0 : 1).replace(/\.0$/, "")}M`;
+  }
+  if (count >= 1_000) {
+    return `${(count / 1_000).toFixed(count >= 100_000 ? 0 : 1).replace(/\.0$/, "")}K`;
+  }
+  return String(Math.round(count));
+}
+
+function compactPaneActivityDuration(value) {
+  const ms = Math.max(0, Number(value || 0));
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+function paneActivityMarkup(paneName) {
+  const activity = app.paneLoads[paneName] || {};
+  const phase = ["idle", "loading", "hydrating", "ready", "error"].includes(activity.phase)
+    ? activity.phase
+    : "idle";
+  return `<span class="pane-status-cluster">
+    <span class="pane-activity-badge ${phase}" data-pane-activity="${paneName}" role="status" aria-live="polite" aria-label="${escapeHtml(
+      activity.detail || `${paneName} pane ready`
+    )}" title="${escapeHtml(activity.detail || "Ready")}">
+      <span class="pane-activity-dot" aria-hidden="true"></span>
+      <span data-pane-activity-text="${paneName}">${escapeHtml(activity.text || "Ready")}</span>
+    </span>
+    <span class="pane-role-badge" data-pane-role="${paneName}"></span>
+  </span>`;
+}
+
+function renderPaneActivity(paneName) {
+  const activity = app.paneLoads[paneName];
+  const pane = document.querySelector(`.pane[data-pane="${paneName}"]`);
+  const badge = document.querySelector(`[data-pane-activity="${paneName}"]`);
+  if (!activity || !pane) {
+    return;
+  }
+  const busy = Boolean(activity.controller);
+  pane.classList.toggle("is-loading", busy);
+  pane.setAttribute("aria-busy", busy ? "true" : "false");
+  if (!badge) {
+    return;
+  }
+  badge.className = `pane-activity-badge ${activity.phase || "idle"}`;
+  badge.setAttribute("aria-label", activity.detail || `${paneName} pane ready`);
+  badge.title = activity.detail || "Ready";
+  const text = badge.querySelector(`[data-pane-activity-text="${paneName}"]`);
+  if (text) {
+    text.textContent = activity.text || "Ready";
+  }
+}
+
+function setPaneActivity(paneName, load, phase, options = {}) {
+  if (load && !isCurrentPaneLoad(paneName, load)) {
+    return;
+  }
+  const state = app.paneLoads[paneName];
+  const count = Number(options.count || 0);
+  const total = Number(options.total || 0);
+  const wallMs = Number(options.wallMs || 0);
+  let text = options.text || "Ready";
+  if (!options.text && phase === "loading") text = "Loading";
+  if (!options.text && phase === "hydrating") {
+    text = `${compactPaneActivityCount(count)} / ${compactPaneActivityCount(total)}`;
+  }
+  if (!options.text && phase === "ready") {
+    text = options.cached
+      ? `${compactPaneActivityCount(count)} / cached`
+      : `${compactPaneActivityCount(count)} / ${compactPaneActivityDuration(wallMs)}`;
+  }
+  if (!options.text && phase === "error") text = "Error";
+  Object.assign(state, {
+    phase,
+    text,
+    detail: options.detail || text,
+    count: count || null,
+    total: total || null,
+    wallMs: wallMs || null
+  });
+  renderPaneActivity(paneName);
+}
+
+function setPaneNavigationStatus(paneName, message) {
+  if (app.activePane === paneName) {
+    setStatus(message);
+  }
+}
+
+function beginPaneLoad(paneName, options = {}) {
   const state = app.paneLoads[paneName];
   state.controller?.abort();
   const controller = new AbortController();
   state.id += 1;
   state.controller = controller;
-  return { id: state.id, controller };
+  const load = { id: state.id, controller, startedAt: performance.now() };
+  setPaneActivity(paneName, load, "loading", {
+    detail: options.detail || `${paneName === "left" ? "Left" : "Right"} pane loading`
+  });
+  return load;
 }
 
 function isCurrentPaneLoad(paneName, load) {
@@ -856,6 +982,7 @@ function isCurrentPaneLoad(paneName, load) {
 function finishPaneLoad(paneName, load) {
   if (isCurrentPaneLoad(paneName, load)) {
     app.paneLoads[paneName].controller = null;
+    renderPaneActivity(paneName);
   }
 }
 
@@ -1182,7 +1309,8 @@ async function request(url, options = {}) {
     }
   });
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
+  const parsed = text ? JSON.parse(text) : {};
+  const data = expandCompactDirectoryListing(parsed);
   if (!response.ok) {
     throw new Error(data.error || `Request failed: ${response.status}`);
   }
@@ -1193,6 +1321,71 @@ async function request(url, options = {}) {
     scheduleOperationPoll(200);
   }
   return data;
+}
+
+function attributesFromCompactText(value) {
+  const text = String(value || "").toUpperCase();
+  return {
+    readonly: text.includes("R"),
+    hidden: text.includes("H"),
+    system: text.includes("S"),
+    archive: text.includes("A"),
+    reparse: text.includes("L"),
+    compressed: text.includes("C"),
+    encrypted: text.includes("E"),
+    indexed: text.includes("I"),
+    flags: text,
+    text
+  };
+}
+
+function expandCompactDirectoryListing(data) {
+  if (!["compact-v1", "compact-v2"].includes(data?.entryFormat) || !Array.isArray(data.entryRows)) {
+    return data;
+  }
+  const parent = String(data.path || "");
+  const separator = pathSeparatorFor(parent);
+  const isV2 = data.entryFormat === "compact-v2";
+  const dictionaries = data.entryDictionaries || {};
+  const dictionaryValue = (key, index, fallback = "") =>
+    isV2 ? String(dictionaries[key]?.[Number(index)] ?? fallback) : String(index ?? fallback);
+  const entries = data.entryRows.map((row) => {
+    const flags = Number(row?.[1] || 0);
+    const attributeText = dictionaryValue("attributes", row?.[8], "");
+    const attributes = attributesFromCompactText(attributeText);
+    return {
+      name: String(row?.[0] || ""),
+      path: joinPathSegment(parent, String(row?.[0] || ""), separator),
+      parent,
+      isDirectory: (flags & 1) !== 0,
+      isFile: (flags & 2) !== 0,
+      readonly: (flags & 4) !== 0,
+      hidden: (flags & 8) !== 0,
+      system: (flags & 16) !== 0,
+      archive: (flags & 32) !== 0,
+      isSymlink: (flags & 64) !== 0,
+      unavailable: (flags & 128) !== 0,
+      extension: dictionaryValue("extensions", row?.[2], ""),
+      kind: dictionaryValue("kinds", row?.[3], "File"),
+      size: row?.[4] ?? null,
+      modified: row?.[5] ?? null,
+      created: row?.[6] ?? null,
+      accessed: row?.[7] ?? null,
+      attributes,
+      attributeText,
+      label: row?.[9] || undefined,
+      dimensions: null,
+      dimensionText: String(row?.[10] || ""),
+      dimensionPixels: row?.[11] ?? null,
+      linkType: dictionaryValue("linkTypes", row?.[12], ""),
+      linkTarget: String(row?.[13] || ""),
+      linkTargetRaw: String(row?.[14] || ""),
+      linkCount: row?.[15] ?? null,
+      mode: row?.[16] ?? null
+    };
+  });
+  const { entryRows, entryDictionaries, ...metadata } = data;
+  return { ...metadata, entries };
 }
 
 function normalizeSavedTab(savedTab, fallbackPath) {
@@ -1411,6 +1604,78 @@ function hydratePanesFromState(urlParams) {
     ? null
     : startupLayoutForMode(settings.startupMode, settings);
   hydratePanesFromLayout(startupLayout || app.state?.layout || {}, urlParams);
+}
+
+function startupPaneHasExplicitTarget(paneName, urlParams) {
+  if (urlParams.has(paneName)) {
+    return true;
+  }
+  if (!urlParams.has("open") && !urlParams.has("shellPath")) {
+    return false;
+  }
+  const mode = normalizeShellOpenMode(urlParams.get("shellMode") || app.state?.settings?.shellOpenMode);
+  return shellOpenPaneName(mode) === paneName;
+}
+
+function missingStartupPathError(error) {
+  return /\bENOENT\b|\bENOTDIR\b|no such file or directory|cannot find the path|path was not found/i.test(
+    String(error?.message || error || "")
+  );
+}
+
+function startupRecoveryCandidates(targetPath, fallbackPath) {
+  const candidates = [];
+  const seen = new Set([normalizedPathKey(targetPath)]);
+  const add = (candidate) => {
+    const value = String(candidate || "").trim();
+    const key = normalizedPathKey(value);
+    if (!value || !key || seen.has(key)) return;
+    seen.add(key);
+    candidates.push(value);
+  };
+  let current = parseZipVirtualPath(targetPath)?.archivePath || String(targetPath || "");
+  for (let depth = 0; depth < 32; depth += 1) {
+    let parent = parentPathOf(current);
+    if (/^[a-z]:$/i.test(parent)) {
+      parent += "\\";
+    }
+    if (!parent || samePath(parent, current)) break;
+    add(parent);
+    current = parent;
+  }
+  add(fallbackPath);
+  add(rootShortcutPath("workspace", app.roots?.cwd));
+  add(app.roots?.home);
+  add(app.roots?.cwd);
+  return candidates;
+}
+
+async function loadStartupPane(paneName, targetPath, fallbackPath, { allowRecovery = true } = {}) {
+  try {
+    await loadPane(paneName, targetPath, false, { linkedFollow: true });
+    return { recovered: false, path: tabOf(paneName).path };
+  } catch (error) {
+    if (!allowRecovery || !missingStartupPathError(error)) {
+      throw error;
+    }
+    for (const candidate of startupRecoveryCandidates(targetPath, fallbackPath)) {
+      try {
+        await loadPane(paneName, candidate, false, {
+          linkedFollow: true,
+          silent: true,
+          save: false,
+          preserveSelection: false
+        });
+        showToast(`${paneName === "left" ? "Left" : "Right"} pane recovered to ${candidate}`);
+        return { recovered: true, path: candidate, missingPath: targetPath };
+      } catch (candidateError) {
+        if (!missingStartupPathError(candidateError)) {
+          throw candidateError;
+        }
+      }
+    }
+    throw error;
+  }
 }
 
 function operationSummary() {
@@ -1855,10 +2120,7 @@ function sortedEntries(tab) {
     if (["size", "dimensions", "modified", "created", "accessed"].includes(tab.sortKey)) {
       return ((left || 0) - (right || 0)) * factor;
     }
-    return String(left).localeCompare(String(right), undefined, {
-      sensitivity: "base",
-      numeric: true
-    }) * factor;
+    return paneValueCollator.compare(String(left), String(right)) * factor;
   });
 }
 
@@ -1900,9 +2162,27 @@ function cacheVisibleEntryData(tab, signature, entries) {
   });
   const data = { signature, entries, indexByKey, pathSet };
   app.visibleEntryCache.set(tab, data);
+  let shared = app.sharedVisibleEntryCache.get(signature.entries);
+  if (!shared) {
+    shared = new Map();
+    app.sharedVisibleEntryCache.set(signature.entries, shared);
+  }
+  shared.set(sharedVisibleEntrySignatureKey(signature), data);
   app.visibleEntryIndexes.set(entries, indexByKey);
   app.visibleEntryPathSets.set(entries, pathSet);
   return data;
+}
+
+function sharedVisibleEntrySignatureKey(signature) {
+  return [
+    signature.length,
+    signature.filter,
+    signature.kindFilter,
+    signature.labelFilter,
+    signature.sortKey,
+    signature.sortDir,
+    signature.revision
+  ].join("\u001f");
 }
 
 function visibleEntryData(tab) {
@@ -1910,6 +2190,11 @@ function visibleEntryData(tab) {
   const cached = app.visibleEntryCache.get(tab);
   if (sameVisibleEntrySignature(cached?.signature, signature)) {
     return cached;
+  }
+  const shared = app.sharedVisibleEntryCache.get(signature.entries)?.get(sharedVisibleEntrySignatureKey(signature));
+  if (shared) {
+    app.visibleEntryCache.set(tab, shared);
+    return shared;
   }
   return cacheVisibleEntryData(tab, signature, sortedEntries(tab));
 }
@@ -1966,11 +2251,18 @@ function listingFetchPlan(tab, targetPath, options = {}) {
 }
 
 function isWindowedListing(data) {
-  return Boolean(data?.window && Number(data.window.total || 0) > Number(data.entries?.length || 0));
+  return Boolean(
+    data?.window &&
+      (data.window.hasMore === true || Number(data.window.total || 0) > Number(data.entries?.length || 0))
+  );
 }
 
 function listingWindowStatus(data) {
   const returned = Number(data?.window?.returned ?? data?.entries?.length ?? 0);
+  const totalKnown = data?.window?.totalKnown !== false && Number.isFinite(Number(data?.window?.total));
+  if (!totalKnown) {
+    return `${returned.toLocaleString()}+ items`;
+  }
   const total = Number(data?.window?.total ?? returned);
   return `${returned.toLocaleString()}/${total.toLocaleString()} items`;
 }
@@ -2030,13 +2322,6 @@ function clearListingCache() {
   cancelListingPrefetch();
 }
 
-function cloneListingData(data) {
-  return {
-    ...data,
-    entries: (data.entries || []).map((entry) => ({ ...entry }))
-  };
-}
-
 function pruneListingCache() {
   while (app.listingCache.size > listingCacheMaxEntries) {
     const oldest = app.listingCache.keys().next().value;
@@ -2051,9 +2336,24 @@ function rememberListingCache(cacheKey, data) {
   app.listingCache.delete(cacheKey);
   app.listingCache.set(cacheKey, {
     cachedAt: Date.now(),
-    data: cloneListingData(data)
+    data
   });
   pruneListingCache();
+}
+
+function requestFullListingHydration(cacheKey, query) {
+  const key = `${app.listingCacheGeneration}:${cacheKey}`;
+  const existing = app.listingHydrations.get(key);
+  if (existing) {
+    return existing;
+  }
+  const promise = request(`/api/list?${query}`, { invalidateListingCache: false }).finally(() => {
+    if (app.listingHydrations.get(key) === promise) {
+      app.listingHydrations.delete(key);
+    }
+  });
+  app.listingHydrations.set(key, promise);
+  return promise;
 }
 
 function listingCacheEntry(cacheKey) {
@@ -2079,7 +2379,7 @@ function cachedListing(cacheKey) {
   }
   app.listingCache.delete(cacheKey);
   app.listingCache.set(cacheKey, cached);
-  return cloneListingData(cached.data);
+  return cached.data;
 }
 
 function requestIdle(callback, timeout = 500) {
@@ -2181,7 +2481,7 @@ function applyPaneListing(paneName, tab, data, context = {}) {
     previousFocusedPath = null,
     options = {}
   } = context;
-  const entries = (data.entries || []).map((entry) => withCurrentLabel({ ...entry }));
+  const entries = entriesWithCurrentLabels(data.entries);
   if (pushHistory && previousPath && previousPath !== data.path) {
     tab.history.push(previousPath);
     tab.future = [];
@@ -2919,7 +3219,7 @@ function renderPathSuggestions() {
     positionPathSuggestion(container, paneName);
     container.innerHTML = app.pathSuggest.items
       .map((item, index) => {
-        const selected = index === app.pathSuggest.activeIndex ? " active" : "";
+        const selected = app.pathSuggest.keyboardSelected && index === app.pathSuggest.activeIndex ? " active" : "";
         return `<button type="button" class="path-suggest-item${selected}" data-path-suggest-index="${index}" title="${escapeHtml(
           item.path
         )}">
@@ -2956,6 +3256,7 @@ function hidePathSuggestions(paneName = null) {
     paneName: null,
     items: [],
     activeIndex: 0,
+    keyboardSelected: false,
     requestId: (app.pathSuggest?.requestId || 0) + 1
   };
   renderPathSuggestions();
@@ -2969,6 +3270,7 @@ async function showPathSuggestions(paneName, query) {
     paneName,
     items: preferFilesystem ? [] : localItems,
     activeIndex: 0,
+    keyboardSelected: false,
     requestId,
     pending: preferFilesystem
   };
@@ -3043,13 +3345,13 @@ async function handlePathSuggestionKey(event, pathInput) {
     const pending =
       app.pathSuggest?.paneName === paneName &&
       app.pathSuggest.pending &&
-      (event.key === "Enter" || event.key === "Tab");
+      event.key === "Tab";
     if (pending) {
       event.preventDefault();
       const requestId = app.pathSuggest.requestId;
       await waitForPathSuggestionReady(paneName, requestId);
       if (app.pathSuggest?.paneName === paneName && app.pathSuggest.items.length) {
-        await acceptPathSuggestion(pathInput, { open: event.key === "Enter" });
+        await acceptPathSuggestion(pathInput, { open: false });
       }
       return true;
     }
@@ -3060,6 +3362,7 @@ async function handlePathSuggestionKey(event, pathInput) {
     const direction = event.key === "ArrowDown" ? 1 : -1;
     const count = app.pathSuggest.items.length;
     app.pathSuggest.activeIndex = (app.pathSuggest.activeIndex + direction + count) % count;
+    app.pathSuggest.keyboardSelected = true;
     renderPathSuggestions();
     return true;
   }
@@ -3069,6 +3372,9 @@ async function handlePathSuggestionKey(event, pathInput) {
     return true;
   }
   if (event.key === "Enter") {
+    if (!app.pathSuggest.keyboardSelected) {
+      return false;
+    }
     event.preventDefault();
     await acceptPathSuggestion(pathInput, { open: true });
     return true;
@@ -3294,6 +3600,28 @@ function renderBreadcrumbs(paneName, itemPath) {
     .join("");
 }
 
+function toggleCompactBreadcrumbs(paneName, force = null) {
+  if (!isPaneName(paneName)) return false;
+  const pane = document.querySelector(`.pane[data-pane="${paneName}"]`);
+  const button = document.querySelector(`[data-compact-breadcrumbs="${paneName}"]`);
+  if (!pane || !button) return false;
+  const open = force === null ? !pane.classList.contains("compact-breadcrumbs-open") : Boolean(force);
+  pane.classList.toggle("compact-breadcrumbs-open", open);
+  button.setAttribute("aria-expanded", String(open));
+  button.setAttribute("aria-label", open ? "Hide breadcrumbs" : "Show breadcrumbs");
+  button.setAttribute("title", open ? "Hide breadcrumbs" : "Show breadcrumbs");
+  if (open) {
+    pane.querySelector(".breadcrumb-button.current")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  return open;
+}
+
+function closeCompactBreadcrumbs(exceptPane = null) {
+  for (const paneName of ["left", "right"]) {
+    if (paneName !== exceptPane) toggleCompactBreadcrumbs(paneName, false);
+  }
+}
+
 function breadcrumbMenuElement() {
   let menu = document.getElementById("breadcrumb-menu");
   if (!menu) {
@@ -3445,6 +3773,46 @@ function withCurrentLabel(entry) {
   }
   const { label: _oldLabel, ...rest } = entry;
   return rest;
+}
+
+function entriesWithCurrentLabels(entries) {
+  const source = Array.isArray(entries) ? entries : [];
+  const labels = app.state?.labels || [];
+  if (!labels.length) {
+    return source;
+  }
+  const cached = app.currentLabelEntriesCache.get(source);
+  if (cached?.labels === labels) {
+    return cached.entries;
+  }
+  const parent = source[0]?.parent || "";
+  const relevantLabels = parent ? labels.filter((label) => samePath(parentPathOf(label.path), parent)) : labels;
+  if (!relevantLabels.length) {
+    app.currentLabelEntriesCache.set(source, { labels, entries: source });
+    return source;
+  }
+  const labelsByPath = new Map(relevantLabels.map((label) => [normalizedPathKey(label.path), label]));
+  const labelledEntries = source.map((entry) => {
+    const label = labelsByPath.get(normalizedPathKey(entry.path));
+    if (label) {
+      return {
+        ...entry,
+        label: {
+          name: label.name,
+          color: label.color,
+          notes: label.notes,
+          updatedAt: label.updatedAt
+        }
+      };
+    }
+    if (!entry.label) {
+      return entry;
+    }
+    const { label: _oldLabel, ...rest } = entry;
+    return rest;
+  });
+  app.currentLabelEntriesCache.set(source, { labels, entries: labelledEntries });
+  return labelledEntries;
 }
 
 function refreshOpenEntryLabels() {
@@ -4075,6 +4443,7 @@ function renderSavedCommandStrip() {
       )}" title="${escapeHtml(snippet.description || snippet.name)}">JS ${escapeHtml(snippet.name)}</button>`
   );
   strip.innerHTML = [...commandButtons, ...scriptButtons].join("");
+  scheduleDockOverflowUpdate();
 }
 
 function isInlineRenaming(paneName, entry) {
@@ -4844,18 +5213,19 @@ function renderPane(paneName) {
         const lockTitle = item.locked ? "Unlock tab" : "Lock tab";
         const closeButton =
           pane.tabs.length > 1
-            ? `<button class="tab-close" data-close-tab="${index}" data-pane="${paneName}" title="Close tab">X</button>`
+            ? `<button class="tab-close" data-close-tab="${index}" data-pane="${paneName}" title="Close tab" aria-label="Close tab">&times;</button>`
             : `<span></span>`;
         return `<div class="tab${active}${locked}" data-tab-shell="${index}" data-pane="${paneName}" draggable="true" title="${escapeHtml(item.path)}">
           <button class="tab-label" data-tab="${index}" data-pane="${paneName}">
             <span>${escapeHtml(item.title || labelForPath(item.path))}</span>
           </button>
-          <button class="tab-lock${item.locked ? " active" : ""}" data-lock-tab="${index}" data-pane="${paneName}" title="${lockTitle}" aria-label="${lockTitle}">L</button>
+          <button class="tab-lock${item.locked ? " active" : ""}" data-lock-tab="${index}" data-pane="${paneName}" title="${lockTitle}" aria-label="${lockTitle}"><span class="tab-lock-glyph" aria-hidden="true"></span></button>
           ${closeButton}
         </div>`;
       })
       .join("") +
-    `<button class="new-tab" data-new-tab="${paneName}" title="New tab" aria-label="New tab">+</button>`;
+    `<button class="new-tab" data-new-tab="${paneName}" title="New tab" aria-label="New tab">+</button>
+     ${paneActivityMarkup(paneName)}`;
 
   document.querySelector(`[data-path-input="${paneName}"]`).value = tab.path;
   const breadcrumbs = document.querySelector(`[data-breadcrumbs="${paneName}"]`);
@@ -4874,6 +5244,8 @@ function renderPane(paneName) {
   document.querySelectorAll(`[data-view-mode][data-pane="${paneName}"]`).forEach((button) => {
     button.classList.toggle("active", button.dataset.viewMode === tab.viewMode);
   });
+  updateDualPaneActionChrome();
+  renderPaneActivity(paneName);
   renderFileHead(paneName, tab);
 
   const list = document.querySelector(`[data-list="${paneName}"]`);
@@ -4958,11 +5330,94 @@ function renderLayoutChrome() {
   document.querySelectorAll("[data-layout-mode]").forEach((button) => {
     button.classList.toggle("active", button.dataset.layoutMode === layoutMode);
   });
+  updateDualPaneActionChrome();
+}
+
+function transferDestinationForPane(paneName) {
+  const layoutMode = normalizePaneLayout(app.paneLayout);
+  if (layoutMode === "horizontal") {
+    return paneName === "left"
+      ? { direction: "down", label: "bottom pane" }
+      : { direction: "up", label: "top pane" };
+  }
+  if (layoutMode === "vertical") {
+    return paneName === "left"
+      ? { direction: "right", label: "right pane" }
+      : { direction: "left", label: "left pane" };
+  }
+  return { direction: "hidden", label: "hidden target pane" };
+}
+
+function paneSelectionActionDescription(action, count, destination) {
+  const itemText = `${count} selected item${count === 1 ? "" : "s"}`;
+  if (action === "rename") return `Rename the first of ${itemText}`;
+  if (action === "copy-other") return `Copy ${itemText} to the ${destination.label}`;
+  if (action === "move-other") return `Move ${itemText} to the ${destination.label}`;
+  if (action === "recycle") return `Send ${itemText} to the Windows Recycle Bin`;
+  if (action === "bulk-rename") return `Bulk rename ${itemText}`;
+  if (action === "label") return `Label ${itemText}`;
+  if (action === "trash") return `Move ${itemText} to App Trash`;
+  if (action === "delete") return `Permanently delete ${itemText}`;
+  return `Run ${action} for ${itemText}`;
+}
+
+function paneSelectionActionEmptyDescription(action, destination) {
+  if (action === "copy-other") return `Select items to copy to the ${destination.label}`;
+  if (action === "move-other") return `Select items to move to the ${destination.label}`;
+  if (action === "rename") return "Select an item to rename";
+  if (action === "recycle") return "Select items to send to the Windows Recycle Bin";
+  if (action === "bulk-rename") return "Select items to bulk rename";
+  if (action === "label") return "Select items to label";
+  if (action === "trash") return "Select items to move to App Trash";
+  if (action === "delete") return "Select items to permanently delete";
+  return "Select items first";
+}
+
+function updatePaneActionAvailability(paneName) {
+  if (!isPaneName(paneName)) return;
+  const paneElement = document.querySelector(`.pane[data-pane="${paneName}"]`);
+  if (!paneElement) return;
+  const count = selectedEntries(paneName).length;
+  const destination = transferDestinationForPane(paneName);
+  paneElement.classList.toggle("has-selection", count > 0);
+  paneElement.querySelectorAll("[data-requires-selection]").forEach((button) => {
+    const action = button.dataset.action || "action";
+    const description = count
+      ? paneSelectionActionDescription(action, count, destination)
+      : paneSelectionActionEmptyDescription(action, destination);
+    button.disabled = count === 0;
+    button.title = description;
+    button.setAttribute("aria-label", description);
+    button.dataset.selectionCount = String(count);
+    if (action === "copy-other" || action === "move-other") {
+      button.dataset.transferDirection = destination.direction;
+    }
+  });
+}
+
+function updateDualPaneActionChrome() {
+  for (const paneName of ["left", "right"]) {
+    const source = paneName === app.activePane;
+    const paneElement = document.querySelector(`.pane[data-pane="${paneName}"]`);
+    const badge = document.querySelector(`[data-pane-role="${paneName}"]`);
+    paneElement?.setAttribute("data-transfer-role", source ? "source" : "target");
+    if (badge) {
+      badge.textContent = source ? "SOURCE" : "TARGET";
+      badge.classList.toggle("source", source);
+      badge.classList.toggle("target", !source);
+      badge.title = `${paneName === "left" ? "Left" : "Right"} pane is the ${source ? "operation source" : "transfer target"}`;
+      badge.setAttribute("aria-label", badge.title);
+    }
+    updatePaneActionAvailability(paneName);
+  }
 }
 
 function setPaneLayout(layoutMode, options = {}) {
   const nextLayout = normalizePaneLayout(layoutMode);
   const changed = nextLayout !== app.paneLayout;
+  if (nextLayout !== "horizontal") {
+    closeCompactBreadcrumbs();
+  }
   app.paneLayout = nextLayout;
   renderLayoutChrome();
   if (options.toast !== false) {
@@ -5037,10 +5492,13 @@ async function loadZipPane(paneName, archivePath, innerPath = "", pushHistory = 
   const previousPath = tab.path;
   const previousSelected = new Set(tab.selected || []);
   const previousFocusedPath = tab.focusedPath;
-  const load = beginPaneLoad(paneName);
+  const archiveLabel = `${labelForPath(archivePath)}${cleanInnerPath ? `/${cleanInnerPath}` : ""}`;
+  const load = beginPaneLoad(paneName, {
+    detail: `${paneName === "left" ? "Left" : "Right"} pane loading ZIP ${archiveLabel}`
+  });
   const plan = zipListingFetchPlan(archivePath, cleanInnerPath);
   if (!options.silent) {
-    setStatus(`Loading ${labelForPath(plan.archivePath)}${cleanInnerPath ? `/${cleanInnerPath}` : ""}`);
+    setPaneNavigationStatus(paneName, `Loading ${archiveLabel}`);
   }
   if (!options.forceReload) {
     const cached = cachedListing(plan.cacheKey);
@@ -5053,9 +5511,17 @@ async function loadZipPane(paneName, archivePath, innerPath = "", pushHistory = 
         options,
         cached: true
       });
+      setPaneActivity(paneName, load, "ready", {
+        count: entries.length,
+        cached: true,
+        detail: `${paneName === "left" ? "Left" : "Right"} pane loaded ${entries.length.toLocaleString()} ZIP items from memory cache`
+      });
       finishPaneLoad(paneName, load);
       if (!options.silent) {
-        setStatus(`${entries.length} ZIP item${entries.length === 1 ? "" : "s"} / cached`);
+        setPaneNavigationStatus(
+          paneName,
+          `${entries.length} ZIP item${entries.length === 1 ? "" : "s"} / cached`
+        );
       }
       if (options.save !== false) {
         scheduleStateSave();
@@ -5079,12 +5545,20 @@ async function loadZipPane(paneName, archivePath, innerPath = "", pushHistory = 
       previousFocusedPath,
       options
     });
+    setPaneActivity(paneName, load, "ready", {
+      count: entries.length,
+      wallMs: performance.now() - load.startedAt,
+      detail: `${paneName === "left" ? "Left" : "Right"} pane loaded ${entries.length.toLocaleString()} ZIP items in ${compactPaneActivityDuration(
+        performance.now() - load.startedAt
+      )}`
+    });
     if (!options.silent) {
       const truncatedNote = data.truncated
         ? ` / truncated ${data.count || entries.length}/${data.scannedEntries || data.totalEntries || "many"}`
         : "";
       const unsafeNote = data.unsafeEntries ? ` / ${data.unsafeEntries} unsafe skipped` : "";
-      setStatus(
+      setPaneNavigationStatus(
+        paneName,
         `${entries.length} ZIP item${entries.length === 1 ? "" : "s"}${truncatedNote}${unsafeNote}${listingTimingText(
           data
         )}`
@@ -5097,6 +5571,13 @@ async function loadZipPane(paneName, archivePath, innerPath = "", pushHistory = 
   } catch (error) {
     if (isAbortError(error)) {
       return false;
+    }
+    setPaneActivity(paneName, load, "error", {
+      detail: `${paneName === "left" ? "Left" : "Right"} pane could not load ZIP ${archiveLabel}: ${error.message}`
+    });
+    if (!options.silent) {
+      setPaneNavigationStatus(paneName, `Could not open ${archiveLabel}: ${error.message}`);
+      showToast(error.message);
     }
     throw error;
   } finally {
@@ -5122,10 +5603,12 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
   const linkedPreviousPath = options.linkedPreviousPath || previousPath;
   const previousSelected = new Set(tab.selected || []);
   const previousFocusedPath = tab.focusedPath;
-  const load = beginPaneLoad(paneName);
+  const load = beginPaneLoad(paneName, {
+    detail: `${paneName === "left" ? "Left" : "Right"} pane loading ${resolvedTargetPath}`
+  });
   const plan = listingFetchPlan(tab, resolvedTargetPath, { includeSignature: false });
   if (!options.silent) {
-    setStatus(`Loading ${resolvedTargetPath}`);
+    setPaneNavigationStatus(paneName, `Loading ${resolvedTargetPath}`);
   }
   if (!options.forceReload) {
     const cached = cachedListing(plan.cacheKey);
@@ -5138,6 +5621,12 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
         options,
         cached: true
       });
+      setPaneActivity(paneName, load, "ready", {
+        count: entries.length,
+        wallMs: performance.now() - load.startedAt,
+        cached: true,
+        detail: `${paneName === "left" ? "Left" : "Right"} pane loaded ${entries.length.toLocaleString()} items from memory cache`
+      });
       finishPaneLoad(paneName, load);
       if (!options.silent) {
         const hiddenNote = cached.hiddenFiltered ? ` / ${cached.hiddenFiltered} hidden` : "";
@@ -5148,7 +5637,8 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
           : "";
         const redirectNote = cached.redirectedFrom ? ` / redirected from ${labelForPath(cached.redirectedFrom)}` : "";
         const accessNote = cached.accessError ? ` / ${cached.accessError.code || "access denied"}` : "";
-        setStatus(
+        setPaneNavigationStatus(
+          paneName,
           `${entries.length} items${hiddenNote}${targetNote}${redirectNote}${accessNote}${appliedFormat ? ` / ${appliedFormat.name}` : ""} / cached`
         );
       }
@@ -5183,10 +5673,26 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
       options
     });
     if (partial) {
+      const returned = Number(data.window?.returned || entries.length);
+      const totalKnown = data.window?.totalKnown !== false && Number.isFinite(Number(data.window?.total));
+      const total = totalKnown ? Number(data.window.total) : 0;
+      setPaneActivity(paneName, load, "hydrating", {
+        count: returned,
+        total,
+        ...(totalKnown ? {} : { text: `${compactPaneActivityCount(returned)}+` }),
+        detail: totalKnown
+          ? `${paneName === "left" ? "Left" : "Right"} pane showing ${returned.toLocaleString()} of ${total.toLocaleString()} items while the full list loads`
+          : `${paneName === "left" ? "Left" : "Right"} pane showing the first ${returned.toLocaleString()} items while the exact total loads`
+      });
       if (!options.silent) {
-        setStatus(`${listingWindowStatus(data)} / loading full list${listingTimingText(data)}`);
+        setPaneNavigationStatus(
+          paneName,
+          `${listingWindowStatus(data)} / loading full list${listingTimingText(data)}`
+        );
       }
-      const fullData = await request(`/api/list?${plan.query}`, { signal: load.controller.signal });
+      const hydrationQuery = new URLSearchParams(plan.query);
+      hydrationQuery.set("format", "compact-v2");
+      const fullData = await requestFullListingHydration(plan.cacheKey, hydrationQuery);
       if (!isCurrentPaneLoad(paneName, load)) {
         return false;
       }
@@ -5203,6 +5709,13 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
     } else {
       appliedPath = data.path;
     }
+    setPaneActivity(paneName, load, "ready", {
+      count: entries.length,
+      wallMs: performance.now() - load.startedAt,
+      detail: `${paneName === "left" ? "Left" : "Right"} pane loaded ${entries.length.toLocaleString()} items in ${compactPaneActivityDuration(
+        performance.now() - load.startedAt
+      )}`
+    });
     if (!options.silent) {
       const hiddenNote = finalData.hiddenFiltered ? ` / ${finalData.hiddenFiltered} hidden` : "";
       const targetNote = finalData.selectedPath
@@ -5212,7 +5725,8 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
         : "";
       const redirectNote = finalData.redirectedFrom ? ` / redirected from ${labelForPath(finalData.redirectedFrom)}` : "";
       const accessNote = finalData.accessError ? ` / ${finalData.accessError.code || "access denied"}` : "";
-      setStatus(
+      setPaneNavigationStatus(
+        paneName,
         `${entries.length} items${hiddenNote}${targetNote}${redirectNote}${accessNote}${appliedFormat ? ` / ${appliedFormat.name}` : ""}${listingTimingText(finalData)}`
       );
     }
@@ -5223,6 +5737,13 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
     if (isAbortError(error)) {
       return false;
     }
+    if (!options.silent) {
+      setPaneNavigationStatus(paneName, `Could not open ${resolvedTargetPath}: ${error.message}`);
+      showToast(error.message);
+    }
+    setPaneActivity(paneName, load, "error", {
+      detail: `${paneName === "left" ? "Left" : "Right"} pane could not open ${resolvedTargetPath}: ${error.message}`
+    });
     throw error;
   } finally {
     finishPaneLoad(paneName, load);
@@ -5275,9 +5796,12 @@ function updateEntriesForPaths(paths, update) {
   for (const paneName of ["left", "right"]) {
     for (const tab of panes[paneName].tabs) {
       let tabChanged = false;
-      for (const entry of tab.entries) {
+      for (let index = 0; index < tab.entries.length; index += 1) {
+        const entry = tab.entries[index];
         if (wanted.has(normalizedPathKey(entry.path))) {
-          update(entry);
+          const updatedEntry = { ...entry };
+          update(updatedEntry);
+          tab.entries[index] = updatedEntry;
           tabChanged = true;
         }
       }
@@ -5443,7 +5967,8 @@ function cancelSizeAnalysis(message = "Scan canceled") {
 }
 
 function sizeAnalysisMetric(label, value, detail = "") {
-  return `<div class="size-analysis-metric">
+  const title = [label, value, detail].filter(Boolean).join(" / ");
+  return `<div class="size-analysis-metric" title="${escapeHtml(title)}">
     <span>${escapeHtml(label)}</span>
     <strong>${escapeHtml(value)}</strong>
     ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
@@ -5500,6 +6025,19 @@ const sizeAnalysisFallbackPalette = [
   "#cf7c28"
 ];
 
+const sizeAnalysisFolderPalette = [
+  "#2f9f68",
+  "#d14b58",
+  "#3a8fca",
+  "#9a66c7",
+  "#d18b27",
+  "#2e9b9a",
+  "#788f35",
+  "#c45191",
+  "#667d94",
+  "#df7044"
+];
+
 function sizeAnalysisExtensionLabel(extension) {
   const value = String(extension || "").trim().toLowerCase();
   return value || "(none)";
@@ -5515,6 +6053,27 @@ function sizeAnalysisExtensionColor(extension) {
     hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   }
   return sizeAnalysisFallbackPalette[hash % sizeAnalysisFallbackPalette.length];
+}
+
+function sizeAnalysisStablePaletteColor(value, palette = sizeAnalysisFolderPalette) {
+  const text = normalizedPathKey(value || "root");
+  let hash = 2166136261;
+  for (const char of text) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return palette[hash % palette.length];
+}
+
+function sizeAnalysisTreemapValue(item) {
+  return app.sizeAnalysis.sizeMode === "allocated" ? sizeAnalysisAllocatedOf(item) : Number(item?.size || 0);
+}
+
+function sizeAnalysisTreemapColor(item) {
+  if (app.sizeAnalysis.colorMode === "folder") {
+    return item?.folderColor || sizeAnalysisStablePaletteColor(item?.parent || item?.path || item?.name);
+  }
+  return item?.color || sizeAnalysisExtensionColor(item?.extension);
 }
 
 function sizeAnalysisPercent(size, totalBytes) {
@@ -5739,6 +6298,109 @@ function sizeAnalysisExtensionRow(item, totalBytes) {
   </div>`;
 }
 
+function sizeAnalysisMapLegendItems(report = app.sizeAnalysis.report) {
+  if (!report) return [];
+  if (app.sizeAnalysis.colorMode === "folder") {
+    const root = report.tree;
+    const branches = (Array.isArray(root?.children) && root.children.length ? root.children : root ? [root] : []).slice(0, 10);
+    return branches.map((item) => ({
+      label: item.name || "Root",
+      color: sizeAnalysisStablePaletteColor(item.path || item.name),
+      value: sizeAnalysisTreemapValue(item)
+    }));
+  }
+  return (report.extensions || []).slice(0, 10).map((item) => ({
+    label: sizeAnalysisExtensionLabel(item.extension),
+    color: sizeAnalysisExtensionColor(item.extension),
+    value: app.sizeAnalysis.sizeMode === "allocated" ? sizeAnalysisAllocatedOf(item) : Number(item.size || 0)
+  }));
+}
+
+function renderSizeAnalysisViewState() {
+  const viewMode = app.sizeAnalysis.viewMode === "map" ? "map" : "overview";
+  const sizeMode = app.sizeAnalysis.sizeMode === "allocated" ? "allocated" : "logical";
+  const colorMode = app.sizeAnalysis.colorMode === "folder" ? "folder" : "type";
+  app.sizeAnalysis.viewMode = viewMode;
+  app.sizeAnalysis.sizeMode = sizeMode;
+  app.sizeAnalysis.colorMode = colorMode;
+  const dialog = document.getElementById("size-analysis-dialog");
+  const panel = dialog?.querySelector(".size-analysis-panel");
+  dialog?.classList.toggle("map-view", viewMode === "map");
+  panel?.classList.toggle("map-view", viewMode === "map");
+  document.querySelectorAll("[data-size-analysis-view]").forEach((button) => {
+    const active = button.dataset.sizeAnalysisView === viewMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    button.tabIndex = active ? 0 : -1;
+  });
+  const sizeSelect = document.getElementById("size-analysis-size-by");
+  const colorSelect = document.getElementById("size-analysis-color-by");
+  if (sizeSelect) sizeSelect.value = sizeMode;
+  if (colorSelect) colorSelect.value = colorMode;
+  const legend = document.getElementById("size-analysis-map-legend");
+  if (legend) {
+    const items = sizeAnalysisMapLegendItems();
+    legend.innerHTML = items.length
+      ? items
+          .map(
+            (item) => `<span title="${escapeHtml(`${item.label} / ${formatSize(item.value)}`)}"><i style="background:${escapeHtml(
+              item.color
+            )}"></i>${escapeHtml(item.label)}</span>`
+          )
+          .join("")
+      : '<span class="size-analysis-map-legend-empty">Scan to build legend</span>';
+  }
+}
+
+function queueSizeAnalysisTreemapDraw() {
+  requestAnimationFrame(() => requestAnimationFrame(() => drawSizeTreemap(app.sizeAnalysis.report)));
+}
+
+function setSizeAnalysisViewMode(mode) {
+  app.sizeAnalysis.viewMode = mode === "map" ? "map" : "overview";
+  renderSizeAnalysisViewState();
+  queueSizeAnalysisTreemapDraw();
+  setStatus(app.sizeAnalysis.viewMode === "map" ? "Disk Map workspace" : "Analyzer overview");
+}
+
+function setSizeAnalysisMapEncoding({ sizeMode = app.sizeAnalysis.sizeMode, colorMode = app.sizeAnalysis.colorMode } = {}) {
+  app.sizeAnalysis.sizeMode = sizeMode === "allocated" ? "allocated" : "logical";
+  app.sizeAnalysis.colorMode = colorMode === "folder" ? "folder" : "type";
+  app.sizeAnalysis.treemapHover = null;
+  app.sizeAnalysis.treemapSelection = null;
+  renderSizeAnalysisViewState();
+  setSizeAnalysisMapDetail(null);
+  queueSizeAnalysisTreemapDraw();
+  setStatus(
+    `Disk Map sized by ${app.sizeAnalysis.sizeMode === "allocated" ? "allocated" : "logical"} bytes and colored by ${
+      app.sizeAnalysis.colorMode === "folder" ? "top folder" : "file type"
+    }`
+  );
+}
+
+function sizeAnalysisReportDataMatches(left, right) {
+  return Boolean(
+    left &&
+      right &&
+      left.generatedAt &&
+      left.generatedAt === right.generatedAt &&
+      samePath(left.path, right.path) &&
+      Number(left.scanned || 0) === Number(right.scanned || 0) &&
+      Number(left.summary?.bytes || 0) === Number(right.summary?.bytes || 0)
+  );
+}
+
+function renderSizeAnalysisSummary(report, message = "") {
+  const summary = document.getElementById("size-analysis-summary");
+  const scanStrip = document.getElementById("size-analysis-scan-strip");
+  if (!summary || !report) return;
+  const totalBytes = Number(report.summary?.bytes || 0);
+  const truncated = report.truncated ? " / capped" : "";
+  summary.textContent =
+    message || `${formatSize(totalBytes)} / ${itemWord(Number(report.summary?.files || 0), "file")}${truncated}`;
+  if (scanStrip) scanStrip.innerHTML = sizeAnalysisScanStrip(report);
+}
+
 function renderSizeAnalysisDialog(message = "") {
   const report = app.sizeAnalysis.report;
   const summary = document.getElementById("size-analysis-summary");
@@ -5755,7 +6417,14 @@ function renderSizeAnalysisDialog(message = "") {
     return;
   }
   updateSizeAnalysisActionState();
+  renderSizeAnalysisViewState();
   if (app.sizeAnalysis.loading) {
+    const requestedPath = document.getElementById("size-analysis-path")?.value || "";
+    if (report && samePath(report.path, requestedPath)) {
+      summary.textContent = message || "Refreshing...";
+      if (scanStrip) scanStrip.innerHTML = sizeAnalysisLoadingStrip(message || "Refreshing...");
+      return;
+    }
     summary.textContent = message || "Scanning...";
     if (scanStrip) scanStrip.innerHTML = sizeAnalysisLoadingStrip(message || "Scanning...");
     metrics.innerHTML = `<div class="empty-state">Scanning disk usage</div>`;
@@ -5764,7 +6433,10 @@ function renderSizeAnalysisDialog(message = "") {
     extensions.innerHTML = `<div class="empty-state">Extensions will appear after scan</div>`;
     app.sizeAnalysis.treemapRects = [];
     app.sizeAnalysis.treemapHover = null;
+    app.sizeAnalysis.treemapSelection = null;
+    app.sizeAnalysis.treemapFocusPath = "";
     setSizeAnalysisMapDetail(null, "Scanning file map...");
+    renderSizeAnalysisMapNavigation(null);
     if (mapCount) mapCount.textContent = "0";
     drawSizeTreemap(null);
     return;
@@ -5781,7 +6453,10 @@ function renderSizeAnalysisDialog(message = "") {
     if (extensionCount) extensionCount.textContent = "0";
     app.sizeAnalysis.treemapRects = [];
     app.sizeAnalysis.treemapHover = null;
+    app.sizeAnalysis.treemapSelection = null;
+    app.sizeAnalysis.treemapFocusPath = "";
     setSizeAnalysisMapDetail(null, "Scan to map files");
+    renderSizeAnalysisMapNavigation(null);
     if (mapCount) mapCount.textContent = "0";
     drawSizeTreemap(null);
     return;
@@ -5789,13 +6464,10 @@ function renderSizeAnalysisDialog(message = "") {
   const totalBytes = Number(report.summary?.bytes || 0);
   const allocatedBytes = Number(report.summary?.allocated || totalBytes);
   const skipped = Number(report.summary?.skipped || 0);
-  const truncated = report.truncated ? " / capped" : "";
   const allocationLabel = report.allocationAccuracy === "exact"
     ? `Exact via ${report.allocatedSource || "filesystem"}${report.clusterSize ? ` / ${formatSize(report.clusterSize)} clusters` : ""}`
     : `Estimated${report.clusterSize ? ` / ${formatSize(report.clusterSize)} clusters` : ""}`;
-  summary.textContent =
-    message || `${formatSize(totalBytes)} / ${itemWord(Number(report.summary?.files || 0), "file")}${truncated}`;
-  if (scanStrip) scanStrip.innerHTML = sizeAnalysisScanStrip(report);
+  renderSizeAnalysisSummary(report, message);
   const metricCards = [
     sizeAnalysisMetric("Total", formatSize(totalBytes), report.path),
     sizeAnalysisMetric(
@@ -5833,7 +6505,8 @@ function renderSizeAnalysisDialog(message = "") {
   if (fileCount) fileCount.textContent = topFiles.length.toLocaleString();
   if (extensionCount) extensionCount.textContent = topExtensions.length.toLocaleString();
   if (mapCount) mapCount.textContent = `${Math.min(topFiles.length, 900).toLocaleString()} mapped`;
-  setSizeAnalysisMapDetail(app.sizeAnalysis.treemapHover);
+  renderSizeAnalysisMapNavigation(report);
+  setSizeAnalysisMapDetail(app.sizeAnalysis.treemapHover || app.sizeAnalysis.treemapSelection);
   folders.innerHTML = folderRows.length
     ? folderRows.slice(0, 9).map((item) => sizeAnalysisFolderRow(item, totalBytes)).join("")
     : `<div class="empty-state">No folders</div>`;
@@ -5846,11 +6519,20 @@ function renderSizeAnalysisDialog(message = "") {
   requestAnimationFrame(() => drawSizeTreemap(report));
 }
 
-function openSizeAnalysisDialog(paneName = app.activePane) {
+function openSizeAnalysisDialog(paneName = app.activePane, viewMode = app.sizeAnalysis.viewMode) {
   app.sizeAnalysis.paneName = paneName;
+  app.sizeAnalysis.viewMode = viewMode === "map" ? "map" : "overview";
+  const defaultPath = sizeAnalysisDefaultPath(paneName);
+  if (app.sizeAnalysis.report?.path && !samePath(app.sizeAnalysis.report.path, defaultPath)) {
+    app.sizeAnalysis.report = null;
+    app.sizeAnalysis.treemapRects = [];
+    app.sizeAnalysis.treemapHover = null;
+    app.sizeAnalysis.treemapSelection = null;
+    app.sizeAnalysis.treemapFocusPath = "";
+  }
   const input = document.getElementById("size-analysis-path");
   if (input) {
-    input.value = sizeAnalysisDefaultPath(paneName);
+    input.value = defaultPath;
   }
   renderSizeAnalysisDialog();
   document.getElementById("size-analysis-dialog").showModal();
@@ -5881,11 +6563,21 @@ async function runSizeAnalysis() {
     if (app.sizeAnalysis.requestId !== requestId) {
       return;
     }
+    const previousReport = app.sizeAnalysis.report;
+    const unchangedWarmReport = report.cache?.hit === true && sizeAnalysisReportDataMatches(previousReport, report);
     app.sizeAnalysis.report = report;
     app.sizeAnalysis.controller = null;
     app.sizeAnalysis.loading = false;
     document.getElementById("size-analysis-path").value = report.path || body.path;
-    renderSizeAnalysisDialog();
+    if (unchangedWarmReport) {
+      updateSizeAnalysisActionState();
+      renderSizeAnalysisSummary(report);
+    } else {
+      app.sizeAnalysis.treemapHover = null;
+      app.sizeAnalysis.treemapSelection = null;
+      app.sizeAnalysis.treemapFocusPath = "";
+      renderSizeAnalysisDialog();
+    }
     setStatus(`Analyzed ${formatSize(report.summary?.bytes || 0)} in ${Math.round(Number(report.summary?.elapsedMs || 0))}ms`);
   } catch (error) {
     if (app.sizeAnalysis.requestId !== requestId) {
@@ -5905,33 +6597,243 @@ async function runSizeAnalysis() {
 }
 
 function sizeAnalysisTreemapItems(report) {
-  const totalBytes = Number(report?.summary?.bytes || 0);
-  const files = (report?.topFiles || [])
-    .filter((item) => Number(item.size || 0) > 0)
+  return (report?.topFiles || [])
+    .filter((item) => sizeAnalysisTreemapValue(item) > 0)
     .slice(0, 900)
     .map((item) => ({
       ...item,
       extension: sizeAnalysisExtensionLabel(item.extension),
       allocated: sizeAnalysisAllocatedOf(item),
       color: sizeAnalysisExtensionColor(item.extension)
-    }));
-  const visibleBytes = files.reduce((total, item) => total + Number(item.size || 0), 0);
-  const otherBytes = Math.max(0, totalBytes - visibleBytes);
-  if (otherBytes > 0 && files.length) {
-    files.push({
-      name: "Other files",
-      path: report.path,
-      parent: report.path,
-      extension: "(other)",
-      kind: "Remainder",
-      size: otherBytes,
-      allocated: otherBytes,
-      modified: null,
-      color: sizeAnalysisExtensionColor("(other)"),
-      virtualRemainder: true
-    });
+    }))
+    .sort((left, right) => sizeAnalysisTreemapValue(right) - sizeAnalysisTreemapValue(left));
+}
+
+function sizeAnalysisPathContains(folderPath, itemPath) {
+  const folder = normalizedPathKey(folderPath);
+  const item = normalizedPathKey(itemPath);
+  if (!folder || !item) {
+    return false;
   }
-  return files.sort((left, right) => Number(right.size || 0) - Number(left.size || 0));
+  return item === folder || item.startsWith(`${folder}\\`) || item.startsWith(`${folder}/`);
+}
+
+function sizeAnalysisTreemapHierarchy(report) {
+  const sourceRoot = report?.tree;
+  if (!sourceRoot || sizeAnalysisTreemapValue(sourceRoot) <= 0) {
+    return null;
+  }
+  const folderNodes = [];
+  const cloneFolder = (source, parent = null) => {
+    const node = {
+      name: source.name || source.path || "Folder",
+      path: source.path || "",
+      parent: parent?.path || parentPathOf(source.path || ""),
+      extension: "",
+      kind: "Folder",
+      size: Number(source.size || 0),
+      allocated: sizeAnalysisAllocatedOf(source),
+      mapSize: sizeAnalysisTreemapValue(source),
+      modified: source.modified,
+      treemapGroup: true,
+      virtualRemainder: false,
+      folderChildren: [],
+      fileChildren: [],
+      children: []
+    };
+    folderNodes.push(node);
+    node.folderChildren = (Array.isArray(source.children) ? source.children : [])
+      .filter((child) => sizeAnalysisTreemapValue(child) > 0)
+      .map((child) => cloneFolder(child, node));
+    return node;
+  };
+  const root = cloneFolder(sourceRoot);
+  for (const file of sizeAnalysisTreemapItems(report)) {
+    const fileParent = file.parent || parentPathOf(file.path || "");
+    let owner = root;
+    for (const folder of folderNodes) {
+      if (
+        sizeAnalysisPathContains(folder.path, fileParent) &&
+        normalizedPathKey(folder.path).length > normalizedPathKey(owner.path).length
+      ) {
+        owner = folder;
+      }
+    }
+    file.mapSize = sizeAnalysisTreemapValue(file);
+    owner.fileChildren.push(file);
+  }
+  const colorFolderBranches = (folder, branchColor = "", rootFolder = false) => {
+    folder.folderColor = branchColor || sizeAnalysisStablePaletteColor(folder.path || folder.name);
+    folder.fileChildren.forEach((file) => {
+      file.folderColor = folder.folderColor;
+    });
+    folder.folderChildren.forEach((child) => {
+      colorFolderBranches(child, rootFolder ? sizeAnalysisStablePaletteColor(child.path || child.name) : folder.folderColor, false);
+    });
+  };
+  colorFolderBranches(root, sizeAnalysisStablePaletteColor(root.path || root.name), true);
+  const finishFolder = (folder) => {
+    folder.folderChildren.forEach(finishFolder);
+    const represented = [...folder.folderChildren, ...folder.fileChildren];
+    const logicalRemainder = Math.max(
+      0,
+      Number(folder.size || 0) - represented.reduce((sum, child) => sum + Number(child.size || 0), 0)
+    );
+    const allocatedRemainder = Math.max(
+      0,
+      sizeAnalysisAllocatedOf(folder) - represented.reduce((sum, child) => sum + sizeAnalysisAllocatedOf(child), 0)
+    );
+    const mapRemainder = Math.max(
+      0,
+      Number(folder.mapSize || 0) - represented.reduce((sum, child) => sum + Number(child.mapSize ?? sizeAnalysisTreemapValue(child)), 0)
+    );
+    folder.children = represented;
+    if (mapRemainder > 0) {
+      folder.children.push({
+        name: "Other files",
+        path: folder.path,
+        parent: folder.path,
+        extension: "(other)",
+        kind: "Remainder",
+        size: logicalRemainder,
+        allocated: allocatedRemainder,
+        mapSize: mapRemainder,
+        modified: null,
+        color: sizeAnalysisExtensionColor("(other)"),
+        folderColor: folder.folderColor,
+        virtualRemainder: true,
+        treemapGroup: false
+      });
+    }
+    folder.children.sort(
+      (left, right) => Number(right.mapSize ?? sizeAnalysisTreemapValue(right)) - Number(left.mapSize ?? sizeAnalysisTreemapValue(left))
+    );
+    delete folder.folderChildren;
+    delete folder.fileChildren;
+  };
+  finishFolder(root);
+  return root;
+}
+
+function sizeAnalysisTreemapFindNode(root, itemPath) {
+  const target = normalizedPathKey(itemPath);
+  if (!root || !target) {
+    return root || null;
+  }
+  const pending = [root];
+  while (pending.length) {
+    const node = pending.pop();
+    if (normalizedPathKey(node?.path) === target) {
+      return node;
+    }
+    const children = Array.isArray(node?.children) ? node.children : [];
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      if (children[index]?.treemapGroup) {
+        pending.push(children[index]);
+      }
+    }
+  }
+  return null;
+}
+
+function sizeAnalysisTreemapAncestry(root, itemPath) {
+  const target = normalizedPathKey(itemPath || root?.path);
+  if (!root || !target) {
+    return root ? [root] : [];
+  }
+  const visit = (node, trail) => {
+    const nextTrail = [...trail, node];
+    if (normalizedPathKey(node?.path) === target) {
+      return nextTrail;
+    }
+    for (const child of Array.isArray(node?.children) ? node.children : []) {
+      if (!child?.treemapGroup) continue;
+      const result = visit(child, nextTrail);
+      if (result) return result;
+    }
+    return null;
+  };
+  return visit(root, []) || [root];
+}
+
+function sizeAnalysisTreemapFocusNode(hierarchy) {
+  if (!hierarchy) {
+    return null;
+  }
+  const requested = app.sizeAnalysis.treemapFocusPath;
+  const focused = requested ? sizeAnalysisTreemapFindNode(hierarchy, requested) : hierarchy;
+  if (!focused?.treemapGroup) {
+    app.sizeAnalysis.treemapFocusPath = "";
+    return hierarchy;
+  }
+  if (normalizedPathKey(focused.path) === normalizedPathKey(hierarchy.path)) {
+    app.sizeAnalysis.treemapFocusPath = "";
+  }
+  return focused;
+}
+
+function renderSizeAnalysisMapNavigation(report = app.sizeAnalysis.report, hierarchy = null) {
+  const breadcrumbs = document.getElementById("size-analysis-map-breadcrumbs");
+  const rootButton = document.querySelector('[data-size-analysis-map-action="root"]');
+  const upButton = document.querySelector('[data-size-analysis-map-action="up"]');
+  const focusButton = document.querySelector('[data-size-analysis-map-action="focus"]');
+  const openButton = document.querySelector('[data-size-analysis-map-action="open"]');
+  const tree = hierarchy || sizeAnalysisTreemapHierarchy(report);
+  const focused = sizeAnalysisTreemapFocusNode(tree);
+  const selection = app.sizeAnalysis.treemapSelection;
+  const atRoot = !tree || !focused || normalizedPathKey(focused.path) === normalizedPathKey(tree.path);
+  if (rootButton) rootButton.disabled = atRoot;
+  if (upButton) upButton.disabled = atRoot;
+  if (focusButton) focusButton.disabled = !selection?.treemapGroup;
+  if (openButton) openButton.disabled = !selection || selection.virtualRemainder || !selection.path;
+  if (!breadcrumbs) {
+    return;
+  }
+  if (!tree || !focused) {
+    breadcrumbs.innerHTML = '<span class="size-analysis-map-empty-path">No map focus</span>';
+    return;
+  }
+  const ancestry = sizeAnalysisTreemapAncestry(tree, focused.path);
+  breadcrumbs.innerHTML = ancestry
+    .map((node, index) => {
+      const isCurrent = index === ancestry.length - 1;
+      const focusPath = index === 0 ? "" : node.path || "";
+      const separator = index ? '<span class="size-analysis-map-separator" aria-hidden="true">&gt;</span>' : "";
+      return `${separator}<button type="button" data-size-analysis-map-focus="${escapeHtml(focusPath)}" title="${escapeHtml(
+        node.path || node.name || "Scan root"
+      )}"${isCurrent ? ' aria-current="location"' : ""}>${escapeHtml(node.name || "Root")}</button>`;
+    })
+    .join("");
+}
+
+function focusSizeAnalysisTreemap(itemPath = "") {
+  const hierarchy = sizeAnalysisTreemapHierarchy(app.sizeAnalysis.report);
+  if (!hierarchy) {
+    return;
+  }
+  const node = itemPath ? sizeAnalysisTreemapFindNode(hierarchy, itemPath) : hierarchy;
+  if (!node?.treemapGroup) {
+    showToast("Choose a folder group to focus");
+    return;
+  }
+  app.sizeAnalysis.treemapFocusPath = normalizedPathKey(node.path) === normalizedPathKey(hierarchy.path) ? "" : node.path || "";
+  app.sizeAnalysis.treemapHover = null;
+  app.sizeAnalysis.treemapSelection = null;
+  setSizeAnalysisMapDetail(null, `Focused on ${node.name || "scan root"}`);
+  renderSizeAnalysisMapNavigation(app.sizeAnalysis.report, hierarchy);
+  drawSizeTreemap(app.sizeAnalysis.report);
+  setStatus(`Disk map focused on ${node.name || node.path}`);
+}
+
+function focusSizeAnalysisTreemapParent() {
+  const hierarchy = sizeAnalysisTreemapHierarchy(app.sizeAnalysis.report);
+  const focused = sizeAnalysisTreemapFocusNode(hierarchy);
+  if (!hierarchy || !focused) {
+    return;
+  }
+  const ancestry = sizeAnalysisTreemapAncestry(hierarchy, focused.path);
+  const parent = ancestry.length > 1 ? ancestry[ancestry.length - 2] : hierarchy;
+  focusSizeAnalysisTreemap(parent === hierarchy ? "" : parent.path);
 }
 
 function sizeAnalysisTreemapKey(item) {
@@ -5942,13 +6844,17 @@ function sizeAnalysisTreemapLabel(item, report = app.sizeAnalysis.report) {
   if (!item) {
     return "";
   }
-  const totalBytes = Number(report?.summary?.bytes || 0);
+  const totalBytes =
+    app.sizeAnalysis.sizeMode === "allocated"
+      ? Number(report?.summary?.allocated || report?.summary?.bytes || 0)
+      : Number(report?.summary?.bytes || 0);
+  const measuredBytes = Number(item.mapSize ?? sizeAnalysisTreemapValue(item));
   return [
     item.name || "(file)",
     item.kind || sizeAnalysisExtensionLabel(item.extension),
     formatSize(item.size),
     `${formatSize(sizeAnalysisAllocatedOf(item))} allocated`,
-    sizeAnalysisPercentText(item.size, totalBytes)
+    `${sizeAnalysisPercentText(measuredBytes, totalBytes)} of ${app.sizeAnalysis.sizeMode}`
   ]
     .filter(Boolean)
     .join(" / ");
@@ -5959,8 +6865,9 @@ function setSizeAnalysisMapDetail(item = null, fallback = "") {
   if (!detail) {
     return;
   }
-  detail.textContent = item
-    ? sizeAnalysisTreemapLabel(item)
+  const visibleItem = item || app.sizeAnalysis.treemapSelection;
+  detail.textContent = visibleItem
+    ? sizeAnalysisTreemapLabel(visibleItem)
     : fallback || (app.sizeAnalysis.report ? "Hover or click a file block" : "Scan to map files");
 }
 
@@ -6012,15 +6919,15 @@ function pushSizeAnalysisTreemapRow(row, rect, rects, depth) {
 }
 
 function splitSizeTreemapItems(items, rect, rects = [], depth = 0) {
-  const positiveItems = items.filter((item) => Number(item.size || 0) > 0);
-  const total = positiveItems.reduce((sum, item) => sum + Number(item.size || 0), 0);
+  const positiveItems = items.filter((item) => Number(item.mapSize ?? sizeAnalysisTreemapValue(item)) > 0);
+  const total = positiveItems.reduce((sum, item) => sum + Number(item.mapSize ?? sizeAnalysisTreemapValue(item)), 0);
   const area = Math.max(0, Number(rect.w || 0) * Number(rect.h || 0));
   if (!positiveItems.length || total <= 0 || area <= 0) {
     return rects;
   }
   const pending = positiveItems.map((item) => ({
     item,
-    area: (Number(item.size || 0) / total) * area
+    area: (Number(item.mapSize ?? sizeAnalysisTreemapValue(item)) / total) * area
   }));
   let remaining = { ...rect };
   let row = [];
@@ -6045,6 +6952,29 @@ function splitSizeTreemapItems(items, rect, rects = [], depth = 0) {
   return rects;
 }
 
+function splitHierarchicalSizeTreemap(items, rect, rects = [], depth = 0) {
+  const laidOut = splitSizeTreemapItems(items, rect, [], depth);
+  for (const entry of laidOut) {
+    const record = { item: entry.item, rect: entry.rect, depth };
+    rects.push(record);
+    const children = Array.isArray(entry.item?.children) ? entry.item.children : [];
+    if (!entry.item?.treemapGroup || !children.length || depth >= 8 || entry.rect.w < 54 || entry.rect.h < 42) {
+      continue;
+    }
+    const headerHeight = Math.min(23, Math.max(15, entry.rect.h * 0.13));
+    const inner = {
+      x: entry.rect.x + 3,
+      y: entry.rect.y + headerHeight + 2,
+      w: Math.max(0, entry.rect.w - 6),
+      h: Math.max(0, entry.rect.h - headerHeight - 5)
+    };
+    if (inner.w >= 8 && inner.h >= 8) {
+      splitHierarchicalSizeTreemap(children, inner, rects, depth + 1);
+    }
+  }
+  return rects;
+}
+
 function sizeAnalysisTreemapRectAtPoint(canvas, event) {
   if (!canvas || !app.sizeAnalysis.treemapRects.length) {
     return null;
@@ -6057,11 +6987,13 @@ function sizeAnalysisTreemapRectAtPoint(canvas, event) {
   const cssHeight = parseFloat(canvas.style.height) || canvas.clientHeight || bounds.height;
   const x = (event.clientX - bounds.left) * (cssWidth / bounds.width);
   const y = (event.clientY - bounds.top) * (cssHeight / bounds.height);
-  return (
-    app.sizeAnalysis.treemapRects.find(
-      (item) => x >= item.x && y >= item.y && x <= item.x + item.w && y <= item.y + item.h
-    ) || null
-  );
+  for (let index = app.sizeAnalysis.treemapRects.length - 1; index >= 0; index -= 1) {
+    const item = app.sizeAnalysis.treemapRects[index];
+    if (x >= item.x && y >= item.y && x <= item.x + item.w && y <= item.y + item.h) {
+      return item;
+    }
+  }
+  return null;
 }
 
 function setSizeAnalysisTreemapHover(item) {
@@ -6072,6 +7004,13 @@ function setSizeAnalysisTreemapHover(item) {
   }
   app.sizeAnalysis.treemapHover = item || null;
   setSizeAnalysisMapDetail(item || null);
+  requestAnimationFrame(() => drawSizeTreemap(app.sizeAnalysis.report));
+}
+
+function setSizeAnalysisTreemapSelection(item) {
+  app.sizeAnalysis.treemapSelection = item || null;
+  setSizeAnalysisMapDetail(app.sizeAnalysis.treemapHover || app.sizeAnalysis.treemapSelection);
+  renderSizeAnalysisMapNavigation(app.sizeAnalysis.report);
   requestAnimationFrame(() => drawSizeTreemap(app.sizeAnalysis.report));
 }
 
@@ -6097,6 +7036,11 @@ async function openSizeAnalysisTreemapItem(item = app.sizeAnalysis.treemapHover)
     showToast("Choose a concrete file block");
     return;
   }
+  if (item.treemapGroup) {
+    await loadPane(app.activePane, item.path);
+    setStatus(`Opened ${item.name || item.path} from nested file map`);
+    return;
+  }
   const parentPath = item.parent || parentPathOf(item.path);
   if (!parentPath) {
     return;
@@ -6118,8 +7062,9 @@ function drawSizeTreemap(report) {
   }
   const panel = canvas.parentElement;
   const head = panel?.querySelector(".size-analysis-section-head");
+  const detailRow = panel?.querySelector(".size-analysis-map-detail-row");
   const width = Math.max(360, (panel?.clientWidth || 1080) - 18);
-  const availableHeight = panel ? panel.clientHeight - (head?.offsetHeight || 0) - 18 : 0;
+  const availableHeight = panel ? panel.clientHeight - (head?.offsetHeight || 0) - (detailRow?.offsetHeight || 0) - 18 : 0;
   const height = Math.max(160, Math.min(560, availableHeight || Math.round(width * 0.36)));
   const ratio = window.devicePixelRatio || 1;
   canvas.style.width = `${width}px`;
@@ -6131,18 +7076,30 @@ function drawSizeTreemap(report) {
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "#101716";
   ctx.fillRect(0, 0, width, height);
-  const items = sizeAnalysisTreemapItems(report);
-  if (!items.length || Number(report?.summary?.bytes || 0) <= 0) {
+  const hierarchy = sizeAnalysisTreemapHierarchy(report);
+  const focused = sizeAnalysisTreemapFocusNode(hierarchy);
+  renderSizeAnalysisMapNavigation(report, hierarchy);
+  const measuredTotal =
+    app.sizeAnalysis.sizeMode === "allocated"
+      ? Number(report?.summary?.allocated || report?.summary?.bytes || 0)
+      : Number(report?.summary?.bytes || 0);
+  if (!focused?.children?.length || measuredTotal <= 0) {
     app.sizeAnalysis.treemapRects = [];
     ctx.fillStyle = "#dbe6e1";
     ctx.font = "600 14px Segoe UI, sans-serif";
-    ctx.fillText("Scan to draw treemap", 18, 28);
-    canvas.setAttribute("aria-label", "File size treemap. Scan to draw file map.");
+    ctx.fillText(report ? "No mapped children in this folder" : "Scan to draw treemap", 18, 28);
+    canvas.setAttribute(
+      "aria-label",
+      report
+        ? `Hierarchical file size treemap focused on ${focused?.name || "folder"}. No mapped children.`
+        : "Hierarchical file size treemap. Scan to draw nested file map."
+    );
     return;
   }
-  const rects = splitSizeTreemapItems(items, { x: 0, y: 0, w: width, h: height });
+  const rects = splitHierarchicalSizeTreemap(focused.children, { x: 0, y: 0, w: width, h: height });
   const hoverKey = app.sizeAnalysis.treemapHover?.key || "";
-  app.sizeAnalysis.treemapRects = rects.map(({ item, rect }) => ({
+  const selectedKey = app.sizeAnalysis.treemapSelection?.key || "";
+  app.sizeAnalysis.treemapRects = rects.map(({ item, rect, depth }) => ({
     key: sizeAnalysisTreemapKey(item),
     path: item.path || "",
     parent: item.parent || "",
@@ -6151,7 +7108,11 @@ function drawSizeTreemap(report) {
     kind: item.kind || "",
     size: Number(item.size || 0),
     allocated: sizeAnalysisAllocatedOf(item),
+    mapSize: Number(item.mapSize ?? sizeAnalysisTreemapValue(item)),
+    folderColor: item.folderColor || "",
     virtualRemainder: item.virtualRemainder === true,
+    treemapGroup: item.treemapGroup === true,
+    depth: Number(depth || 0),
     title: sizeAnalysisTreemapLabel(item, report),
     x: rect.x,
     y: rect.y,
@@ -6162,16 +7123,51 @@ function drawSizeTreemap(report) {
     app.sizeAnalysis.treemapHover = null;
     setSizeAnalysisMapDetail(null);
   }
+  if (selectedKey && !app.sizeAnalysis.treemapRects.some((item) => item.key === selectedKey)) {
+    app.sizeAnalysis.treemapSelection = null;
+    setSizeAnalysisMapDetail(null);
+  }
+  const groupCount = app.sizeAnalysis.treemapRects.filter((item) => item.treemapGroup).length;
+  const mappedFileCount = app.sizeAnalysis.treemapRects.length - groupCount;
   canvas.setAttribute(
     "aria-label",
-    `File size treemap with ${app.sizeAnalysis.treemapRects.length.toLocaleString()} mapped file block(s).`
+    `Hierarchical file size treemap focused on ${focused.name || "scan root"} with ${mappedFileCount.toLocaleString()} mapped file block(s) inside ${groupCount.toLocaleString()} folder group(s), sized by ${app.sizeAnalysis.sizeMode} bytes and colored by ${
+      app.sizeAnalysis.colorMode === "folder" ? "top folder" : "file type"
+    }.`
   );
+  const mapCount = document.getElementById("size-analysis-map-count");
+  if (mapCount) {
+    mapCount.textContent = `${groupCount.toLocaleString()} folders / ${mappedFileCount.toLocaleString()} files`;
+  }
   rects.forEach((item, index) => {
     const { item: node, rect, depth } = item;
     if (!node || rect.w < 0.7 || rect.h < 0.7) return;
     const key = sizeAnalysisTreemapKey(node);
     const hovered = key === app.sizeAnalysis.treemapHover?.key;
-    ctx.fillStyle = node.color || sizeAnalysisExtensionColor(node.extension);
+    const selected = key === app.sizeAnalysis.treemapSelection?.key;
+    const active = hovered || selected;
+    if (node.treemapGroup) {
+      ctx.fillStyle =
+        app.sizeAnalysis.colorMode === "folder" ? sizeAnalysisTreemapColor(node) : active ? "#29443d" : "#182722";
+      if (app.sizeAnalysis.colorMode === "folder" && !active) ctx.globalAlpha = 0.34;
+      ctx.fillRect(rect.x + 0.5, rect.y + 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1));
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = selected ? "#f4c04d" : hovered ? "#ffffff" : depth === 0 ? "rgba(224,241,233,0.88)" : "rgba(175,211,199,0.72)";
+      ctx.lineWidth = active ? 3 : depth === 0 ? 2 : 1.5;
+      ctx.strokeRect(rect.x + 1, rect.y + 1, Math.max(0, rect.w - 2), Math.max(0, rect.h - 2));
+      if (rect.w >= 96 && rect.h >= 34) {
+        const headerHeight = Math.min(23, Math.max(15, rect.h * 0.13));
+        ctx.fillStyle = "rgba(5,12,10,0.72)";
+        ctx.fillRect(rect.x + 2, rect.y + 2, Math.max(0, rect.w - 4), Math.max(0, headerHeight - 2));
+        ctx.fillStyle = "#f3faf6";
+        ctx.font = depth === 0 ? "700 12px Segoe UI, sans-serif" : "700 11px Segoe UI, sans-serif";
+        const folderLabel = `${node.name || "Folder"}  ${formatSize(node.mapSize ?? sizeAnalysisTreemapValue(node))}`;
+        ctx.fillText(folderLabel, rect.x + 7, rect.y + Math.min(16, headerHeight - 3), Math.max(0, rect.w - 13));
+      }
+      ctx.lineWidth = 1;
+      return;
+    }
+    ctx.fillStyle = sizeAnalysisTreemapColor(node);
     ctx.fillRect(rect.x + 0.7, rect.y + 0.7, Math.max(0, rect.w - 1.4), Math.max(0, rect.h - 1.4));
     const glow = Math.max(0.04, 0.18 - depth * 0.012);
     const gradient = ctx.createRadialGradient(
@@ -6186,11 +7182,11 @@ function drawSizeTreemap(report) {
     gradient.addColorStop(1, "rgba(0,0,0,0.18)");
     ctx.fillStyle = gradient;
     ctx.fillRect(rect.x + 0.7, rect.y + 0.7, Math.max(0, rect.w - 1.4), Math.max(0, rect.h - 1.4));
-    ctx.strokeStyle = hovered ? "rgba(255,255,255,0.95)" : "rgba(10,16,15,0.58)";
-    ctx.lineWidth = hovered ? 2 : 1;
+    ctx.strokeStyle = selected ? "#f4c04d" : hovered ? "rgba(255,255,255,0.95)" : "rgba(10,16,15,0.58)";
+    ctx.lineWidth = active ? 2.5 : 1;
     ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1));
     ctx.lineWidth = 1;
-    if (hovered) {
+    if (active) {
       ctx.fillStyle = "rgba(0,0,0,0.22)";
       ctx.fillRect(rect.x + 2, rect.y + 2, Math.max(0, rect.w - 4), Math.min(28, Math.max(0, rect.h - 4)));
     }
@@ -6200,7 +7196,7 @@ function drawSizeTreemap(report) {
       const label = String(node.name || "").slice(0, Math.max(4, Math.floor(rect.w / 8)));
       ctx.fillText(label, rect.x + 7, rect.y + 17, rect.w - 12);
       ctx.font = "600 11px Segoe UI, sans-serif";
-      ctx.fillText(formatSize(node.size), rect.x + 7, rect.y + 32, rect.w - 12);
+      ctx.fillText(formatSize(node.mapSize ?? sizeAnalysisTreemapValue(node)), rect.x + 7, rect.y + 32, rect.w - 12);
     } else if (rect.w >= 40 && rect.h >= 24 && index < 80) {
       ctx.fillStyle = "rgba(255,255,255,0.92)";
       ctx.font = "700 10px Segoe UI, sans-serif";
@@ -7389,6 +8385,7 @@ function commitSelectionChange(paneName, options = {}) {
     updateActivePaneChrome();
     renderRoots();
   } else {
+    updatePaneActionAvailability(paneName);
     updateSelectionReadout();
   }
   renderInspector();
@@ -8497,6 +9494,7 @@ function updateActivePaneChrome() {
     paneElement.classList.toggle("active", paneElement.dataset.pane === app.activePane);
   });
   renderLayoutChrome();
+  updateDualPaneActionChrome();
   updateSelectionReadout();
 }
 
@@ -8521,9 +9519,13 @@ function selectionStatusForPane(paneName) {
   const selected = selectedEntries(paneName);
   const entries = selected.length ? selected : visible;
   const summary = summarizeEntrySet(entries);
-  const partialTotal = tab.listingWindow?.hasMore ? Number(tab.listingWindow.total || 0) : 0;
-  const visibleText = partialTotal
-    ? `${visible.length.toLocaleString()}/${partialTotal.toLocaleString()} loaded`
+  const partialLoading = tab.listingWindow?.hasMore === true;
+  const partialTotalKnown = partialLoading && tab.listingWindow?.totalKnown !== false && Number.isFinite(Number(tab.listingWindow.total));
+  const partialTotal = partialTotalKnown ? Number(tab.listingWindow.total) : 0;
+  const visibleText = partialLoading
+    ? partialTotalKnown
+      ? `${visible.length.toLocaleString()}/${partialTotal.toLocaleString()} loaded`
+      : `${visible.length.toLocaleString()}+ loading`
     : visible.length === tab.entries.length
       ? itemWord(visible.length, "item")
       : `${visible.length}/${tab.entries.length} visible`;
@@ -8539,8 +9541,10 @@ function selectionStatusForPane(paneName) {
     `${paneName}: ${tab.path}`,
     selected.length
       ? `${selected.length} selected`
-      : partialTotal
-        ? `${visible.length} visible of ${partialTotal} loading`
+      : partialLoading
+        ? partialTotalKnown
+          ? `${visible.length} visible of ${partialTotal} loading`
+          : `${visible.length} visible while total loads`
         : `${visible.length} visible of ${tab.entries.length}`,
     detail
   ].join("\n");
@@ -8553,11 +9557,17 @@ function updateSelectionReadout() {
     return;
   }
   const status = selectionStatusForPane(app.activePane);
+  const paneLabel = app.activePane.toUpperCase();
   readout.classList.toggle("active", status.active);
   readout.title = status.title;
-  readout.innerHTML = `<strong>${escapeHtml(app.activePane.toUpperCase())} ${escapeHtml(
-    status.scopeText
-  )}</strong><span>${escapeHtml(status.detail)}</span>`;
+  readout.setAttribute(
+    "aria-label",
+    `${paneLabel} pane, ${status.scopeText}. ${status.detail}. Activate to focus the active file list.`
+  );
+  readout.innerHTML = `<img class="dock-status-icon" src="/icons/list-checks.svg" alt="" aria-hidden="true" />
+    <span class="dock-status-main"><strong>${escapeHtml(paneLabel)}</strong><span class="dock-status-value">${escapeHtml(
+      status.scopeText
+    )}</span></span>`;
 }
 
 function clipboardModeLabel(mode = app.fileClipboard.mode) {
@@ -8577,8 +9587,14 @@ function clipboardSummaryText() {
 function updateClipboardReadout() {
   const readout = document.getElementById("clipboard-readout");
   if (readout) {
-    readout.textContent = clipboardSummaryText();
-    readout.classList.toggle("active", Boolean(app.fileClipboard.paths.length));
+    const count = app.fileClipboard.paths.length;
+    const summary = clipboardSummaryText();
+    const compact = count ? `${clipboardModeLabel()} ${count.toLocaleString()}` : "Empty";
+    readout.title = summary;
+    readout.setAttribute("aria-label", summary);
+    readout.innerHTML = `<img class="dock-status-icon" src="/icons/clipboard.svg" alt="" aria-hidden="true" />
+      <span class="dock-status-value">${escapeHtml(compact)}</span>`;
+    readout.classList.toggle("active", Boolean(count));
     readout.classList.toggle("cut", app.fileClipboard.mode === "move");
   }
 }
@@ -8589,7 +9605,10 @@ function normalizedKnownSettings(source = app.state?.settings || {}) {
     openGesture: normalizeOpenGesture(source.openGesture),
     startupMode: normalizeStartupMode(source.startupMode),
     startupLayoutId: normalizeReferenceId(source.startupLayoutId),
+    focusMode: source.focusMode === true,
+    navigator: source.navigator !== false,
     inspector: source.inspector !== false,
+    inspectorAutoCollapse: source.inspectorAutoCollapse !== false,
     confirmTrash: source.confirmTrash !== false,
     launchMode: normalizeLaunchMode(source.launchMode),
     shellOpenMode: normalizeShellOpenMode(source.shellOpenMode),
@@ -8611,6 +9630,35 @@ function inspectorEnabled() {
   return currentSettings().inspector;
 }
 
+function inspectorShouldAutoCollapse() {
+  return inspectorEnabled() && currentSettings().inspectorAutoCollapse && selectedPaths(app.activePane).length === 0;
+}
+
+function applyInspectorPresence() {
+  const shell = document.querySelector(".app-shell");
+  if (!shell) {
+    return;
+  }
+  const collapsed = inspectorShouldAutoCollapse() && !currentSettings().focusMode;
+  const changed = shell.classList.toggle("inspector-auto-collapsed", collapsed);
+  const inspector = document.getElementById("inspector");
+  inspector?.classList.toggle("auto-collapsed", collapsed);
+  if (inspector) {
+    inspector.setAttribute("aria-label", collapsed ? "Preview, waiting for a selection" : "Preview");
+  }
+  if (changed) {
+    for (const paneName of ["left", "right"]) {
+      if (app.virtualLists[paneName]) {
+        scheduleVirtualFileRender(paneName);
+      }
+    }
+  }
+}
+
+function navigatorEnabled() {
+  return currentSettings().navigator;
+}
+
 function confirmTrashEnabled() {
   return currentSettings().confirmTrash;
 }
@@ -8627,6 +9675,8 @@ function applyLayoutSizeVariables(sizes = currentSettings().layoutSizes) {
   shell.style.setProperty("--right-pane-fr", `${normalized.rightPaneWeight}fr`);
   shell.style.setProperty("--top-pane-fr", `${normalized.topPaneWeight}fr`);
   shell.style.setProperty("--bottom-pane-fr", `${normalized.bottomPaneWeight}fr`);
+  const focusedDock = normalizeToolbarActions(currentSettings().toolbarActions).length === 0;
+  shell.classList.toggle("dock-focused", focusedDock);
   shell.style.setProperty("--user-dock-height", `${normalized.dockHeight}px`);
   for (const paneName of ["left", "right"]) {
     if (app.virtualLists[paneName]) {
@@ -8785,9 +9835,48 @@ function applyAppSettingsChrome() {
     shell.classList.toggle(`density-${density}`, settings.density === density);
   }
   shell.classList.toggle("single-click-open", settings.openGesture === "single");
+  shell.classList.toggle("navigator-off", !settings.navigator);
   shell.classList.toggle("inspector-off", !settings.inspector);
+  shell.classList.toggle("focus-files", settings.focusMode);
+  applyInspectorPresence();
+  const focusButton = document.querySelector('[data-topbar-action="focus"]');
+  focusButton?.classList.toggle("active", settings.focusMode);
+  focusButton?.setAttribute("aria-pressed", String(settings.focusMode));
+  document.querySelectorAll("[data-panel-action]").forEach((button) => {
+    const panel = button.dataset.panelAction;
+    const enabled = panel === "navigator" ? settings.navigator : settings.inspector;
+    const label = panel === "navigator" ? "navigator" : "preview";
+    button.classList.toggle("active", enabled);
+    button.setAttribute("aria-pressed", String(enabled));
+    button.setAttribute("aria-label", `${enabled ? "Hide" : "Show"} ${label}`);
+    button.title = settings.focusMode ? `Exit Focus to control ${label}` : `${enabled ? "Hide" : "Show"} ${label}`;
+    button.disabled = settings.focusMode;
+  });
   applyLayoutSizeVariables(settings.layoutSizes);
   applyToolbarVisibility();
+}
+
+function positionPaneMoreMenu(details) {
+  const menu = details?.querySelector(".pane-more-menu");
+  const summary = details?.querySelector(":scope > summary");
+  menu?.classList.remove("positioned");
+  if (!details?.open || !menu || !summary) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    if (!details.open) return;
+    const anchor = summary.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const margin = 8;
+    const gap = 5;
+    const left = Math.max(margin, Math.min(anchor.right - menuRect.width, window.innerWidth - menuRect.width - margin));
+    const below = anchor.bottom + gap;
+    const above = anchor.top - menuRect.height - gap;
+    const top = below + menuRect.height <= window.innerHeight - margin ? below : Math.max(margin, above);
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+    menu.classList.add("positioned");
+  });
 }
 
 function toolbarVisibleActionSet(actions = currentSettings().toolbarActions) {
@@ -8848,6 +9937,164 @@ function applyToolbarVisibility() {
     pasteMode.hidden = !visible.has("clipPaste");
     pasteMode.style.order = String(toolbarOrderIndex("clipPaste", order) + 0.2);
   }
+  scheduleDockOverflowUpdate();
+}
+
+let dockOverflowFrame = 0;
+let dockOverflowResizeObserver = null;
+
+function dockOverflowCandidates(strip = document.querySelector(".dock-action-strip")) {
+  if (!strip) return [];
+  return [
+    ...strip.querySelectorAll("#saved-command-strip > button, :scope > [data-global-action]")
+  ]
+    .filter((button) => !button.hidden)
+    .sort((left, right) => {
+      const orderDelta = Number.parseFloat(getComputedStyle(left).order || "0") - Number.parseFloat(getComputedStyle(right).order || "0");
+      if (orderDelta) return orderDelta;
+      return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    });
+}
+
+function dockActionCatalogItem(actionId) {
+  return toolbarActionCatalog.find((item) => item.id === actionId) || null;
+}
+
+function dockOverflowItemMarkup(button) {
+  const actionId = button.dataset.globalAction || "";
+  const toolId = button.dataset.runTool || "";
+  const scriptId = button.dataset.runScript || "";
+  const catalogItem = actionId ? dockActionCatalogItem(actionId) : null;
+  const label = String(catalogItem?.label || button.textContent || button.title || "Action").trim();
+  const group = catalogItem?.group || (scriptId ? "Pinned script" : toolId ? "Pinned tool" : "Shelf");
+  const title = String(button.title || label).trim();
+  const actionAttribute = actionId
+    ? `data-overflow-global-action="${escapeHtml(actionId)}"`
+    : toolId
+      ? `data-overflow-run-tool="${escapeHtml(toolId)}"`
+      : `data-overflow-run-script="${escapeHtml(scriptId)}"`;
+  return `<button type="button" role="menuitem" data-dock-overflow-item ${actionAttribute} title="${escapeHtml(title)}"><span>${escapeHtml(
+    label
+  )}</span><small>${escapeHtml(group)}</small></button>`;
+}
+
+function closeDockOverflowMenu(options = {}) {
+  const toggle = document.getElementById("dock-overflow-toggle");
+  const menu = document.getElementById("dock-overflow-menu");
+  if (!toggle || !menu) return;
+  menu.hidden = true;
+  toggle.setAttribute("aria-expanded", "false");
+  if (options.restoreFocus) toggle.focus();
+}
+
+function positionDockOverflowMenu() {
+  const toggle = document.getElementById("dock-overflow-toggle");
+  const menu = document.getElementById("dock-overflow-menu");
+  if (!toggle || !menu || menu.hidden) return;
+  const rect = toggle.getBoundingClientRect();
+  const menuWidth = menu.getBoundingClientRect().width || 320;
+  const left = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.bottom = `${Math.max(8, Math.round(window.innerHeight - rect.top + 5))}px`;
+}
+
+function openDockOverflowMenu() {
+  const toggle = document.getElementById("dock-overflow-toggle");
+  const menu = document.getElementById("dock-overflow-menu");
+  if (!toggle || !menu || toggle.hidden || !menu.children.length) return;
+  menu.hidden = false;
+  toggle.setAttribute("aria-expanded", "true");
+  positionDockOverflowMenu();
+  menu.querySelector("button")?.focus();
+}
+
+function updateDockOverflow() {
+  dockOverflowFrame = 0;
+  const strip = document.querySelector(".dock-action-strip");
+  const toggle = document.getElementById("dock-overflow-toggle");
+  const count = document.getElementById("dock-overflow-count");
+  const menu = document.getElementById("dock-overflow-menu");
+  if (!strip || !toggle || !count || !menu) return;
+  closeDockOverflowMenu();
+  const candidates = dockOverflowCandidates(strip);
+  candidates.forEach((button) => button.classList.remove("dock-responsive-hidden"));
+  toggle.hidden = true;
+  menu.innerHTML = "";
+  strip.scrollLeft = 0;
+  strip.scrollTop = 0;
+  const overflows = () => strip.scrollWidth > strip.clientWidth + 1 || strip.scrollHeight > strip.clientHeight + 1;
+  if (!overflows()) return;
+  toggle.hidden = false;
+  const overflowed = [];
+  for (let index = candidates.length - 1; index > 0 && overflows(); index -= 1) {
+    const button = candidates[index];
+    button.classList.add("dock-responsive-hidden");
+    overflowed.unshift(button);
+  }
+  if (!overflowed.length) {
+    toggle.hidden = true;
+    return;
+  }
+  count.textContent = String(overflowed.length);
+  toggle.title = `${overflowed.length} more shelf action${overflowed.length === 1 ? "" : "s"}`;
+  toggle.setAttribute("aria-label", toggle.title);
+  menu.innerHTML = overflowed.map(dockOverflowItemMarkup).join("");
+}
+
+function scheduleDockOverflowUpdate() {
+  if (dockOverflowFrame) cancelAnimationFrame(dockOverflowFrame);
+  dockOverflowFrame = requestAnimationFrame(updateDockOverflow);
+}
+
+function setupDockOverflow() {
+  const strip = document.querySelector(".dock-action-strip");
+  const dock = document.querySelector(".command-dock");
+  const toggle = document.getElementById("dock-overflow-toggle");
+  const menu = document.getElementById("dock-overflow-menu");
+  if (!strip || !dock || !toggle || !menu) return;
+  toggle.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (menu.hidden) openDockOverflowMenu();
+    else closeDockOverflowMenu({ restoreFocus: true });
+  });
+  menu.addEventListener("click", async (event) => {
+    const globalButton = event.target.closest("[data-overflow-global-action]");
+    const toolButton = event.target.closest("[data-overflow-run-tool]");
+    const scriptButton = event.target.closest("[data-overflow-run-script]");
+    if (!globalButton && !toolButton && !scriptButton) {
+      closeDockOverflowMenu();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    closeDockOverflowMenu();
+    try {
+      if (globalButton) {
+        const actionId = globalButton.dataset.overflowGlobalAction;
+        document.querySelector(`.command-dock [data-global-action="${CSS.escape(actionId)}"]`)?.click();
+      }
+      if (toolButton) await runTool(toolButton.dataset.overflowRunTool);
+      if (scriptButton) await runSavedScript(scriptButton.dataset.overflowRunScript);
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("#dock-overflow-menu, #dock-overflow-toggle")) closeDockOverflowMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !menu.hidden) {
+      event.preventDefault();
+      closeDockOverflowMenu({ restoreFocus: true });
+    }
+  });
+  window.addEventListener("resize", scheduleDockOverflowUpdate);
+  dockOverflowResizeObserver?.disconnect();
+  dockOverflowResizeObserver = new ResizeObserver(scheduleDockOverflowUpdate);
+  dockOverflowResizeObserver.observe(strip);
+  dockOverflowResizeObserver.observe(dock);
+  scheduleDockOverflowUpdate();
 }
 
 function renderToolbarDialog() {
@@ -8936,7 +10183,9 @@ function renderPreferencesDialog() {
   document.getElementById("preference-startup-mode").value = settings.startupMode;
   renderStartupLayoutPicker(settings);
   document.getElementById("preference-paste-conflict").value = settings.pasteConflictMode;
+  document.getElementById("preference-navigator").checked = settings.navigator;
   document.getElementById("preference-inspector").checked = settings.inspector;
+  document.getElementById("preference-inspector-auto-collapse").checked = settings.inspectorAutoCollapse;
   document.getElementById("preference-auto-refresh").checked = settings.autoRefresh;
   document.getElementById("preference-show-hidden").checked = settings.showHidden;
   document.getElementById("preference-linked-navigation").checked = settings.linkedNavigation;
@@ -9007,7 +10256,10 @@ function preferencesSettingsFromForm() {
     startupMode: startupMode === "savedLayout" && !startupLayoutId ? "last" : startupMode,
     startupLayoutId,
     pasteConflictMode: document.getElementById("preference-paste-conflict").value,
+    focusMode: currentSettings().focusMode,
+    navigator: document.getElementById("preference-navigator").checked,
     inspector: document.getElementById("preference-inspector").checked,
+    inspectorAutoCollapse: document.getElementById("preference-inspector-auto-collapse").checked,
     autoRefresh: document.getElementById("preference-auto-refresh").checked,
     showHidden: document.getElementById("preference-show-hidden").checked,
     linkedNavigation: document.getElementById("preference-linked-navigation").checked,
@@ -9026,7 +10278,10 @@ function defaultPreferenceSettings() {
     openGesture: "double",
     startupMode: "last",
     startupLayoutId: "",
+    focusMode: false,
+    navigator: true,
     inspector: true,
+    inspectorAutoCollapse: true,
     confirmTrash: true,
     launchMode: "appWindow",
     shellOpenMode: "leftReplace",
@@ -9095,6 +10350,27 @@ async function saveSettingsPatch(patch, options = {}) {
   }
   if (options.message) {
     showToast(options.message);
+  }
+}
+
+async function toggleFocusMode(force = null) {
+  const enabled = typeof force === "boolean" ? force : !currentSettings().focusMode;
+  await saveSettingsPatch(
+    { focusMode: enabled },
+    { message: enabled ? "Focus workspace on" : "Focus workspace off" }
+  );
+}
+
+async function toggleWorkspacePanel(panel, force = null) {
+  const key = panel === "navigator" ? "navigator" : panel === "preview" ? "inspector" : null;
+  if (!key || currentSettings().focusMode) {
+    return;
+  }
+  const enabled = typeof force === "boolean" ? force : !currentSettings()[key];
+  const label = key === "navigator" ? "Navigator" : "Preview";
+  await saveSettingsPatch({ [key]: enabled }, { message: `${label} ${enabled ? "shown" : "hidden"}` });
+  if (key === "inspector" && enabled) {
+    renderInspector();
   }
 }
 
@@ -9235,6 +10511,10 @@ function previewActionBar(preview, extraMarkup = "") {
 async function renderInspector() {
   const inspector = document.getElementById("inspector");
   const body = inspector.querySelector(".inspector-body");
+  const renderToken = ++app.inspectorRenderToken;
+  app.inspectorPreviewController?.abort();
+  app.inspectorPreviewController = null;
+  applyInspectorPresence();
   if (!inspectorEnabled()) {
     body.innerHTML = `<div class="muted">Preview disabled</div>`;
     return;
@@ -9251,13 +10531,19 @@ async function renderInspector() {
   }
 
   try {
+    body.innerHTML = `<div class="preview-loading" role="status" aria-label="Loading preview"><span></span><span></span><span></span></div>`;
+    const controller = new AbortController();
+    app.inspectorPreviewController = controller;
     const label = pathLabelFor(selection[0]);
     const labelPanel = label
       ? `<div class="preview-label">${labelBadgeMarkup(label)}${
           label.notes ? `<span>${escapeHtml(label.notes)}</span>` : ""
         }</div>`
       : "";
-    const preview = await request(`/api/preview?path=${encodeURIComponent(selection[0])}`);
+    const preview = await request(`/api/preview?path=${encodeURIComponent(selection[0])}`, { signal: controller.signal });
+    if (renderToken !== app.inspectorRenderToken || selectedPaths(app.activePane)[0] !== selection[0]) {
+      return;
+    }
     const meta = `
       <div class="preview-meta">
         <span>${escapeHtml(preview.path)}</span>
@@ -9322,7 +10608,14 @@ async function renderInspector() {
       preview.name
     )}</h3>${meta}${labelPanel}<div class="muted">${preview.type}</div>`;
   } catch (error) {
+    if (isAbortError(error) || renderToken !== app.inspectorRenderToken) {
+      return;
+    }
     body.innerHTML = `<div class="muted">${escapeHtml(error.message)}</div>`;
+  } finally {
+    if (renderToken === app.inspectorRenderToken) {
+      app.inspectorPreviewController = null;
+    }
   }
 }
 
@@ -17317,15 +18610,26 @@ function updateOperationReadout() {
   const operations = app.state?.operations || [];
   const active = activeOperations(operations);
   const latest = operations[0];
-  readout.textContent = operationSummary();
+  const summary = operationSummary();
+  const compact = active.length
+    ? active.length === 1
+      ? String(active[0].status || "active")
+      : `${active.length} active`
+    : latest?.status === "failed"
+      ? "Failed"
+      : operations.length.toLocaleString();
   readout.classList.toggle("active", active.length > 0);
   readout.classList.toggle("failed", !active.length && latest?.status === "failed");
-  readout.title = active.length
+  const detail = active.length
     ? active
         .slice(0, 4)
         .map((operation) => `${operation.status}: ${operation.label || operation.type}`)
         .join("\n")
     : `${operations.length} recorded operation${operations.length === 1 ? "" : "s"}`;
+  readout.title = detail;
+  readout.setAttribute("aria-label", `Operations. ${summary}. ${detail.replace(/\n/g, ". ")}. Activate to open operations and recovery.`);
+  readout.innerHTML = `<img class="dock-status-icon" src="/icons/history.svg" alt="" aria-hidden="true" />
+    <span class="dock-status-value">${escapeHtml(compact)}</span>`;
 }
 
 function operationTiming(operation, now = Date.now()) {
@@ -18568,6 +19872,9 @@ async function handlePaneShortcut(event) {
   if (document.querySelector("dialog[open]") || isTypingTarget(event.target)) {
     return false;
   }
+  if (event.target.closest?.("button, a, select, summary, [role='button'], [role='menuitem'], [role='tab']")) {
+    return false;
+  }
 
   const paneName = paneFromEventTarget(event.target);
   if (!isPaneName(paneName)) {
@@ -18844,9 +20151,12 @@ async function openCommandDialog() {
   }
   const dialog = document.getElementById("command-dialog");
   const input = document.getElementById("command-input");
+  loadCommandCenterState();
   dialog.showModal();
   input.value = "";
+  app.commandPalette.view = "all";
   app.commandPalette.activeIndex = 0;
+  updateCommandCenterViewButtons();
   renderCommands("");
   input.focus();
 }
@@ -19448,68 +20758,188 @@ function commandPaletteItems() {
       run: () => runSavedScript(script.id)
     };
   });
-  return [...builtinItems, ...toolItems, ...scriptItems].filter((item) => item.id);
+  return [...builtinItems, ...toolItems, ...scriptItems]
+    .filter((item) => item.id)
+    .map((item) => ({
+      ...item,
+      key: `${item.type}:${item.id}`,
+      category: commandPaletteCategory(item)
+    }));
+}
+
+function loadCommandCenterState() {
+  if (app.commandPalette.loaded) return;
+  app.commandPalette.loaded = true;
+  try {
+    const saved = JSON.parse(localStorage.getItem(commandCenterStorageKey) || "{}");
+    const pins = Array.isArray(saved.pins) ? saved.pins.filter((value) => typeof value === "string").slice(0, 64) : [];
+    const recents = Array.isArray(saved.recents) ? saved.recents.filter((value) => typeof value === "string").slice(0, 12) : [];
+    app.commandPalette.pins = new Set(pins);
+    app.commandPalette.recents = [...new Set(recents)];
+  } catch {
+    app.commandPalette.pins = new Set();
+    app.commandPalette.recents = [];
+  }
+}
+
+function saveCommandCenterState() {
+  try {
+    localStorage.setItem(
+      commandCenterStorageKey,
+      JSON.stringify({ pins: [...app.commandPalette.pins].slice(0, 64), recents: app.commandPalette.recents.slice(0, 12) })
+    );
+  } catch {
+    // Command history is an optional convenience and must never block execution.
+  }
+}
+
+function commandPaletteCategory(item) {
+  if (item.type === "tool" || item.type === "script") return "Automation";
+  const text = `${item.name} ${item.detail}`.toLowerCase();
+  const rules = [
+    ["Transfer & safety", /\b(copy|move|transfer|paste|cut|delete|recycle|trash|sync|archive|zip|extract|send|restore|undo|retry)\b/],
+    ["Create & edit", /\b(new|create|rename|edit|attributes|timestamps|shortcut|link|duplicate|bulk rename)\b/],
+    ["Find & select", /\b(search|find|filter|select|label|collection|checksum|compare|flat|duplicate files)\b/],
+    ["View & layout", /\b(view|tiles|compact|details|preview|hidden|columns|format|sort|split|pane|focus workspace|layout)\b/],
+    ["Navigate", /\b(open|tab|favorite|root|history|navigate|location|path|home|documents|downloads)\b/],
+    ["System & settings", /\b(preference|toolbar|hotkey|backup|integrat|shell|manual|operation|speed index|cache|diagnostic)\b/]
+  ];
+  return rules.find(([, pattern]) => pattern.test(text))?.[0] || "Utilities";
+}
+
+function fuzzySubsequenceScore(text, needle) {
+  if (!needle) return 1;
+  let cursor = 0;
+  let first = -1;
+  let gaps = 0;
+  for (const character of needle) {
+    const position = text.indexOf(character, cursor);
+    if (position < 0) return 0;
+    if (first < 0) first = position;
+    gaps += position - cursor;
+    cursor = position + 1;
+  }
+  return Math.max(1, 180 - first * 2 - gaps);
 }
 
 function commandPaletteScore(item, query) {
-  const text = `${item.name} ${item.detail} ${item.group} ${item.meta} ${item.hotkeys.join(" ")}`.toLowerCase();
+  const nameText = item.name.toLowerCase();
+  const compactName = nameText.replace(/\s+/g, "");
+  const text = `${item.name} ${item.detail} ${item.group} ${item.category} ${item.meta} ${item.hotkeys.join(" ")}`.toLowerCase();
   const compactText = text.replace(/\s+/g, "");
   const needle = query.trim().toLowerCase();
   if (!needle) {
     return 1;
   }
   const parts = needle.split(/\s+/).filter(Boolean);
-  if (!parts.every((part) => text.includes(part) || compactText.includes(part))) {
-    return 0;
+  const partScores = parts.map((part) => {
+    if (nameText.includes(part)) return 180 + part.length * 5;
+    if (text.includes(part)) return 120 + part.length * 4;
+    const compactPart = part.replace(/\s+/g, "");
+    const nameScore = fuzzySubsequenceScore(compactName, compactPart);
+    if (nameScore > 0) return nameScore;
+    return compactPart.length >= 4 ? Math.round(fuzzySubsequenceScore(compactText, compactPart) * 0.5) : 0;
+  });
+  if (partScores.some((score) => score <= 0)) return 0;
+  if (nameText === needle) {
+    return 1000;
   }
-  if (item.name.toLowerCase() === needle) {
-    return 100;
+  if (nameText.startsWith(needle)) {
+    return 800;
   }
-  if (item.name.toLowerCase().startsWith(needle)) {
-    return 80;
+  if (nameText.includes(needle)) {
+    return 600;
   }
-  if (item.name.toLowerCase().includes(needle)) {
-    return 60;
-  }
-  return 30 + parts.length;
+  return partScores.reduce((total, score) => total + score, 0);
 }
 
 function commandPaletteFilteredItems(query) {
-  const groupRank = new Map([
-    ["Commands", 0],
-    ["Tools", 1],
-    ["Scripts", 2]
+  loadCommandCenterState();
+  const needle = query.trim();
+  const recentRank = new Map(app.commandPalette.recents.map((key, index) => [key, index]));
+  const categoryRank = new Map([
+    ["Transfer & safety", 0],
+    ["Navigate", 1],
+    ["Find & select", 2],
+    ["Create & edit", 3],
+    ["View & layout", 4],
+    ["Automation", 5],
+    ["System & settings", 6],
+    ["Utilities", 7]
   ]);
   return commandPaletteItems()
     .map((item) => ({ ...item, score: commandPaletteScore(item, query) }))
     .filter((item) => item.score > 0)
+    .filter((item) => app.commandPalette.view !== "pinned" || app.commandPalette.pins.has(item.key))
+    .filter((item) => app.commandPalette.view !== "recent" || recentRank.has(item.key))
+    .map((item) => ({
+      ...item,
+      pinned: app.commandPalette.pins.has(item.key),
+      recentIndex: recentRank.get(item.key) ?? Number.MAX_SAFE_INTEGER
+    }))
     .sort((left, right) => {
-      if (right.score !== left.score) {
+      if (needle && right.score !== left.score) {
         return right.score - left.score;
       }
-      const groupDiff = (groupRank.get(left.group) ?? 9) - (groupRank.get(right.group) ?? 9);
-      if (groupDiff !== 0) {
-        return groupDiff;
-      }
+      if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+      if (left.recentIndex !== right.recentIndex) return left.recentIndex - right.recentIndex;
+      const categoryDiff = (categoryRank.get(left.category) ?? 9) - (categoryRank.get(right.category) ?? 9);
+      if (categoryDiff !== 0) return categoryDiff;
       return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
     })
-    .slice(0, 80);
+    .map((item) => ({
+      ...item,
+      displayGroup:
+        app.commandPalette.view === "recent"
+          ? "Recent"
+          : app.commandPalette.view === "pinned" || (!needle && item.pinned)
+          ? "Pinned"
+          : !needle && item.recentIndex !== Number.MAX_SAFE_INTEGER
+            ? "Recent"
+            : item.category
+    }))
+    .slice(0, 160);
 }
 
 function commandPaletteItemMarkup(item, index, previousGroup) {
-  const groupHeading = item.group !== previousGroup ? `<div class="command-group-heading">${escapeHtml(item.group)}</div>` : "";
+  const groupHeading = item.displayGroup !== previousGroup ? `<div class="command-group-heading">${escapeHtml(item.displayGroup)}</div>` : "";
   const hotkeyMarkup = item.hotkeys.length
     ? `<span class="command-hotkeys">${item.hotkeys.map((combo) => `<kbd>${escapeHtml(combo)}</kbd>`).join("")}</span>`
     : "";
   const active = index === app.commandPalette.activeIndex ? " active" : "";
-  return `${groupHeading}<button class="command-item${active}" data-palette-index="${index}">
-    <span class="command-item-main">
-      <span>${escapeHtml(item.name)}</span>
-      ${hotkeyMarkup}
-    </span>
-    <small>${escapeHtml(item.detail)}</small>
-    <span class="command-item-meta">${escapeHtml(item.meta)}</span>
-  </button>`;
+  const pinLabel = item.pinned ? `Unpin ${item.name}` : `Pin ${item.name}`;
+  return `${groupHeading}<div class="command-row${active}" role="option" aria-selected="${index === app.commandPalette.activeIndex}">
+    <button class="command-item${active}" data-palette-index="${index}">
+      <span class="command-item-main">
+        <span>${escapeHtml(item.name)}</span>
+        ${hotkeyMarkup}
+      </span>
+      <small>${escapeHtml(item.detail)}</small>
+      <span class="command-item-meta"><span>${escapeHtml(item.category)}</span><span>${escapeHtml(item.meta)}</span></span>
+    </button>
+    <button type="button" class="command-pin${item.pinned ? " pinned" : ""}" data-command-pin="${escapeHtml(item.key)}" title="${escapeHtml(pinLabel)}" aria-label="${escapeHtml(pinLabel)}"></button>
+  </div>`;
+}
+
+function updateCommandCenterViewButtons() {
+  document.querySelectorAll("[data-command-view]").forEach((button) => {
+    const active = button.dataset.commandView === app.commandPalette.view;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function toggleCommandPalettePin(key) {
+  if (!key) return;
+  if (app.commandPalette.pins.has(key)) app.commandPalette.pins.delete(key);
+  else app.commandPalette.pins.add(key);
+  saveCommandCenterState();
+  renderCommands(document.getElementById("command-input")?.value || "");
+}
+
+function recordCommandPaletteRecent(key) {
+  app.commandPalette.recents = [key, ...app.commandPalette.recents.filter((item) => item !== key)].slice(0, 12);
+  saveCommandCenterState();
 }
 
 function renderCommands(query) {
@@ -19519,13 +20949,15 @@ function renderCommands(query) {
   app.commandPalette.activeIndex = Math.max(0, Math.min(app.commandPalette.activeIndex || 0, visible.length - 1));
   if (!visible.length) {
     results.innerHTML = `<div class="empty-state">No matching commands, tools, or scripts</div>`;
+    document.getElementById("command-result-summary").textContent = "0 results";
     return;
   }
+  document.getElementById("command-result-summary").textContent = `${visible.length} result${visible.length === 1 ? "" : "s"}`;
   let previousGroup = "";
   results.innerHTML = visible
     .map((item, index) => {
       const markup = commandPaletteItemMarkup(item, index, previousGroup);
-      previousGroup = item.group;
+      previousGroup = item.displayGroup;
       return markup;
     })
     .join("");
@@ -19554,6 +20986,7 @@ async function runCommandPaletteItem(index = app.commandPalette.activeIndex) {
     return;
   }
   const dialog = document.getElementById("command-dialog");
+  recordCommandPaletteRecent(item.key);
   if (dialog?.open) {
     dialog.close();
   }
@@ -19561,6 +20994,11 @@ async function runCommandPaletteItem(index = app.commandPalette.activeIndex) {
 }
 
 async function handleCommandPaletteKey(event) {
+  if (event.ctrlKey && event.key.toLowerCase() === "d") {
+    event.preventDefault();
+    toggleCommandPalettePin(app.commandPalette.items[app.commandPalette.activeIndex]?.key);
+    return true;
+  }
   if (event.key === "ArrowDown") {
     event.preventDefault();
     moveCommandPaletteSelection(1);
@@ -19984,6 +21422,12 @@ async function handleAction(action, paneName) {
 }
 
 function wireEvents() {
+  document.querySelectorAll(".pane-more").forEach((details) => {
+    details.addEventListener("toggle", () => positionPaneMoreMenu(details));
+  });
+  window.addEventListener("resize", () => {
+    document.querySelectorAll(".pane-more[open]").forEach((details) => positionPaneMoreMenu(details));
+  });
   window.addEventListener("explore-better-desktop-shortcut", (event) => {
     handleDesktopShortcutAction(event.detail).catch((error) => showToast(error.message));
   });
@@ -20077,19 +21521,71 @@ function wireEvents() {
         const hit = sizeAnalysisTreemapRectAtPoint(sizeTreemap, event) || app.sizeAnalysis.treemapHover;
         if (hit) {
           setSizeAnalysisTreemapHover(hit);
+          setSizeAnalysisTreemapSelection(hit);
         }
-        await openSizeAnalysisTreemapItem(hit || app.sizeAnalysis.treemapHover);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+    sizeTreemap.addEventListener("dblclick", async (event) => {
+      try {
+        const hit = sizeAnalysisTreemapRectAtPoint(sizeTreemap, event) || app.sizeAnalysis.treemapSelection;
+        if (!hit) return;
+        setSizeAnalysisTreemapSelection(hit);
+        if (hit.treemapGroup) {
+          focusSizeAnalysisTreemap(hit.path);
+          return;
+        }
+        await openSizeAnalysisTreemapItem(hit);
       } catch (error) {
         showToast(error.message);
       }
     });
     sizeTreemap.addEventListener("keydown", async (event) => {
+      if (["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"].includes(event.key)) {
+        event.preventDefault();
+        const items = app.sizeAnalysis.treemapRects;
+        if (!items.length) return;
+        const currentKey = app.sizeAnalysis.treemapSelection?.key || app.sizeAnalysis.treemapHover?.key || "";
+        const currentIndex = Math.max(0, items.findIndex((item) => item.key === currentKey));
+        const direction = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+        const nextIndex = (currentIndex + direction + items.length) % items.length;
+        setSizeAnalysisTreemapHover(null);
+        setSizeAnalysisTreemapSelection(items[nextIndex]);
+        return;
+      }
+      if (event.key === "Backspace") {
+        event.preventDefault();
+        focusSizeAnalysisTreemapParent();
+        return;
+      }
+      if (event.key === "Home") {
+        event.preventDefault();
+        focusSizeAnalysisTreemap("");
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSizeAnalysisTreemapHover(null);
+        setSizeAnalysisTreemapSelection(null);
+        return;
+      }
+      if (event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        await openSizeAnalysisTreemapItem(app.sizeAnalysis.treemapSelection);
+        return;
+      }
       if (event.key !== "Enter" && event.key !== " ") {
         return;
       }
       event.preventDefault();
       try {
-        await openSizeAnalysisTreemapItem(app.sizeAnalysis.treemapHover || app.sizeAnalysis.treemapRects[0]);
+        const selected = app.sizeAnalysis.treemapSelection || app.sizeAnalysis.treemapHover || app.sizeAnalysis.treemapRects[0];
+        if (selected?.treemapGroup) {
+          focusSizeAnalysisTreemap(selected.path);
+        } else {
+          await openSizeAnalysisTreemapItem(selected);
+        }
       } catch (error) {
         showToast(error.message);
       }
@@ -20121,6 +21617,11 @@ function wireEvents() {
   });
 
   document.body.addEventListener("click", async (event) => {
+    const paneMoreAction = event.target.closest(".pane-more-menu [data-action]");
+    if (paneMoreAction) {
+      const menu = paneMoreAction.closest("details");
+      if (menu) menu.open = false;
+    }
     const pathSuggestionButton = event.target.closest("[data-path-suggest-index]");
     if (pathSuggestionButton) {
       const container = pathSuggestionButton.closest("[data-path-suggest]");
@@ -20148,6 +21649,17 @@ function wireEvents() {
     }
     if (app.contextMenu && !event.target.closest("#context-menu")) {
       hideContextMenu();
+    }
+
+    const dockStatusButton = event.target.closest("[data-dock-status]");
+    if (dockStatusButton) {
+      if (dockStatusButton.dataset.dockStatus === "selection") {
+        focusPaneList(app.activePane);
+      }
+      if (dockStatusButton.dataset.dockStatus === "operations") {
+        await openOpsDialog();
+      }
+      return;
     }
 
     const manualActionButton = event.target.closest("[data-manual-action]");
@@ -20231,6 +21743,21 @@ function wireEvents() {
       updateActivePaneChrome();
     }
 
+    const compactBreadcrumbButton = event.target.closest("[data-compact-breadcrumbs]");
+    if (compactBreadcrumbButton) {
+      const paneName = compactBreadcrumbButton.dataset.compactBreadcrumbs;
+      if (isPaneName(paneName)) {
+        event.preventDefault();
+        closeCompactBreadcrumbs(paneName);
+        toggleCompactBreadcrumbs(paneName);
+      }
+      return;
+    }
+
+    if (!event.target.closest(".breadcrumb-strip")) {
+      closeCompactBreadcrumbs();
+    }
+
     const breadcrumbMenuButton = event.target.closest("[data-breadcrumb-menu-path]");
     if (breadcrumbMenuButton) {
       const paneName = breadcrumbMenuButton.dataset.breadcrumbMenuPane;
@@ -20270,6 +21797,7 @@ function wireEvents() {
     if (breadcrumbButton) {
       const paneName = breadcrumbButton.dataset.breadcrumbPane;
       if (isPaneName(paneName)) {
+        toggleCompactBreadcrumbs(paneName, false);
         app.activePane = paneName;
         await loadPane(paneName, breadcrumbButton.dataset.breadcrumbPath);
         focusPaneList(paneName);
@@ -20542,9 +22070,21 @@ function wireEvents() {
       return;
     }
 
+    const workspacePanelButton = event.target.closest("[data-panel-action]");
+    if (workspacePanelButton) {
+      await toggleWorkspacePanel(workspacePanelButton.dataset.panelAction);
+      return;
+    }
+
     const layoutModeButton = event.target.closest("[data-layout-mode]");
     if (layoutModeButton) {
       setPaneLayout(layoutModeButton.dataset.layoutMode);
+      return;
+    }
+
+    const sizeAnalysisViewButton = event.target.closest("[data-size-analysis-view]");
+    if (sizeAnalysisViewButton) {
+      setSizeAnalysisViewMode(sizeAnalysisViewButton.dataset.sizeAnalysisView);
       return;
     }
 
@@ -20561,6 +22101,33 @@ function wireEvents() {
       }
       if (action === "cancel") {
         cancelSizeAnalysis();
+        return;
+      }
+    }
+
+    const sizeAnalysisMapFocus = event.target.closest("[data-size-analysis-map-focus]");
+    if (sizeAnalysisMapFocus) {
+      focusSizeAnalysisTreemap(sizeAnalysisMapFocus.dataset.sizeAnalysisMapFocus || "");
+      return;
+    }
+
+    const sizeAnalysisMapAction = event.target.closest("[data-size-analysis-map-action]");
+    if (sizeAnalysisMapAction) {
+      const action = sizeAnalysisMapAction.dataset.sizeAnalysisMapAction;
+      if (action === "root") {
+        focusSizeAnalysisTreemap("");
+        return;
+      }
+      if (action === "up") {
+        focusSizeAnalysisTreemapParent();
+        return;
+      }
+      if (action === "focus") {
+        focusSizeAnalysisTreemap(app.sizeAnalysis.treemapSelection?.path || "");
+        return;
+      }
+      if (action === "open") {
+        await openSizeAnalysisTreemapItem(app.sizeAnalysis.treemapSelection);
         return;
       }
     }
@@ -20583,6 +22150,17 @@ function wireEvents() {
       if (itemPath) {
         await loadPane(app.activePane, itemPath);
       }
+      return;
+    }
+
+    const topbarButton = event.target.closest("[data-topbar-action]");
+    if (topbarButton) {
+      const action = topbarButton.dataset.topbarAction;
+      if (action === "search") await deepSearch(app.activePane);
+      if (action === "sizeAnalysis") openSizeAnalysisDialog(app.activePane, "map");
+      if (action === "ops") await openOpsDialog();
+      if (action === "palette") await openCommandDialog();
+      if (action === "focus") await toggleFocusMode();
       return;
     }
 
@@ -20632,7 +22210,7 @@ function wireEvents() {
       if (action === "timestamps") openTimestampsDialog(app.activePane);
       if (action === "windowsProperties") await openWindowsProperties(app.activePane);
       if (action === "folderSizes") await calculateFolderSizes(app.activePane);
-      if (action === "sizeAnalysis") openSizeAnalysisDialog(app.activePane);
+      if (action === "sizeAnalysis") openSizeAnalysisDialog(app.activePane, "overview");
       if (action === "archive") openArchiveDialog(app.activePane);
       if (action === "compare") await openCompareDialog();
       if (action === "destination") await openDestinationDialog(app.activePane);
@@ -20778,6 +22356,14 @@ function wireEvents() {
   });
 
   document.body.addEventListener("change", async (event) => {
+    if (event.target.id === "size-analysis-size-by") {
+      setSizeAnalysisMapEncoding({ sizeMode: event.target.value });
+      return;
+    }
+    if (event.target.id === "size-analysis-color-by") {
+      setSizeAnalysisMapEncoding({ colorMode: event.target.value });
+      return;
+    }
     if (event.target.closest("#copy-names-dialog")) {
       renderCopyNamesDialog();
     }
@@ -20969,6 +22555,11 @@ function wireEvents() {
       hideBreadcrumbMenu();
       return;
     }
+    if (event.key === "Escape" && document.querySelector(".pane.compact-breadcrumbs-open")) {
+      event.preventDefault();
+      closeCompactBreadcrumbs();
+      return;
+    }
     if (await handleViewerKey(event)) {
       return;
     }
@@ -20980,11 +22571,20 @@ function wireEvents() {
       event.preventDefault();
       hidePathSuggestions(pathInput.dataset.pathInput);
       app.activePane = pathInput.dataset.pathInput;
-      await loadPane(pathInput.dataset.pathInput, pathInput.value);
-      focusPaneList(pathInput.dataset.pathInput);
+      try {
+        await loadPane(pathInput.dataset.pathInput, pathInput.value);
+        focusPaneList(pathInput.dataset.pathInput);
+      } catch {
+        pathInput.value = tabOf(pathInput.dataset.pathInput).path;
+      }
       return;
     }
     if (await handleCustomHotkey(event)) {
+      return;
+    }
+    if (event.key === "F9" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
+      await toggleFocusMode();
       return;
     }
     if (event.ctrlKey && event.key.toLowerCase() === "p") {
@@ -21223,6 +22823,23 @@ function wireEvents() {
       if (newFileActionButton.dataset.newFileAction === "refresh-template") {
         updateNewFileTemplate(true);
       }
+      return;
+    }
+
+    const commandViewButton = event.target.closest("[data-command-view]");
+    if (commandViewButton) {
+      app.commandPalette.view = commandViewButton.dataset.commandView;
+      app.commandPalette.activeIndex = 0;
+      updateCommandCenterViewButtons();
+      renderCommands(document.getElementById("command-input")?.value || "");
+      document.getElementById("command-input")?.focus();
+      return;
+    }
+
+    const commandPinButton = event.target.closest("[data-command-pin]");
+    if (commandPinButton) {
+      toggleCommandPalettePin(commandPinButton.dataset.commandPin);
+      document.getElementById("command-input")?.focus();
       return;
     }
 
@@ -22546,14 +24163,27 @@ function wireEvents() {
 }
 
 async function init() {
+  const startupStartedAt = performance.now();
   wireEvents();
-  const [roots, shellLocations] = await Promise.all([request("/api/roots"), request("/api/shell/locations")]);
+  setupDockOverflow();
+  const urlParams = new URL(window.location.href).searchParams;
+  const [roots, shellLocations] = await Promise.all([
+    request("/api/roots"),
+    request("/api/shell/locations"),
+    loadState()
+  ]);
   app.roots = roots;
   app.shellLocations = shellLocations;
-  await loadState();
-  await loadIntegrationStatus();
   applyAppSettingsChrome();
-  hydratePanesFromState(new URL(window.location.href).searchParams);
+  hydratePanesFromState(urlParams);
+  const paneLoads = Promise.all([
+    loadStartupPane("left", tabOf("left").path || app.roots.cwd, app.roots.cwd, {
+      allowRecovery: !startupPaneHasExplicitTarget("left", urlParams)
+    }),
+    loadStartupPane("right", tabOf("right").path || app.roots.home, app.roots.home, {
+      allowRecovery: !startupPaneHasExplicitTarget("right", urlParams)
+    })
+  ]);
   renderRoots();
   renderSavedCommandStrip();
   renderToolManager();
@@ -22573,12 +24203,11 @@ async function init() {
   renderSelectionSetsDialog();
   renderSearchPresets();
   renderBulkRenamePresets();
-  await Promise.all([
-    loadPane("left", tabOf("left").path || app.roots.cwd, false),
-    loadPane("right", tabOf("right").path || app.roots.home, false)
-  ]);
+  const startupPaneResults = await paneLoads;
+  if (startupPaneResults.some((result) => result?.recovered)) {
+    scheduleStateSave();
+  }
   renderOperations();
-  renderIntegration();
   renderPreferencesDialog();
   renderToolbarDialog();
   startOperationPolling();
@@ -22586,6 +24215,13 @@ async function init() {
   renderShowHiddenToggle();
   renderLinkedNavigationToggle();
   setStatus("Ready");
+  window.__exploreBetterStartup = {
+    readyMs: Math.round((performance.now() - startupStartedAt) * 10) / 10,
+    completedAt: Date.now()
+  };
+  loadIntegrationStatus()
+    .then(() => renderIntegration())
+    .catch((error) => console.warn(`Could not load integration status: ${error.message}`));
 }
 
 init().catch((error) => {

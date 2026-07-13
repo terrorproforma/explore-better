@@ -157,6 +157,9 @@ function summarizeAnalysis(timing) {
     wallMs: timing.wallMs,
     path: data.path,
     cache: data.cache || null,
+    scanProvider: data.scanProvider || "",
+    allocationProvider: data.allocationProvider || "",
+    native: data.native || null,
     scanned: Number(data.scanned || 0),
     truncated: data.truncated === true,
     summary: data.summary || {},
@@ -360,9 +363,9 @@ async function main() {
   const checks = [];
   const count = numberOption("--count", "EB_SIZE_ANALYSIS_PERF_COUNT", 10000);
   const folderCount = numberOption("--folders", "EB_SIZE_ANALYSIS_PERF_FOLDERS", 80);
-  const coldWallBudgetMs = numberOption("--cold-wall-ms", "EB_SIZE_ANALYSIS_PERF_COLD_WALL_MS", 12000);
-  const warmWallBudgetMs = numberOption("--warm-wall-ms", "EB_SIZE_ANALYSIS_PERF_WARM_WALL_MS", 250);
-  const afterMutationBudgetMs = numberOption("--after-mutation-wall-ms", "EB_SIZE_ANALYSIS_PERF_AFTER_MUTATION_WALL_MS", 12000);
+  const coldWallBudgetMs = numberOption("--cold-wall-ms", "EB_SIZE_ANALYSIS_PERF_COLD_WALL_MS", 2000);
+  const warmWallBudgetMs = numberOption("--warm-wall-ms", "EB_SIZE_ANALYSIS_PERF_WARM_WALL_MS", 50);
+  const afterMutationBudgetMs = numberOption("--after-mutation-wall-ms", "EB_SIZE_ANALYSIS_PERF_AFTER_MUTATION_WALL_MS", 2000);
   const herdCount = Math.max(2, numberOption("--herd-count", "EB_SIZE_ANALYSIS_PERF_HERD_COUNT", 6));
   const isolationOperationCount = Math.max(6, numberOption("--isolation-operations", "EB_SIZE_ANALYSIS_ISOLATION_OPERATIONS", 24));
   const isolationConcurrency = Math.max(1, numberOption("--isolation-concurrency", "EB_SIZE_ANALYSIS_ISOLATION_CONCURRENCY", 6));
@@ -437,6 +440,22 @@ async function main() {
     check(checks, "cold-files-count", Number(cold.summary.files || 0) === count, `${cold.summary.files || 0}/${count} files.`);
     check(checks, "cold-folder-count", Number(cold.summary.folders || 0) === folderCount, `${cold.summary.folders || 0}/${folderCount} folders.`);
     check(checks, "cold-scanned-count", cold.scanned === fixture.expectedScanned, `${cold.scanned}/${fixture.expectedScanned} entries scanned.`);
+    if (process.platform === "win32") {
+      check(
+        checks,
+        "cold-native-single-pass",
+        cold.scanProvider === "native-go-helper-single-pass" &&
+          cold.native?.singlePass === true &&
+          cold.native?.wireFormat === "columns-v1",
+        `provider=${cold.scanProvider || "missing"}; native=${JSON.stringify(cold.native || null)}.`
+      );
+      check(
+        checks,
+        "cold-native-entry-count",
+        Number(cold.native?.scannedEntries || 0) === fixture.expectedScanned,
+        `${cold.native?.scannedEntries || 0}/${fixture.expectedScanned} native entries.`
+      );
+    }
     check(checks, "cold-not-truncated", cold.truncated === false, `truncated=${cold.truncated}.`);
     check(checks, "cold-top-file", cold.topFileNames.includes("largest-video-target.mkv"), cold.topFileNames.join(", "));
     check(checks, "cold-extension-buckets", cold.extensions.length >= 8 && cold.extensions.some((item) => item.extension === ".mkv"), JSON.stringify(cold.extensions));
@@ -464,6 +483,23 @@ async function main() {
       Number(warm.summary.bytes || 0) === Number(cold.summary.bytes || 0) && Number(warm.summary.files || 0) === Number(cold.summary.files || 0),
       `cold=${cold.summary.bytes}/${cold.summary.files}; warm=${warm.summary.bytes}/${warm.summary.files}.`
     );
+
+    const cappedBody = { ...body, maxEntries: Math.max(100, Math.floor(count / 4)) };
+    const cappedCold = await analyze(baseUrl, cappedBody);
+    const cappedWarm = await analyze(baseUrl, cappedBody);
+    check(
+      checks,
+      "capped-cold-truncated",
+      cappedCold.truncated === true && cappedCold.cache?.hit !== true,
+      `truncated=${cappedCold.truncated}; cache=${cappedCold.cache?.source || "missing"}.`
+    );
+    check(
+      checks,
+      "capped-warm-cache-hit",
+      cappedWarm.cache?.hit === true && cappedWarm.cache?.source === "size-analysis-cache",
+      JSON.stringify(cappedWarm.cache || null)
+    );
+    budgetCheck(checks, "capped-warm-wall-budget", cappedWarm.wallMs, warmWallBudgetMs, "Repeat capped scan should reuse the bounded report.");
 
     const isolation = await runAnalyzerIsolation(
       baseUrl,
@@ -625,6 +661,8 @@ async function main() {
       snapshots: {
         cold,
         warm,
+        cappedCold,
+        cappedWarm,
         afterMutation,
         postMutationWarm
       },

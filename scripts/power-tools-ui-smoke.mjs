@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { clickDockAction } from "./ui-helpers.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -135,7 +136,7 @@ async function inspectDialogLayout(page, dialogId) {
 }
 
 async function runFlat(page, checks) {
-  await clickUnique(page, '[data-global-action="flat"]', "Flat toolbar button");
+  await clickDockAction(page, "flat");
   await page.waitForSelector("#flat-dialog[open]", { timeout: 10000 });
   await clickUnique(page, '#flat-form button[type="submit"]', "Flat Run button");
   const result = await waitForResult(
@@ -161,7 +162,7 @@ async function runFlat(page, checks) {
 }
 
 async function runDuplicates(page, checks) {
-  await clickUnique(page, '[data-global-action="duplicates"]', "Duplicates toolbar button");
+  await clickDockAction(page, "duplicates");
   await page.waitForSelector("#duplicates-dialog[open]", { timeout: 10000 });
   await clickUnique(page, '#duplicates-form button[type="submit"]', "Duplicate Scan button");
   const result = await waitForResult(
@@ -194,7 +195,7 @@ async function runDuplicates(page, checks) {
 }
 
 async function runCompareAndPreview(page, checks) {
-  await clickUnique(page, '[data-global-action="compare"]', "Compare toolbar button");
+  await clickDockAction(page, "compare");
   await page.waitForSelector("#compare-dialog[open]", { timeout: 10000 });
   await clickUnique(page, '#compare-form button[type="submit"]', "Compare button");
   const compare = await waitForResult(

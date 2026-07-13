@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { clickDockAction } from "./ui-helpers.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -435,8 +436,7 @@ async function main() {
       timeout: 30000
     });
     await page.waitForSelector('.pane[data-pane="left"] [data-entry-path]', { timeout: 10000 });
-    await page.evaluate(() => document.querySelector('[data-global-action="ops"]')?.scrollIntoView({ block: "nearest" }));
-    await page.locator('[data-global-action="ops"]').click({ timeout: 5000 });
+    await clickDockAction(page, "ops", { timeout: 5000 });
     await waitForPageResult(
       page,
       () => ({

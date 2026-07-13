@@ -19,6 +19,7 @@ for (const stream of [process.stdout, process.stderr]) {
 
 const coreSuites = [
   ["action-inventory", "scripts/action-inventory.mjs", 30000],
+  ["perf-guard", "scripts/perf-guard.mjs", 180000],
   ["security-boundary", "scripts/security-boundary-smoke.mjs", 60000],
   ["operation-preview", "scripts/operation-preview-smoke.mjs", 90000],
   ["transactional-operations", "scripts/transactional-operations-smoke.mjs", 120000],
@@ -26,14 +27,21 @@ const coreSuites = [
   ["crash-recovery", "scripts/crash-recovery-smoke.mjs", 90000],
   ["crash-kill", "scripts/crash-kill-smoke.mjs", 180000],
   ["native-helper", "scripts/native-helper-smoke.mjs", 30000],
-  ["perf-guard", "scripts/perf-guard.mjs", 180000],
+  ["packaged-native-helper", "scripts/packaged-native-helper-smoke.mjs", 60000],
+  ["native-listing-provider", "scripts/native-listing-provider-smoke.mjs", 60000],
   ["size-analysis-perf", "scripts/size-analysis-perf-smoke.mjs", 180000],
   ["size-analysis-cancel", "scripts/size-analysis-cancel-smoke.mjs", 120000],
   ["size-analysis-ui", "scripts/size-analysis-ui-smoke.mjs", 120000],
   ["interaction-resize", "scripts/interaction-resize-smoke.mjs", 180000],
+  ["adaptive-pane-chrome", "scripts/adaptive-pane-chrome-ui-smoke.mjs", 180000],
+  ["workspace-panels-ui", "scripts/workspace-panels-ui-smoke.mjs", 180000],
+  ["startup-recovery-ui", "scripts/startup-recovery-ui-smoke.mjs", 120000],
+  ["pane-activity", "scripts/pane-activity-ui-smoke.mjs", 180000],
+  ["dual-pane-safety", "scripts/dual-pane-safety-ui-smoke.mjs", 180000],
   ["pane-layout", "scripts/pane-layout-no-scrollbars-smoke.mjs", 120000],
   ["layout", "scripts/layout-verify.mjs", 180000],
   ["keyboard", "scripts/keyboard-workflows-ui-smoke.mjs", 180000],
+  ["command-center", "scripts/command-center-ui-smoke.mjs", 180000],
   ["accessibility", "scripts/accessibility-verify.mjs", 180000],
   ["windows-baseline", "scripts/windows-baseline-smoke.mjs", 300000],
   ["large-folder-100k", "scripts/large-folder-ui-verify.mjs", 600000, ["--count=100000", "--viewports=desktop", "--output=large-folder-100k-ui-latest.json", "--screenshot-prefix=large-folder-100k-ui"]],
@@ -105,6 +113,9 @@ function freeLoopbackPort() {
 }
 
 async function runSuite([name, script, timeoutMs, extraArgs = []]) {
+  if (name === "perf-guard") {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
   const suitePort = await freeLoopbackPort();
   return new Promise((resolve) => {
     const before = new Set(workspaceNodeProcesses().map((item) => Number(item.ProcessId)));

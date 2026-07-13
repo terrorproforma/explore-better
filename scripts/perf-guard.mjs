@@ -36,6 +36,11 @@ function guardContentCounts() {
   return optionValue("--content-counts", process.env.EB_PERF_GUARD_CONTENT_COUNTS || "500");
 }
 
+function guardRepetitions() {
+  const value = Number(optionValue("--repetitions", process.env.EB_PERF_GUARD_REPETITIONS || "3"));
+  return Number.isInteger(value) && value >= 1 && value <= 7 ? value : 3;
+}
+
 function guardBudgets() {
   return {
     coldListWallMs: numberOption("--cold-list-wall-ms", 5000),
@@ -224,6 +229,35 @@ function evaluateReport(report, budgets) {
   return checks;
 }
 
+function aggregateCheckRuns(checkRuns) {
+  const templates = checkRuns[0] || [];
+  return templates.map((template) => {
+    const samples = checkRuns.map((checks) => checks.find((check) => check.name === template.name)).filter(Boolean);
+    const numericValues = samples.map((sample) => Number(sample.actual)).filter(Number.isFinite);
+    const completeNumericSet = numericValues.length === checkRuns.length;
+    if (completeNumericSet) {
+      const actual = rounded(median(numericValues));
+      const minimumMatch = typeof template.budget === "string" ? template.budget.match(/^>=\s*([\d.]+)$/) : null;
+      const passed = minimumMatch
+        ? actual >= Number(minimumMatch[1])
+        : Number.isFinite(Number(template.budget)) && actual <= Number(template.budget);
+      return {
+        ...template,
+        status: passed ? "pass" : "fail",
+        actual,
+        samples: numericValues.map(rounded),
+        detail: `${template.detail || ""}${template.detail ? " / " : ""}median of ${checkRuns.length}`
+      };
+    }
+    return {
+      ...template,
+      status: samples.length === checkRuns.length && samples.every((sample) => sample.status === "pass") ? "pass" : "fail",
+      samples: samples.map((sample) => sample.actual),
+      detail: `${template.detail || ""}${template.detail ? " / " : ""}${checkRuns.length} repetitions`
+    };
+  });
+}
+
 async function readTrendHistory() {
   try {
     const text = await fs.readFile(trendHistoryPath, "utf8");
@@ -256,9 +290,18 @@ function trendableMetrics(checks) {
     }));
 }
 
-function historyMetricValues(history, metricName) {
+function trendMethodology(guardReport) {
+  return Number(guardReport.repetitions) > 1 ? "fresh-process-median-v1" : "single-process-v1";
+}
+
+function entryMethodology(entry) {
+  return entry.methodology || "single-process-v1";
+}
+
+function historyMetricValues(history, metricName, methodology) {
   const values = [];
   for (const entry of history) {
+    if (entryMethodology(entry) !== methodology) continue;
     const metric = (entry.metrics || []).find((item) => item.name === metricName);
     if (metric && Number.isFinite(Number(metric.actual))) {
       values.push(Number(metric.actual));
@@ -269,10 +312,12 @@ function historyMetricValues(history, metricName) {
 
 function buildTrendReport(history, guardReport, benchmark) {
   const metrics = trendableMetrics(guardReport.checks);
+  const methodology = trendMethodology(guardReport);
+  const comparableHistory = history.filter((entry) => entryMethodology(entry) === methodology);
   const factor = trendRegressionFactor();
   const minimumDeltaMs = trendMinimumDeltaMs();
   const comparisons = metrics.map((metric) => {
-    const previousValues = historyMetricValues(history, metric.name);
+    const previousValues = historyMetricValues(history, metric.name, methodology);
     const previousMedian = median(previousValues);
     const deltaMs = previousMedian === null ? null : rounded(metric.actual - previousMedian);
     const ratio = previousMedian && previousMedian > 0 ? rounded(metric.actual / previousMedian) : null;
@@ -301,9 +346,11 @@ function buildTrendReport(history, guardReport, benchmark) {
   return {
     generatedAt: new Date().toISOString(),
     status: regressions.length ? "watch" : "ok",
+    methodology,
     factor,
     minimumDeltaMs,
-    historyEntries: history.length,
+    historyEntries: comparableHistory.length,
+    totalHistoryEntries: history.length,
     benchmark: benchmarkJsonPath,
     guard: guardJsonPath,
     environment: {
@@ -322,6 +369,8 @@ function historyEntryFromReports(guardReport, benchmark, trendReport) {
     generatedAt: guardReport.generatedAt,
     status: guardReport.status,
     trendStatus: trendReport.status,
+    methodology: trendMethodology(guardReport),
+    repetitions: guardReport.repetitions || 1,
     environment: {
       platform: benchmark.platform,
       cpuCount: benchmark.cpuCount,
@@ -357,6 +406,8 @@ Status: ${report.status}
 Benchmark: \`${benchmarkJsonPath}\`
 
 Trend: \`${trendJsonPath}\`
+
+Measured repetitions: ${report.repetitions}; numeric checks use the median and functional checks must pass every run.
 
 | Status | Check | Actual | Budget | Detail |
 | --- | --- | ---: | ---: | --- |
@@ -395,7 +446,9 @@ Generated: ${report.generatedAt}
 
 Status: ${report.status}
 
-History entries before this run: ${report.historyEntries}
+Methodology: ${report.methodology}
+
+Comparable history entries before this run: ${report.historyEntries} of ${report.totalHistoryEntries}
 
 Regression threshold: ${report.factor}x and at least ${report.minimumDeltaMs} ms slower than historical median.
 
@@ -428,23 +481,33 @@ async function main() {
   if (fixture) {
     benchmarkArgs.push(`--fixture=${fixture}`);
   }
-  const result = await runProcess(process.execPath, benchmarkArgs);
-  if (result.stdout.trim()) {
-    console.log(result.stdout.trim());
-  }
-  if (result.stderr.trim()) {
-    console.error(result.stderr.trim());
-  }
-  if (result.code !== 0) {
-    throw new Error(`Performance benchmark failed with exit code ${result.code}.`);
+  const repetitions = guardRepetitions();
+  const benchmarks = [];
+  const checkRuns = [];
+  for (let repetition = 1; repetition <= repetitions; repetition += 1) {
+    const result = await runProcess(process.execPath, benchmarkArgs);
+    if (result.stdout.trim()) {
+      console.log(`[perf guard ${repetition}/${repetitions}]\n${result.stdout.trim()}`);
+    }
+    if (result.stderr.trim()) {
+      console.error(result.stderr.trim());
+    }
+    if (result.code !== 0) {
+      throw new Error(`Performance benchmark repetition ${repetition} failed with exit code ${result.code}.`);
+    }
+    const sample = JSON.parse(await fs.readFile(benchmarkJsonPath, "utf8"));
+    benchmarks.push(sample);
+    checkRuns.push(evaluateReport(sample, budgets));
   }
 
-  const benchmark = JSON.parse(await fs.readFile(benchmarkJsonPath, "utf8"));
-  const checks = evaluateReport(benchmark, budgets);
+  const benchmark = benchmarks[benchmarks.length - 1];
+  const checks = aggregateCheckRuns(checkRuns);
   const failures = checks.filter((check) => check.status === "fail");
   const guardReport = {
     generatedAt: new Date().toISOString(),
     status: failures.length ? "fail" : "pass",
+    repetitions,
+    sampleGeneratedAt: benchmarks.map((sample) => sample.generatedAt),
     budgets,
     benchmark: benchmarkJsonPath,
     checks,

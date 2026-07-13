@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { clickDockAction } from "./ui-helpers.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -145,6 +146,13 @@ async function inspectAnalyzer(page) {
     return {
       summary: document.getElementById("size-analysis-summary")?.textContent?.trim() || "",
       mapDetail: document.getElementById("size-analysis-map-detail")?.textContent?.trim().replace(/\s+/g, " ") || "",
+      mapBreadcrumbs: document.getElementById("size-analysis-map-breadcrumbs")?.textContent?.trim().replace(/\s+/g, " ") || "",
+      mapControls: Object.fromEntries(
+        [...document.querySelectorAll("[data-size-analysis-map-action]")].map((button) => [
+          button.dataset.sizeAnalysisMapAction,
+          { disabled: button.disabled, text: button.textContent.trim() }
+        ])
+      ),
       scanStrip: document.getElementById("size-analysis-scan-strip")?.textContent?.trim().replace(/\s+/g, " ") || "",
       metrics: textList("#size-analysis-metrics .size-analysis-metric"),
       folders: textList("#size-analysis-folders .size-analysis-row"),
@@ -174,13 +182,18 @@ async function inspectAnalyzer(page) {
   });
 }
 
-async function hoverTreemapFile(page, fileName) {
+async function hoverTreemapItem(page, itemName) {
   const canvas = page.locator("#size-analysis-treemap");
   const box = await canvas.boundingBox();
   if (!box) {
     return null;
   }
   const samplePoints = [
+    [0.05, 0.025],
+    [0.2, 0.025],
+    [0.4, 0.025],
+    [0.65, 0.025],
+    [0.85, 0.025],
     [0.05, 0.08],
     [0.12, 0.18],
     [0.2, 0.3],
@@ -197,7 +210,7 @@ async function hoverTreemapFile(page, fileName) {
     await page.mouse.move(x, y);
     await page.waitForTimeout(40);
     const detail = await page.locator("#size-analysis-map-detail").textContent().catch(() => "");
-    if (detail && detail.toLowerCase().includes(fileName.toLowerCase())) {
+    if (detail && detail.toLowerCase().includes(itemName.toLowerCase())) {
       return { x, y, detail: detail.trim().replace(/\s+/g, " ") };
     }
   }
@@ -247,8 +260,18 @@ async function main() {
   let ui = null;
   let apiReport = null;
   let treemapHit = null;
+  let treemapFolderHit = null;
+  let treemapPinnedDetail = "";
+  let treemapFocused = null;
+  let treemapRooted = null;
+  let treemapKeyboardDetail = "";
+  let mapWorkspace = null;
+  let mapEncoding = null;
+  let overviewRestored = null;
+  let staleReportProbe = null;
   let screenshot = null;
   let cancelProbe = null;
+  let warmRenderProbe = null;
   try {
     await waitForServer(baseUrl, server, () => serverOutput);
     apiReport = await requestJson(baseUrl, "/api/size-analysis", {
@@ -322,7 +345,7 @@ async function main() {
     });
     await page.goto(`${baseUrl}/?left=${encodeURIComponent(fixture)}&right=${encodeURIComponent(fixture)}`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector('.pane[data-pane="left"] [data-entry-path]', { timeout: 10000 });
-    await page.locator('[data-global-action="sizeAnalysis"]').click();
+    await clickDockAction(page, "sizeAnalysis");
     await page.waitForSelector("#size-analysis-dialog[open]", { timeout: 10000 });
 
     await page.locator('[data-size-analysis-action="scan"]').click();
@@ -371,9 +394,44 @@ async function main() {
       null,
       { timeout: 10000 }
     );
-    treemapHit = await hoverTreemapFile(page, "movie.mkv");
+    await page.evaluate(() => {
+      window.__exploreBetterWarmFileNode = document.querySelector("#size-analysis-files .size-analysis-row");
+      window.__exploreBetterWarmCanvasLabel = document.getElementById("size-analysis-treemap")?.getAttribute("aria-label") || "";
+    });
+    const warmRenderStarted = performance.now();
+    await page.locator('[data-size-analysis-action="scan"]').click();
+    await page.waitForFunction(
+      () =>
+        /Warm cache/i.test(document.getElementById("size-analysis-scan-strip")?.textContent || "") &&
+        document.getElementById("size-analysis-cancel")?.disabled === true,
+      null,
+      { timeout: 5000 }
+    );
+    warmRenderProbe = await page.evaluate((wallMs) => ({
+      wallMs,
+      sameFileNode: window.__exploreBetterWarmFileNode === document.querySelector("#size-analysis-files .size-analysis-row"),
+      sameCanvasLabel:
+        window.__exploreBetterWarmCanvasLabel === (document.getElementById("size-analysis-treemap")?.getAttribute("aria-label") || ""),
+      strip: document.getElementById("size-analysis-scan-strip")?.textContent?.trim().replace(/\s+/g, " ") || ""
+    }), Math.round((performance.now() - warmRenderStarted) * 10) / 10);
+    treemapFolderHit = await hoverTreemapItem(page, "media");
+    if (treemapFolderHit) {
+      await page.mouse.click(treemapFolderHit.x, treemapFolderHit.y);
+      await page.mouse.move(5, 5);
+      treemapPinnedDetail = (await page.locator("#size-analysis-map-detail").textContent()).trim().replace(/\s+/g, " ");
+      await page.mouse.dblclick(treemapFolderHit.x, treemapFolderHit.y, { delay: 30 });
+      await page.waitForFunction(() => /media/i.test(document.getElementById("size-analysis-map-breadcrumbs")?.textContent || ""));
+      treemapFocused = await page.evaluate(() => ({
+        breadcrumbs: document.getElementById("size-analysis-map-breadcrumbs")?.textContent?.trim().replace(/\s+/g, " ") || "",
+        ariaLabel: document.getElementById("size-analysis-treemap")?.getAttribute("aria-label") || "",
+        rootDisabled: document.querySelector('[data-size-analysis-map-action="root"]')?.disabled ?? true,
+        upDisabled: document.querySelector('[data-size-analysis-map-action="up"]')?.disabled ?? true
+      }));
+    }
+    treemapHit = await hoverTreemapItem(page, "movie.mkv");
     if (treemapHit) {
       await page.mouse.click(treemapHit.x, treemapHit.y);
+      await page.locator('[data-size-analysis-map-action="open"]').click();
       await page.waitForFunction(
         () =>
           [...document.querySelectorAll('.pane[data-pane="left"] [data-entry-path][aria-selected="true"]')].some((element) =>
@@ -383,9 +441,56 @@ async function main() {
         { timeout: 10000 }
       );
     }
+    await page.locator('[data-size-analysis-map-action="root"]').click();
+    treemapRooted = await page.evaluate(() => ({
+      breadcrumbs: document.getElementById("size-analysis-map-breadcrumbs")?.textContent?.trim().replace(/\s+/g, " ") || "",
+      rootDisabled: document.querySelector('[data-size-analysis-map-action="root"]')?.disabled ?? false,
+      upDisabled: document.querySelector('[data-size-analysis-map-action="up"]')?.disabled ?? false
+    }));
+    await page.locator("#size-analysis-treemap").focus();
+    await page.keyboard.press("ArrowRight");
+    treemapKeyboardDetail = (await page.locator("#size-analysis-map-detail").textContent()).trim().replace(/\s+/g, " ");
+    const overviewCanvas = await page.locator("#size-analysis-treemap").boundingBox();
+    await page.locator('[data-size-analysis-view="map"]').click();
+    await page.waitForTimeout(120);
+    mapWorkspace = await page.evaluate((overviewHeight) => {
+      const canvas = document.getElementById("size-analysis-treemap");
+      const rect = canvas?.getBoundingClientRect();
+      return {
+        dialogClass: document.getElementById("size-analysis-dialog")?.className || "",
+        selectedTab: document.querySelector('[data-size-analysis-view="map"]')?.getAttribute("aria-selected") || "",
+        overviewDisplay: getComputedStyle(document.querySelector(".size-analysis-main")).display,
+        canvasWidth: Math.round(rect?.width || 0),
+        canvasHeight: Math.round(rect?.height || 0),
+        overviewHeight: Math.round(overviewHeight || 0)
+      };
+    }, overviewCanvas?.height || 0);
+    await page.locator("#size-analysis-size-by").selectOption("allocated");
+    await page.locator("#size-analysis-color-by").selectOption("folder");
+    await page.waitForTimeout(120);
+    mapEncoding = await page.evaluate(() => ({
+      sizeMode: document.getElementById("size-analysis-size-by")?.value || "",
+      colorMode: document.getElementById("size-analysis-color-by")?.value || "",
+      ariaLabel: document.getElementById("size-analysis-treemap")?.getAttribute("aria-label") || "",
+      legend: document.getElementById("size-analysis-map-legend")?.textContent?.trim().replace(/\s+/g, " ") || ""
+    }));
+    await page.locator('[data-size-analysis-view="overview"]').click();
+    await page.waitForTimeout(120);
+    overviewRestored = await page.evaluate(() => ({
+      selectedTab: document.querySelector('[data-size-analysis-view="overview"]')?.getAttribute("aria-selected") || "",
+      mainDisplay: getComputedStyle(document.querySelector(".size-analysis-main")).display,
+      folderDisplay: getComputedStyle(document.querySelector(".size-analysis-folder-panel")).display
+    }));
     ui = await inspectAnalyzer(page);
     screenshot = path.join(artifactsDir, "size-analysis-ui-latest.png");
     await page.screenshot({ path: screenshot, fullPage: true });
+    await page.locator('[data-close-dialog="size-analysis-dialog"]').click();
+    await page.locator('[data-topbar-action="sizeAnalysis"]').click();
+    staleReportProbe = await page.evaluate(() => ({
+      path: document.getElementById("size-analysis-path")?.value || "",
+      summary: document.getElementById("size-analysis-summary")?.textContent?.trim() || "",
+      ariaLabel: document.getElementById("size-analysis-treemap")?.getAttribute("aria-label") || ""
+    }));
 
     check(checks, "api-summary-bytes", Number(apiReport.summary?.bytes || 0) > 700000, `${apiReport.summary?.bytes || 0} bytes`);
     check(
@@ -401,10 +506,17 @@ async function main() {
         (item) =>
           item.extension === ".mkv" &&
           Number(item.allocated || 0) >= Number(item.size || 0) &&
-          typeof item.category === "string" &&
-          item.category.length > 0
+          item.category === "Video"
       ),
       JSON.stringify((apiReport.extensions || []).slice(0, 6))
+    );
+    check(
+      checks,
+      "api-category-totals",
+      ["Video", "Images", "Archives", "Documents"].every((category) =>
+        (apiReport.categories || []).some((item) => item.category === category && Number(item.files || 0) > 0)
+      ),
+      JSON.stringify(apiReport.categories || [])
     );
     check(checks, "ui-cancel-request-intercepted", cancelProbe.intercepted === true, JSON.stringify(cancelProbe));
     check(
@@ -429,7 +541,19 @@ async function main() {
       JSON.stringify(apiReport.space || null)
     );
     check(checks, "ui-summary-ready", /file/i.test(ui.summary), ui.summary);
-    check(checks, "ui-scan-strip-complete", /Scan complete/i.test(ui.scanStrip), ui.scanStrip);
+    check(
+      checks,
+      "ui-warm-render-preserves-map",
+      warmRenderProbe?.sameFileNode === true && warmRenderProbe?.sameCanvasLabel === true,
+      JSON.stringify(warmRenderProbe)
+    );
+    check(
+      checks,
+      "ui-warm-render-budget",
+      Number(warmRenderProbe?.wallMs || Infinity) <= 250,
+      JSON.stringify(warmRenderProbe)
+    );
+    check(checks, "ui-scan-strip-complete", /Scan complete|Warm cache/i.test(ui.scanStrip), ui.scanStrip);
     check(checks, "ui-drive-metric", ui.metrics.some((row) => /Drive Free/i.test(row)), ui.metrics.join(" | "));
     check(checks, "ui-allocated-metric", ui.metrics.some((row) => /Allocated/i.test(row)), ui.metrics.join(" | "));
     check(checks, "ui-top-folder-media", ui.folders.some((row) => row.includes("media")), ui.folders.slice(0, 4).join(" | "));
@@ -460,14 +584,83 @@ async function main() {
     );
     check(
       checks,
-      "ui-treemap-click-selects-file",
+      "ui-treemap-open-selection",
       ui.selectedEntries.some((entryPath) => /movie\.mkv$/i.test(entryPath)),
       ui.selectedEntries.join(" | ")
     );
     check(
       checks,
+      "ui-treemap-click-pins-selection",
+      /media/i.test(treemapPinnedDetail),
+      treemapPinnedDetail || "No pinned map detail"
+    );
+    check(
+      checks,
+      "ui-treemap-folder-drilldown",
+      /media/i.test(treemapFocused?.breadcrumbs || "") && /focused on media/i.test(treemapFocused?.ariaLabel || ""),
+      JSON.stringify(treemapFocused)
+    );
+    check(
+      checks,
+      "ui-treemap-drill-controls",
+      treemapFocused?.rootDisabled === false && treemapFocused?.upDisabled === false,
+      JSON.stringify(treemapFocused)
+    );
+    check(
+      checks,
+      "ui-treemap-root-reset",
+      treemapRooted?.rootDisabled === true && treemapRooted?.upDisabled === true && !/media/i.test(treemapRooted?.breadcrumbs || ""),
+      JSON.stringify(treemapRooted)
+    );
+    check(
+      checks,
+      "ui-treemap-keyboard-selection",
+      Boolean(treemapKeyboardDetail) && !/No map selection|Scan to map/i.test(treemapKeyboardDetail),
+      treemapKeyboardDetail
+    );
+    check(
+      checks,
+      "ui-map-workspace-expands-canvas",
+      /map-view/.test(mapWorkspace?.dialogClass || "") &&
+        mapWorkspace?.selectedTab === "true" &&
+        mapWorkspace?.overviewDisplay === "none" &&
+        Number(mapWorkspace?.canvasHeight || 0) >= Number(mapWorkspace?.overviewHeight || 0) + 40,
+      JSON.stringify(mapWorkspace)
+    );
+    check(
+      checks,
+      "ui-map-encoding-controls",
+      mapEncoding?.sizeMode === "allocated" &&
+        mapEncoding?.colorMode === "folder" &&
+        /sized by allocated bytes/i.test(mapEncoding?.ariaLabel || "") &&
+        /colored by top folder/i.test(mapEncoding?.ariaLabel || "") &&
+        /media|photos|archives|docs/i.test(mapEncoding?.legend || ""),
+      JSON.stringify(mapEncoding)
+    );
+    check(
+      checks,
+      "ui-overview-restores-tables",
+      overviewRestored?.selectedTab === "true" && overviewRestored?.mainDisplay === "grid" && overviewRestored?.folderDisplay !== "none",
+      JSON.stringify(overviewRestored)
+    );
+    check(
+      checks,
+      "ui-treemap-stale-report-cleared",
+      /movie\.mkv$/i.test(staleReportProbe?.path || "") &&
+        /Ready/i.test(staleReportProbe?.summary || "") &&
+        /Scan to draw/i.test(staleReportProbe?.ariaLabel || ""),
+      JSON.stringify(staleReportProbe)
+    );
+    check(
+      checks,
       "ui-treemap-accessible-label",
       /mapped file block/i.test(ui.canvas.ariaLabel),
+      ui.canvas.ariaLabel
+    );
+    check(
+      checks,
+      "ui-treemap-folder-groups",
+      /inside [1-9][0-9,]* folder group/i.test(ui.canvas.ariaLabel),
       ui.canvas.ariaLabel
     );
     check(checks, "ui-layout-clean", ui.layoutIssues.length === 0, `${ui.layoutIssues.length} clipped/squished analyzer control(s).`);
@@ -492,9 +685,19 @@ async function main() {
     fixture,
     screenshot,
     treemapHit,
+    treemapFolderHit,
+    treemapPinnedDetail,
+    treemapFocused,
+    treemapRooted,
+    treemapKeyboardDetail,
+    mapWorkspace,
+    mapEncoding,
+    overviewRestored,
+    staleReportProbe,
     apiReport,
     ui,
     cancelProbe,
+    warmRenderProbe,
     pageErrors,
     consoleMessages,
     failedResponses,

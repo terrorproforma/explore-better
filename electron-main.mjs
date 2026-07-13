@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, nativeImage, shell } from "electron";
 import { spawn } from "node:child_process";
+import { randomBytes, randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -7,7 +8,16 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const host = process.env.HOST || "127.0.0.1";
-const port = Number(process.env.PORT || 4627);
+const port = Number(process.env.PORT || randomInt(43000, 62000));
+const desktopInstanceToken =
+  process.env.EXPLORE_BETTER_DESKTOP_INSTANCE_TOKEN || randomBytes(24).toString("base64url");
+process.env.HOST = host;
+process.env.PORT = String(port);
+process.env.EXPLORE_BETTER_DESKTOP_INSTANCE_TOKEN = desktopInstanceToken;
+if (app.isPackaged && !process.env.EXPLORE_BETTER_WORKSPACE_ROOT) {
+  process.env.EXPLORE_BETTER_WORKSPACE_ROOT = app.getPath("desktop");
+  process.env.EXPLORE_BETTER_WORKSPACE_LABEL = "Desktop";
+}
 const baseUrl = `http://${host}:${port}`;
 const dragIconPath = path.join(__dirname, "public", "drag-file.png");
 const updateFeedUrl = process.env.EXPLORE_BETTER_UPDATE_URL || process.env.EB_UPDATE_URL || "";
@@ -34,6 +44,7 @@ const smokeMode = process.argv.includes("--smoke");
 const smokeWindowMode = process.argv.includes("--smoke-window");
 const smokeBackendRestartMode = process.argv.includes("--smoke-backend-restart");
 const smokeUpdateFeedMode = process.argv.includes("--smoke-update-feed");
+const smokeNativeHelperMode = process.argv.includes("--smoke-native-helper");
 const noUpdatesMode = process.argv.includes("--no-updates");
 const disableGpuMode =
   smokeMode ||
@@ -56,9 +67,18 @@ const backendWatchdogIntervalMs = Math.max(
   500,
   Number(process.env.EXPLORE_BETTER_BACKEND_WATCHDOG_MS || process.env.EB_BACKEND_WATCHDOG_MS || 2500)
 );
+const backendHealthTimeoutMs = Math.max(
+  800,
+  Number(process.env.EXPLORE_BETTER_BACKEND_HEALTH_TIMEOUT_MS || process.env.EB_BACKEND_HEALTH_TIMEOUT_MS || 1800)
+);
+const backendWatchdogMissThreshold = Math.max(
+  2,
+  Number(process.env.EXPLORE_BETTER_BACKEND_MISS_THRESHOLD || process.env.EB_BACKEND_MISS_THRESHOLD || 3)
+);
 let backendMonitor = null;
 let backendRecoveryPromise = null;
 let backendRestartCount = 0;
+let backendConsecutiveHealthMisses = 0;
 let backendLastEvent = {
   type: "idle",
   message: "Backend has not been checked yet.",
@@ -266,14 +286,28 @@ function startNativeFileDrag(sender, paths) {
   return true;
 }
 
-function serverIsReady() {
+function serverIsReady(timeoutMs = backendHealthTimeoutMs) {
   return new Promise((resolve) => {
-    const request = http.get(`${baseUrl}/api/roots`, (response) => {
-      response.resume();
-      resolve(response.statusCode >= 200 && response.statusCode < 500);
+    const request = http.get(`${baseUrl}/api/desktop/health`, (response) => {
+      let body = "";
+      response.on("data", (chunk) => {
+        body = `${body}${chunk.toString()}`.slice(0, 8192);
+      });
+      response.on("end", () => {
+        if (response.statusCode !== 200) {
+          resolve(false);
+          return;
+        }
+        try {
+          const status = JSON.parse(body);
+          resolve(status?.ok === true && status?.desktopInstanceToken === desktopInstanceToken);
+        } catch {
+          resolve(false);
+        }
+      });
     });
     request.on("error", () => resolve(false));
-    request.setTimeout(800, () => {
+    request.setTimeout(timeoutMs, () => {
       request.destroy();
       resolve(false);
     });
@@ -366,20 +400,35 @@ async function ensureServer() {
   }
 
   rememberBackendEvent("starting", "Starting child backend server.", { kind: "child" });
-  serverProcess = spawn("node", ["server.mjs"], {
+  const child = spawn(process.execPath, [path.join(__dirname, "server.mjs")], {
     cwd: __dirname,
     env: {
       ...process.env,
       HOST: host,
-      PORT: String(port)
+      PORT: String(port),
+      ELECTRON_RUN_AS_NODE: "1"
     },
     stdio: "ignore",
     windowsHide: true
   });
-  serverProcess.once("exit", (code, signal) => {
-    rememberBackendEvent("exited", "Child backend server exited.", { kind: "child", code, signal });
-    serverProcess = null;
+  serverProcess = child;
+  let spawnError = null;
+  child.once("error", (error) => {
+    spawnError = error;
+    rememberBackendEvent("error", error?.message || "Child backend process failed to start.", { kind: "child" });
+    if (serverProcess === child) serverProcess = null;
   });
+  child.once("exit", (code, signal) => {
+    rememberBackendEvent("exited", "Child backend server exited.", { kind: "child", code, signal });
+    if (serverProcess === child) serverProcess = null;
+  });
+  await new Promise((resolve) => {
+    child.once("spawn", resolve);
+    child.once("error", resolve);
+  });
+  if (spawnError) {
+    throw new Error(`Explore Better child backend failed to start: ${spawnError.message}`);
+  }
   if (!(await waitForServer())) {
     rememberBackendEvent("error", `Explore Better server did not start at ${baseUrl}`, { kind: "child" });
     throw new Error(`Explore Better server did not start at ${baseUrl}`);
@@ -405,6 +454,7 @@ async function recoverBackend(reason = "watchdog") {
     if (!(await serverIsReady())) {
       throw new Error(`Backend recovery did not restore ${baseUrl}`);
     }
+    backendConsecutiveHealthMisses = 0;
     rememberBackendEvent("recovered", `Backend recovered after ${reason}.`, { reason });
     if (mainWindow && !mainWindow.isDestroyed()) {
       const currentUrl = mainWindow.webContents.getURL();
@@ -430,7 +480,17 @@ function startBackendMonitor() {
     if (!mainWindow || mainWindow.isDestroyed() || backendRecoveryPromise) {
       return;
     }
-    if (!(await serverIsReady())) {
+    if (await serverIsReady()) {
+      backendConsecutiveHealthMisses = 0;
+      return;
+    }
+    backendConsecutiveHealthMisses += 1;
+    rememberBackendEvent("degraded", `Backend health check missed ${backendConsecutiveHealthMisses}/${backendWatchdogMissThreshold}.`, {
+      misses: backendConsecutiveHealthMisses,
+      threshold: backendWatchdogMissThreshold
+    });
+    if (backendConsecutiveHealthMisses >= backendWatchdogMissThreshold) {
+      backendConsecutiveHealthMisses = 0;
       recoverBackend("watchdog").catch((error) => console.error(error));
     }
   }, backendWatchdogIntervalMs);
@@ -483,6 +543,28 @@ async function rendererVisibleRows() {
   }
   return mainWindow.webContents.executeJavaScript(
     "new Promise((resolve) => { const done = () => resolve(document.querySelectorAll('[data-entry-path]').length); const started = Date.now(); const tick = () => { const rows = document.querySelectorAll('[data-entry-path]').length; if (rows || Date.now() - started > 5000) return resolve(rows); setTimeout(tick, 80); }; tick(); })"
+  );
+}
+
+async function runNativeHelperSmoke() {
+  const targetPath = process.env.EXPLORE_BETTER_NATIVE_SMOKE_PATH || __dirname;
+  const response = await fetch(`${baseUrl}/api/size-analysis`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: targetPath, maxEntries: 10000, followLinks: false })
+  });
+  const report = await response.json();
+  console.log(
+    `Explore Better packaged native helper: provider=${report?.allocationProvider || "missing"} accuracy=${
+      report?.allocationAccuracy || "missing"
+    } source=${report?.allocatedSource || "missing"} scanned=${report?.scanned || 0}`
+  );
+  return Boolean(
+    response.ok &&
+      report?.allocationProvider === "native-go-helper" &&
+      report?.allocationAccuracy === "exact" &&
+      report?.allocatedSource === "win32-get-compressed-file-size" &&
+      Number(report?.scanned || 0) > 0
   );
 }
 
@@ -688,6 +770,9 @@ if (!hasSingleInstanceLock) {
               }
             }
             if (smokeBackendRestartMode && !(await runBackendRestartSmoke())) {
+              return exitSmoke(1);
+            }
+            if (smokeNativeHelperMode && !(await runNativeHelperSmoke())) {
               return exitSmoke(1);
             }
             if (smokeUpdateFeedMode) {

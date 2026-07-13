@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -33,8 +34,25 @@ function skipDesktopSmoke() {
   return process.argv.includes("--skip-desktop-smoke") || process.env.EB_RELEASE_SKIP_DESKTOP_SMOKE === "1";
 }
 
-function randomPort() {
-  return 54000 + Math.floor(Math.random() * 8000);
+function freeLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      probe.close((error) => {
+        if (error) reject(error);
+        else resolve(port);
+      });
+    });
+  });
+}
+
+function isRetryableDesktopBindFailure(result) {
+  return /EACCES|EADDRINUSE|permission denied|address already in use/i.test(
+    `${result?.error || ""}\n${result?.stderr || ""}\n${result?.stdout || ""}`
+  );
 }
 
 function limitedAppend(current, chunk, limit = 24000) {
@@ -697,20 +715,25 @@ async function verifyDesktopSmoke(checks) {
     );
     return null;
   }
-  const port = randomPort();
   const command = process.platform === "win32" ? "cmd.exe" : "npm";
   const args =
     process.platform === "win32" ? ["/d", "/s", "/c", "npm run desktop:smoke-window"] : ["run", "desktop:smoke-window"];
-  const result = await runCommand(command, args, {
-    timeoutMs: 90000,
-    env: {
-      HOST: "127.0.0.1",
-      PORT: String(port),
-      LOCALAPPDATA: appData,
-      APPDATA: appData,
-      EXPLORE_BETTER_USER_DATA_DIR: path.join(appData, "ElectronUserData")
-    }
-  });
+  let result = null;
+  let attempts = 0;
+  for (; attempts < 4; attempts += 1) {
+    const port = await freeLoopbackPort();
+    result = await runCommand(command, args, {
+      timeoutMs: 90000,
+      env: {
+        HOST: "127.0.0.1",
+        PORT: String(port),
+        LOCALAPPDATA: appData,
+        APPDATA: appData,
+        EXPLORE_BETTER_USER_DATA_DIR: path.join(appData, "ElectronUserData")
+      }
+    });
+    if (!isRetryableDesktopBindFailure(result)) break;
+  }
   const ok = result.code === 0 && !result.timedOut && !result.error;
   requireCheck(
     checks,
@@ -718,7 +741,7 @@ async function verifyDesktopSmoke(checks) {
     "desktop-smoke-window",
     "Electron desktop bridge smoke",
     ok
-      ? "desktop:smoke-window exited cleanly."
+      ? `desktop:smoke-window exited cleanly after ${attempts + 1} attempt(s).`
       : result.timedOut
         ? "desktop:smoke-window timed out."
         : result.error || `Exit ${result.code}: ${result.stderr || result.stdout}`
@@ -773,7 +796,8 @@ async function main() {
   await seedReleaseState();
   await readPackageJson(checks);
   const packagedApp = await verifyPackageArtifact(checks);
-  const port = Number(optionValue("--port", process.env.PORT || randomPort()));
+  const configuredPort = optionValue("--port", process.env.PORT || "");
+  const port = configuredPort ? Number(configuredPort) : await freeLoopbackPort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const server = startServer(port);
   let integration = null;

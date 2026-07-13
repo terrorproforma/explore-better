@@ -18,6 +18,13 @@
           </div>
         </div>
         <div class="root-strip" id="root-strip" aria-label="Roots"></div>
+        <div class="topbar-actions" aria-label="Primary commands">
+          <button type="button" data-topbar-action="search" title="Search the active folder"><span class="lucide-icon icon-search" aria-hidden="true"></span><span>Search</span></button>
+          <button type="button" class="topbar-disk-map" data-topbar-action="sizeAnalysis" title="Open the hierarchical disk usage map"><span class="lucide-icon icon-disk-map" aria-hidden="true"></span><span>Disk Map</span></button>
+          <button type="button" data-topbar-action="ops" title="View file operations and recovery"><span class="lucide-icon icon-operations" aria-hidden="true"></span><span>Operations</span></button>
+          <button type="button" data-topbar-action="palette" title="Find any command (Ctrl+P)"><span class="lucide-icon icon-command" aria-hidden="true"></span><span>Command</span></button>
+          <button type="button" data-topbar-action="focus" title="Toggle file-focused workspace (F9)"><span class="lucide-icon icon-focus" aria-hidden="true"></span><span>Focus</span></button>
+        </div>
         <div class="status-pill" id="status-pill">Ready</div>
       </header>
 
@@ -28,6 +35,9 @@
             <div class="nav-title-actions">
               <button data-nav-action="manage-favorites" title="Manage favorites">Edit</button>
               <button class="icon-button" data-nav-action="favorite-active" title="Favorite active path">+</button>
+              <button class="icon-button workspace-panel-button" data-panel-action="navigator" title="Hide navigator" aria-label="Hide navigator" aria-pressed="true">
+                <span class="lucide-icon icon-panel-left-close" aria-hidden="true"></span>
+              </button>
             </div>
           </div>
           <section class="nav-section" aria-labelledby="nav-favorites-title">
@@ -74,39 +84,53 @@
         <div class="layout-resizer nav-resizer" data-layout-resize="nav" role="separator" aria-label="Resize navigator"></div>
 
         <section class="pane active" data-pane="left" aria-label="Left pane">
-          <div class="tabbar" data-tabs="left"></div>
+          <div class="tabbar" data-tabs="left">
+            <span class="pane-status-cluster">
+              <span class="pane-activity-badge idle" data-pane-activity="left" role="status" aria-live="polite" aria-label="Left pane ready" title="Ready">
+                <span class="pane-activity-dot" aria-hidden="true"></span>
+                <span data-pane-activity-text="left">Ready</span>
+              </span>
+              <span class="pane-role-badge source" data-pane-role="left">SOURCE</span>
+            </span>
+          </div>
           <div class="pathbar">
-            <button class="icon-button" data-action="back" data-pane="left" title="Back">&lt;</button>
-            <button class="icon-button" data-action="forward" data-pane="left" title="Forward">&gt;</button>
-            <button class="icon-button" data-action="history" data-pane="left" title="Pane history">H</button>
-            <button class="icon-button" data-action="up" data-pane="left" title="Up">..</button>
+            <button class="icon-button nav-icon" data-action="back" data-pane="left" title="Back" aria-label="Back">&#8592;</button>
+            <button class="icon-button nav-icon" data-action="forward" data-pane="left" title="Forward" aria-label="Forward">&#8594;</button>
+            <button class="icon-button nav-icon" data-action="history" data-pane="left" title="Pane history" aria-label="Pane history">&#8634;</button>
+            <button class="icon-button nav-icon" data-action="up" data-pane="left" title="Up" aria-label="Up">&#8593;</button>
             <input class="path-input" data-path-input="left" aria-label="Left path" />
-            <button class="icon-button" data-action="refresh" data-pane="left" title="Refresh">R</button>
+            <button class="icon-button nav-icon" data-action="refresh" data-pane="left" title="Refresh" aria-label="Refresh">&#10227;</button>
+            <button class="icon-button nav-icon compact-breadcrumb-toggle" data-compact-breadcrumbs="left" title="Show breadcrumbs" aria-label="Show breadcrumbs" aria-expanded="false"><span class="breadcrumb-glyph" aria-hidden="true"></span></button>
             <div class="path-suggest" data-path-suggest="left" hidden></div>
             <div class="breadcrumb-strip" data-breadcrumbs="left" aria-label="Left breadcrumbs"></div>
           </div>
           <div class="toolbar">
             <input class="filter-input" data-filter="left" placeholder="Filter" aria-label="Filter left pane" />
-            <select class="kind-filter" data-kind-filter="left" aria-label="Kind filter left pane"></select>
-            <select class="label-filter" data-label-filter="left" aria-label="Label filter left pane"></select>
             <div class="view-toggle" aria-label="Left view mode">
-              <button data-view-mode="details" data-pane="left" title="Details view">D</button>
-              <button data-view-mode="compact" data-pane="left" title="Compact view">C</button>
-              <button data-view-mode="tiles" data-pane="left" title="Tiles view">T</button>
+              <button data-view-mode="details" data-pane="left" title="Details view" aria-label="Details view"><span class="view-glyph view-glyph-details" aria-hidden="true"></span></button>
+              <button data-view-mode="compact" data-pane="left" title="Compact view" aria-label="Compact view"><span class="view-glyph view-glyph-compact" aria-hidden="true"></span></button>
+              <button data-view-mode="tiles" data-pane="left" title="Tiles view" aria-label="Tiles view"><span class="view-glyph view-glyph-tiles" aria-hidden="true"></span></button>
             </div>
-            <button data-action="new-folder" data-pane="left">Folder</button>
-            <button data-action="new-file" data-pane="left">File</button>
-            <button data-action="rename" data-pane="left">Rename</button>
-            <button data-action="bulk-rename" data-pane="left">Bulk</button>
-            <button data-action="columns" data-pane="left">Cols</button>
-            <button data-action="folder-sizes" data-pane="left" title="Calculate recursive sizes for selected or visible folders">Sizes</button>
-            <button data-action="format" data-pane="left">Fmt</button>
-            <button data-action="label" data-pane="left">Label</button>
-            <button data-action="copy-other" data-pane="left">Copy</button>
-            <button data-action="move-other" data-pane="left">Move</button>
-            <button data-action="trash" data-pane="left">Trash</button>
-            <button data-action="recycle" data-pane="left">Recycle</button>
-            <button data-action="delete" data-pane="left">Delete</button>
+            <button class="pane-command" data-action="new-folder" data-pane="left" title="New folder" aria-label="New folder"><span class="lucide-icon icon-folder-plus" aria-hidden="true"></span><span class="command-label">New folder</span></button>
+            <button class="pane-command" data-action="rename" data-pane="left" data-requires-selection disabled><span class="lucide-icon icon-rename" aria-hidden="true"></span><span class="command-label">Rename</span></button>
+            <button class="pane-command pane-transfer-action" data-action="copy-other" data-pane="left" data-requires-selection disabled><span class="lucide-icon icon-copy" aria-hidden="true"></span><span class="command-label">Copy</span><span class="transfer-direction-glyph" aria-hidden="true"></span></button>
+            <button class="pane-command pane-transfer-action" data-action="move-other" data-pane="left" data-requires-selection disabled><span class="lucide-icon icon-move" aria-hidden="true"></span><span class="command-label">Move</span><span class="transfer-direction-glyph" aria-hidden="true"></span></button>
+            <button class="pane-command" data-action="recycle" data-pane="left" data-requires-selection disabled><span class="lucide-icon icon-recycle" aria-hidden="true"></span><span class="command-label">Recycle</span></button>
+            <details class="pane-more">
+              <summary title="More actions for the left pane" aria-label="More actions for the left pane"><span class="lucide-icon icon-more" aria-hidden="true"></span><span class="command-label">More</span></summary>
+              <div class="pane-more-menu" role="menu" aria-label="More left pane actions">
+                <label><span>Kind</span><select class="kind-filter" data-kind-filter="left" aria-label="Kind filter left pane"></select></label>
+                <label><span>Label</span><select class="label-filter" data-label-filter="left" aria-label="Label filter left pane"></select></label>
+                <button data-action="new-file" data-pane="left">New File</button>
+                <button data-action="bulk-rename" data-pane="left" data-requires-selection disabled>Bulk Rename</button>
+                <button data-action="columns" data-pane="left">Columns</button>
+                <button data-action="folder-sizes" data-pane="left" title="Calculate recursive sizes for selected or visible folders">Folder Sizes</button>
+                <button data-action="format" data-pane="left">Format</button>
+                <button data-action="label" data-pane="left" data-requires-selection disabled>Label</button>
+                <button data-action="trash" data-pane="left" data-requires-selection disabled>App Trash</button>
+                <button data-action="delete" data-pane="left" data-requires-selection disabled>Permanent Delete</button>
+              </div>
+            </details>
           </div>
           <div class="quick-search" data-quick-search-panel="left" hidden>
             <div class="quick-search-tabs" aria-label="Left quick search mode">
@@ -115,9 +139,9 @@
             </div>
             <input data-quick-search-input="left" aria-label="Quick search left pane" placeholder="Quick search" />
             <span data-quick-search-count="left">Ready</span>
-            <button type="button" class="icon-button" data-quick-search-step="previous" data-pane="left" title="Previous match">^</button>
-            <button type="button" class="icon-button" data-quick-search-step="next" data-pane="left" title="Next match">v</button>
-            <button type="button" class="icon-button" data-quick-search-close="left" title="Close quick search">X</button>
+            <button type="button" class="icon-button nav-icon" data-quick-search-step="previous" data-pane="left" title="Previous match" aria-label="Previous match">&#8593;</button>
+            <button type="button" class="icon-button nav-icon" data-quick-search-step="next" data-pane="left" title="Next match" aria-label="Next match">&#8595;</button>
+            <button type="button" class="icon-button nav-icon" data-quick-search-close="left" title="Close quick search" aria-label="Close quick search">&times;</button>
           </div>
           <div class="file-head">
             <button data-sort="name" data-pane="left">Name</button>
@@ -131,39 +155,53 @@
         <div class="layout-resizer pane-row-resizer" data-layout-resize="paneRows" role="separator" aria-label="Resize horizontal panes"></div>
 
         <section class="pane" data-pane="right" aria-label="Right pane">
-          <div class="tabbar" data-tabs="right"></div>
+          <div class="tabbar" data-tabs="right">
+            <span class="pane-status-cluster">
+              <span class="pane-activity-badge idle" data-pane-activity="right" role="status" aria-live="polite" aria-label="Right pane ready" title="Ready">
+                <span class="pane-activity-dot" aria-hidden="true"></span>
+                <span data-pane-activity-text="right">Ready</span>
+              </span>
+              <span class="pane-role-badge target" data-pane-role="right">TARGET</span>
+            </span>
+          </div>
           <div class="pathbar">
-            <button class="icon-button" data-action="back" data-pane="right" title="Back">&lt;</button>
-            <button class="icon-button" data-action="forward" data-pane="right" title="Forward">&gt;</button>
-            <button class="icon-button" data-action="history" data-pane="right" title="Pane history">H</button>
-            <button class="icon-button" data-action="up" data-pane="right" title="Up">..</button>
+            <button class="icon-button nav-icon" data-action="back" data-pane="right" title="Back" aria-label="Back">&#8592;</button>
+            <button class="icon-button nav-icon" data-action="forward" data-pane="right" title="Forward" aria-label="Forward">&#8594;</button>
+            <button class="icon-button nav-icon" data-action="history" data-pane="right" title="Pane history" aria-label="Pane history">&#8634;</button>
+            <button class="icon-button nav-icon" data-action="up" data-pane="right" title="Up" aria-label="Up">&#8593;</button>
             <input class="path-input" data-path-input="right" aria-label="Right path" />
-            <button class="icon-button" data-action="refresh" data-pane="right" title="Refresh">R</button>
+            <button class="icon-button nav-icon" data-action="refresh" data-pane="right" title="Refresh" aria-label="Refresh">&#10227;</button>
+            <button class="icon-button nav-icon compact-breadcrumb-toggle" data-compact-breadcrumbs="right" title="Show breadcrumbs" aria-label="Show breadcrumbs" aria-expanded="false"><span class="breadcrumb-glyph" aria-hidden="true"></span></button>
             <div class="path-suggest" data-path-suggest="right" hidden></div>
             <div class="breadcrumb-strip" data-breadcrumbs="right" aria-label="Right breadcrumbs"></div>
           </div>
           <div class="toolbar">
             <input class="filter-input" data-filter="right" placeholder="Filter" aria-label="Filter right pane" />
-            <select class="kind-filter" data-kind-filter="right" aria-label="Kind filter right pane"></select>
-            <select class="label-filter" data-label-filter="right" aria-label="Label filter right pane"></select>
             <div class="view-toggle" aria-label="Right view mode">
-              <button data-view-mode="details" data-pane="right" title="Details view">D</button>
-              <button data-view-mode="compact" data-pane="right" title="Compact view">C</button>
-              <button data-view-mode="tiles" data-pane="right" title="Tiles view">T</button>
+              <button data-view-mode="details" data-pane="right" title="Details view" aria-label="Details view"><span class="view-glyph view-glyph-details" aria-hidden="true"></span></button>
+              <button data-view-mode="compact" data-pane="right" title="Compact view" aria-label="Compact view"><span class="view-glyph view-glyph-compact" aria-hidden="true"></span></button>
+              <button data-view-mode="tiles" data-pane="right" title="Tiles view" aria-label="Tiles view"><span class="view-glyph view-glyph-tiles" aria-hidden="true"></span></button>
             </div>
-            <button data-action="new-folder" data-pane="right">Folder</button>
-            <button data-action="new-file" data-pane="right">File</button>
-            <button data-action="rename" data-pane="right">Rename</button>
-            <button data-action="bulk-rename" data-pane="right">Bulk</button>
-            <button data-action="columns" data-pane="right">Cols</button>
-            <button data-action="folder-sizes" data-pane="right" title="Calculate recursive sizes for selected or visible folders">Sizes</button>
-            <button data-action="format" data-pane="right">Fmt</button>
-            <button data-action="label" data-pane="right">Label</button>
-            <button data-action="copy-other" data-pane="right">Copy</button>
-            <button data-action="move-other" data-pane="right">Move</button>
-            <button data-action="trash" data-pane="right">Trash</button>
-            <button data-action="recycle" data-pane="right">Recycle</button>
-            <button data-action="delete" data-pane="right">Delete</button>
+            <button class="pane-command" data-action="new-folder" data-pane="right" title="New folder" aria-label="New folder"><span class="lucide-icon icon-folder-plus" aria-hidden="true"></span><span class="command-label">New folder</span></button>
+            <button class="pane-command" data-action="rename" data-pane="right" data-requires-selection disabled><span class="lucide-icon icon-rename" aria-hidden="true"></span><span class="command-label">Rename</span></button>
+            <button class="pane-command pane-transfer-action" data-action="copy-other" data-pane="right" data-requires-selection disabled><span class="lucide-icon icon-copy" aria-hidden="true"></span><span class="command-label">Copy</span><span class="transfer-direction-glyph" aria-hidden="true"></span></button>
+            <button class="pane-command pane-transfer-action" data-action="move-other" data-pane="right" data-requires-selection disabled><span class="lucide-icon icon-move" aria-hidden="true"></span><span class="command-label">Move</span><span class="transfer-direction-glyph" aria-hidden="true"></span></button>
+            <button class="pane-command" data-action="recycle" data-pane="right" data-requires-selection disabled><span class="lucide-icon icon-recycle" aria-hidden="true"></span><span class="command-label">Recycle</span></button>
+            <details class="pane-more">
+              <summary title="More actions for the right pane" aria-label="More actions for the right pane"><span class="lucide-icon icon-more" aria-hidden="true"></span><span class="command-label">More</span></summary>
+              <div class="pane-more-menu" role="menu" aria-label="More right pane actions">
+                <label><span>Kind</span><select class="kind-filter" data-kind-filter="right" aria-label="Kind filter right pane"></select></label>
+                <label><span>Label</span><select class="label-filter" data-label-filter="right" aria-label="Label filter right pane"></select></label>
+                <button data-action="new-file" data-pane="right">New File</button>
+                <button data-action="bulk-rename" data-pane="right" data-requires-selection disabled>Bulk Rename</button>
+                <button data-action="columns" data-pane="right">Columns</button>
+                <button data-action="folder-sizes" data-pane="right" title="Calculate recursive sizes for selected or visible folders">Folder Sizes</button>
+                <button data-action="format" data-pane="right">Format</button>
+                <button data-action="label" data-pane="right" data-requires-selection disabled>Label</button>
+                <button data-action="trash" data-pane="right" data-requires-selection disabled>App Trash</button>
+                <button data-action="delete" data-pane="right" data-requires-selection disabled>Permanent Delete</button>
+              </div>
+            </details>
           </div>
           <div class="quick-search" data-quick-search-panel="right" hidden>
             <div class="quick-search-tabs" aria-label="Right quick search mode">
@@ -172,9 +210,9 @@
             </div>
             <input data-quick-search-input="right" aria-label="Quick search right pane" placeholder="Quick search" />
             <span data-quick-search-count="right">Ready</span>
-            <button type="button" class="icon-button" data-quick-search-step="previous" data-pane="right" title="Previous match">^</button>
-            <button type="button" class="icon-button" data-quick-search-step="next" data-pane="right" title="Next match">v</button>
-            <button type="button" class="icon-button" data-quick-search-close="right" title="Close quick search">X</button>
+            <button type="button" class="icon-button nav-icon" data-quick-search-step="previous" data-pane="right" title="Previous match" aria-label="Previous match">&#8593;</button>
+            <button type="button" class="icon-button nav-icon" data-quick-search-step="next" data-pane="right" title="Next match" aria-label="Next match">&#8595;</button>
+            <button type="button" class="icon-button nav-icon" data-quick-search-close="right" title="Close quick search" aria-label="Close quick search">&times;</button>
           </div>
           <div class="file-head">
             <button data-sort="name" data-pane="right">Name</button>
@@ -187,14 +225,34 @@
         <div class="layout-resizer inspector-resizer" data-layout-resize="inspector" role="separator" aria-label="Resize preview"></div>
 
         <aside class="inspector" id="inspector" aria-label="Preview">
-          <div class="inspector-title">Preview</div>
+          <div class="inspector-title">
+            <strong>Preview</strong>
+            <button class="icon-button workspace-panel-button" data-panel-action="preview" title="Hide preview" aria-label="Hide preview" aria-pressed="true">
+              <span class="lucide-icon icon-panel-right-close" aria-hidden="true"></span>
+            </button>
+          </div>
           <div class="inspector-body muted">Select an item</div>
         </aside>
       </main>
 
       <div class="dock-resizer" data-layout-resize="dock" role="separator" aria-label="Resize command dock"></div>
       <footer class="command-dock">
-        <div id="saved-command-strip" class="saved-command-strip"></div>
+        <div class="dock-context" aria-label="Active workspace status">
+          <button type="button" id="selection-readout" class="dock-status dock-status-selection" data-dock-status="selection" title="Focus the active file pane" aria-label="Focus the active file pane">
+            <img class="dock-status-icon" src="/icons/list-checks.svg" alt="" aria-hidden="true" />
+            <span class="dock-status-main"><strong>Pane</strong><span class="dock-status-value">0 items</span></span>
+          </button>
+          <span id="clipboard-readout" class="dock-status clipboard-readout" aria-label="Clipboard empty" title="Clipboard empty">
+            <img class="dock-status-icon" src="/icons/clipboard.svg" alt="" aria-hidden="true" />
+            <span class="dock-status-value">Empty</span>
+          </span>
+          <button type="button" id="operation-readout" class="dock-status dock-status-operations" data-dock-status="operations" title="Open operations and recovery" aria-label="Open operations and recovery. 0 recorded operations.">
+            <img class="dock-status-icon" src="/icons/history.svg" alt="" aria-hidden="true" />
+            <span class="dock-status-value">0</span>
+          </button>
+        </div>
+        <div class="dock-action-strip" aria-label="Custom command shelf">
+          <div id="saved-command-strip" class="saved-command-strip"></div>
         <button data-global-action="palette">Command</button>
         <button data-global-action="manual">Manual</button>
         <button data-global-action="speed" title="Build and search the active folder index">Speed</button>
@@ -250,38 +308,60 @@
         <button data-global-action="delete">Delete</button>
         <button data-global-action="appTrash">Trash Bin</button>
         <button data-global-action="ops">Ops</button>
-        <button data-global-action="integration">Integrate</button>
-        <label class="dock-toggle" title="Automatically refresh visible filesystem panes">
-          <input id="auto-refresh-toggle" type="checkbox" />
-          <span>Auto</span>
-        </label>
-        <label class="dock-toggle" title="Show hidden and system filesystem entries">
-          <input id="show-hidden-toggle" type="checkbox" />
-          <span>Hidden</span>
-        </label>
-        <label class="dock-toggle" title="Follow matching folder navigation in the other pane">
-          <input id="linked-navigation-toggle" type="checkbox" />
-          <span>Link</span>
-        </label>
-        <div class="layout-toggle" aria-label="Pane layout">
-          <button data-layout-mode="vertical" title="Vertical split (Ctrl+Shift+1)">V</button>
-          <button data-layout-mode="horizontal" title="Horizontal split (Ctrl+Shift+2)">H</button>
-          <button data-layout-mode="single" title="Single active pane (Ctrl+Shift+3)">1</button>
+          <button data-global-action="integration">Integrate</button>
+          <button type="button" id="dock-overflow-toggle" class="dock-overflow-toggle" title="More shelf actions" aria-label="More shelf actions" aria-haspopup="menu" aria-expanded="false" hidden>
+            <span class="lucide-icon icon-more" aria-hidden="true"></span>
+            <span class="dock-overflow-label">More</span>
+            <span id="dock-overflow-count" class="dock-overflow-count" aria-hidden="true">0</span>
+          </button>
         </div>
-        <div class="dock-spacer"></div>
-        <span id="clipboard-readout" class="clipboard-readout">Clipboard empty</span>
-        <span id="operation-readout">0 ops</span>
-        <span id="selection-readout">0 selected</span>
+        <div class="dock-mode-strip" aria-label="Workspace modes">
+          <label class="dock-toggle" title="Automatically refresh visible filesystem panes">
+            <input id="auto-refresh-toggle" type="checkbox" />
+            <span>Auto</span>
+          </label>
+          <label class="dock-toggle" title="Show hidden and system filesystem entries">
+            <input id="show-hidden-toggle" type="checkbox" />
+            <span>Hidden</span>
+          </label>
+          <label class="dock-toggle" title="Follow matching folder navigation in the other pane">
+            <input id="linked-navigation-toggle" type="checkbox" />
+            <span>Link</span>
+          </label>
+          <div class="panel-visibility-toggle" aria-label="Workspace panels">
+            <button data-panel-action="navigator" title="Hide navigator" aria-label="Hide navigator" aria-pressed="true"><span class="lucide-icon icon-panel-left" aria-hidden="true"></span></button>
+            <button data-panel-action="preview" title="Hide preview" aria-label="Hide preview" aria-pressed="true"><span class="lucide-icon icon-panel-right" aria-hidden="true"></span></button>
+          </div>
+          <div class="layout-toggle" aria-label="Pane layout">
+            <button data-layout-mode="vertical" title="Vertical split (Ctrl+Shift+1)" aria-label="Vertical split"><span class="layout-glyph layout-glyph-vertical" aria-hidden="true"></span></button>
+            <button data-layout-mode="horizontal" title="Horizontal split (Ctrl+Shift+2)" aria-label="Horizontal split"><span class="layout-glyph layout-glyph-horizontal" aria-hidden="true"></span></button>
+            <button data-layout-mode="single" title="Single active pane (Ctrl+Shift+3)" aria-label="Single pane"><span class="layout-glyph layout-glyph-single" aria-hidden="true"></span></button>
+          </div>
+        </div>
       </footer>
+      <div id="dock-overflow-menu" class="dock-overflow-menu" role="menu" aria-label="More shelf actions" hidden></div>
     </div>
 
     <dialog class="command-dialog" id="command-dialog">
       <div class="dialog-head">
-        <strong>Command</strong>
+        <div class="dialog-title-block">
+          <strong>Command Center</strong>
+          <span id="command-context">Active pane commands</span>
+        </div>
         <button class="icon-button" data-close-dialog="command-dialog" title="Close">X</button>
       </div>
-      <input id="command-input" class="command-input" placeholder="Type a command" />
-      <div id="command-results" class="command-results"></div>
+      <div class="command-search-wrap">
+        <input id="command-input" class="command-input" placeholder="Search commands, tools, and scripts" autocomplete="off" />
+      </div>
+      <div class="command-center-bar">
+        <div class="command-view-switch" role="group" aria-label="Command view">
+          <button type="button" class="active" data-command-view="all" aria-pressed="true">All</button>
+          <button type="button" data-command-view="recent" aria-pressed="false">Recent</button>
+          <button type="button" data-command-view="pinned" aria-pressed="false">Pinned</button>
+        </div>
+        <span id="command-result-summary" aria-live="polite"></span>
+      </div>
+      <div id="command-results" class="command-results" role="listbox" aria-label="Available commands"></div>
     </dialog>
 
     <dialog class="manual-dialog" id="manual-dialog">
@@ -391,6 +471,29 @@
             <span>Follow links</span>
           </label>
         </div>
+        <div class="size-analysis-viewbar">
+          <div class="size-analysis-view-tabs" role="tablist" aria-label="Analyzer view">
+            <button type="button" role="tab" data-size-analysis-view="overview" data-size-analysis-action="view-overview" aria-selected="true">Overview</button>
+            <button type="button" role="tab" data-size-analysis-view="map" data-size-analysis-action="view-map" aria-selected="false">Map</button>
+          </div>
+          <label class="size-analysis-map-option">
+            <span>Size by</span>
+            <select id="size-analysis-size-by" data-size-analysis-action="size-by" aria-label="Treemap size measurement">
+              <option value="logical">Logical size</option>
+              <option value="allocated">Allocated size</option>
+            </select>
+          </label>
+          <label class="size-analysis-map-option">
+            <span>Color by</span>
+            <select id="size-analysis-color-by" data-size-analysis-action="color-by" aria-label="Treemap color grouping">
+              <option value="type">File type</option>
+              <option value="folder">Top folder</option>
+            </select>
+          </label>
+          <div id="size-analysis-map-legend" class="size-analysis-map-legend" aria-label="Treemap legend">
+            <span class="size-analysis-map-legend-empty">Scan to build legend</span>
+          </div>
+        </div>
         <div id="size-analysis-scan-strip" class="size-analysis-scan-strip"></div>
         <div id="size-analysis-metrics" class="size-analysis-metrics"></div>
         <div class="size-analysis-main">
@@ -433,14 +536,25 @@
         </div>
         <div class="size-analysis-map-row">
           <section class="size-analysis-treemap-panel">
-            <div class="size-analysis-section-head">
-              <strong>File Map</strong>
-              <div class="size-analysis-map-head-meta">
-                <span id="size-analysis-map-detail">Scan to map files</span>
+            <div class="size-analysis-section-head size-analysis-map-head">
+              <div class="size-analysis-map-title">
+                <strong>Nested File Map</strong>
+                <nav id="size-analysis-map-breadcrumbs" class="size-analysis-map-breadcrumbs" aria-label="Disk map focus">
+                  <span class="size-analysis-map-empty-path">No map focus</span>
+                </nav>
+              </div>
+              <div class="size-analysis-map-toolbar">
+                <button type="button" data-size-analysis-map-action="root" title="Return to scan root" disabled>Root</button>
+                <button type="button" data-size-analysis-map-action="up" title="Focus parent folder" disabled>Up</button>
+                <button type="button" data-size-analysis-map-action="focus" title="Focus selected folder" disabled>Focus</button>
+                <button type="button" data-size-analysis-map-action="open" title="Open selection in active pane" disabled>Open</button>
                 <span id="size-analysis-map-count">0</span>
               </div>
             </div>
-            <canvas id="size-analysis-treemap" width="1080" height="430" tabindex="0" role="img" aria-label="File size treemap"></canvas>
+            <div class="size-analysis-map-detail-row">
+              <span id="size-analysis-map-detail" aria-live="polite">Scan to map files</span>
+            </div>
+            <canvas id="size-analysis-treemap" width="1080" height="430" tabindex="0" role="img" aria-label="Hierarchical file size treemap"></canvas>
           </section>
           <section class="size-analysis-table-panel size-analysis-file-panel">
             <div class="size-analysis-section-head">
@@ -664,8 +778,16 @@
             </select>
           </label>
           <label class="check-row">
+            <input id="preference-navigator" type="checkbox" />
+            <span>Navigator pane</span>
+          </label>
+          <label class="check-row">
             <input id="preference-inspector" type="checkbox" />
             <span>Preview pane</span>
+          </label>
+          <label class="check-row">
+            <input id="preference-inspector-auto-collapse" type="checkbox" />
+            <span>Collapse empty Preview</span>
           </label>
           <label class="check-row">
             <input id="preference-auto-refresh" type="checkbox" />

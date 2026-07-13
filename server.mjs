@@ -15,8 +15,11 @@ const require = createRequire(import.meta.url);
 const yauzl = require("yauzl");
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
+const workspaceRoot = path.resolve(process.env.EXPLORE_BETTER_WORKSPACE_ROOT || process.cwd());
+const workspaceLabel = String(process.env.EXPLORE_BETTER_WORKSPACE_LABEL || "Workspace").trim() || "Workspace";
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 4627);
+const desktopInstanceToken = process.env.EXPLORE_BETTER_DESKTOP_INSTANCE_TOKEN || "";
 const apiCapability = crypto.randomBytes(32).toString("base64url");
 const apiCapabilityCookieName = "ExploreBetterCapability";
 const contentSecurityPolicy = [
@@ -96,6 +99,12 @@ const directoryListingCacheLimit = 8;
 const directoryListingCacheMaxEntries = 220000;
 const directoryListingCacheMaxEntriesPerListing = 150000;
 const directoryListingWindowMaxEntries = 5000;
+const configuredNativeDirectoryListingThreshold = Number(
+  process.env.EXPLORE_BETTER_NATIVE_LISTING_THRESHOLD || 2000
+);
+const nativeDirectoryListingThreshold = Number.isFinite(configuredNativeDirectoryListingThreshold)
+  ? Math.max(500, Math.min(Math.floor(configuredNativeDirectoryListingThreshold), 100000))
+  : 2000;
 const sizeAnalysisCacheLimit = 6;
 const sizeAnalysisCacheTtlMs = 30000;
 const advancedSearchCacheTtlMs = 10000;
@@ -427,7 +436,9 @@ function sanitizeSettings(settings) {
     openGesture: normalizeOpenGesture(raw.openGesture),
     startupMode: normalizeStartupMode(raw.startupMode),
     startupLayoutId: sanitizeReferenceId(raw.startupLayoutId),
+    navigator: raw.navigator !== false,
     inspector: raw.inspector !== false,
+    inspectorAutoCollapse: raw.inspectorAutoCollapse !== false,
     confirmTrash: raw.confirmTrash !== false,
     launchMode: normalizeLaunchMode(raw.launchMode),
     shellOpenMode: normalizeShellOpenMode(raw.shellOpenMode),
@@ -650,7 +661,7 @@ function defaultState() {
       activePane: "left",
       paneLayout: "vertical",
       panes: {
-        left: { activeTab: 0, tabs: [{ path: process.cwd() }] },
+        left: { activeTab: 0, tabs: [{ path: workspaceRoot }] },
         right: { activeTab: 0, tabs: [{ path: os.homedir() }] }
       }
     },
@@ -727,7 +738,9 @@ return listing.entries
       openGesture: "double",
       startupMode: "last",
       startupLayoutId: "",
+      navigator: true,
       inspector: true,
+      inspectorAutoCollapse: true,
       confirmTrash: true,
       launchMode: "appWindow",
       shellOpenMode: "leftReplace",
@@ -1668,6 +1681,9 @@ function attachPathLabels(entries, labelsOrState) {
     labelsOrState instanceof Map
       ? labelsOrState
       : labelMapFromState(Array.isArray(labelsOrState) ? { labels: labelsOrState } : labelsOrState || {});
+  if (!labelMap.size) {
+    return entries;
+  }
   return entries.map((entry) => {
     const label = labelMap.get(pathIdentity(entry.path));
     if (!label) {
@@ -1792,7 +1808,7 @@ function sanitizePaneSnapshot(snapshot) {
     : now;
   const tab = sanitizeLayoutTab(
     {
-      path: source.path || process.cwd(),
+      path: source.path || workspaceRoot,
       title: source.title,
       filter: source.filter,
       labelFilter: source.labelFilter,
@@ -1803,7 +1819,7 @@ function sanitizePaneSnapshot(snapshot) {
       viewMode: source.viewMode,
       locked: source.locked
     },
-    process.cwd()
+    workspaceRoot
   );
   const selected = new Set(
     (Array.isArray(source.selected) ? source.selected : [])
@@ -1840,7 +1856,7 @@ function sanitizePaneSnapshot(snapshot) {
 
 function sanitizeLayoutTab(tab, fallbackPath) {
   const source = tab && typeof tab === "object" ? tab : {};
-  const itemPath = resolveUserPath(source.path || fallbackPath || process.cwd());
+  const itemPath = resolveUserPath(source.path || fallbackPath || workspaceRoot);
   const allowedSorts = new Set([
     "name",
     "kind",
@@ -1942,7 +1958,7 @@ function sanitizeLayoutSnapshot(layout) {
     activePane: source.activePane === "right" ? "right" : "left",
     paneLayout: sanitizePaneLayout(source.paneLayout || source.layoutMode || source.mode),
     panes: {
-      left: sanitizeLayoutPane(panes.left, process.cwd()),
+      left: sanitizeLayoutPane(panes.left, workspaceRoot),
       right: sanitizeLayoutPane(panes.right, os.homedir())
     }
   };
@@ -1976,7 +1992,7 @@ function sanitizeTabGroup(tabGroup) {
   const updatedAt = Number.isFinite(Date.parse(source.updatedAt))
     ? new Date(source.updatedAt).toISOString()
     : now;
-  const pane = sanitizeLayoutPane(source, process.cwd());
+  const pane = sanitizeLayoutPane(source, workspaceRoot);
   return {
     id: String(source.id || crypto.randomUUID()),
     name: String(source.name || "Tab Group").trim().slice(0, 80),
@@ -2013,7 +2029,7 @@ function sanitizeSelectionSet(selectionSet) {
     id: String(source.id || crypto.randomUUID()),
     name: String(source.name || "Selection Set").trim().slice(0, 80),
     description: String(source.description || "").trim().slice(0, 240),
-    path: resolveUserPath(source.path || process.cwd()),
+    path: resolveUserPath(source.path || workspaceRoot),
     createdAt,
     updatedAt,
     paths,
@@ -2043,7 +2059,7 @@ function sanitizeFolderFormat(folderFormat) {
   const format = source.format && typeof source.format === "object" ? source.format : {};
   const sanitizedTab = sanitizeLayoutTab(
     {
-      path: source.path || process.cwd(),
+      path: source.path || workspaceRoot,
       viewMode: format.viewMode,
       sortKey: format.sortKey,
       sortDir: format.sortDir,
@@ -2052,14 +2068,14 @@ function sanitizeFolderFormat(folderFormat) {
       kindFilter: format.kindFilter,
       labelFilter: format.labelFilter
     },
-    process.cwd()
+    workspaceRoot
   );
 
   return {
     id: String(source.id || crypto.randomUUID()),
     name: String(source.name || "Folder Format").trim().slice(0, 80),
     description: String(source.description || "").trim().slice(0, 240),
-    path: resolveUserPath(source.path || process.cwd()),
+    path: resolveUserPath(source.path || workspaceRoot),
     match: allowedMatches.has(source.match) ? source.match : "exact",
     createdAt,
     updatedAt,
@@ -2087,7 +2103,7 @@ function sanitizeDisplayPreset(displayPreset) {
     : now;
   const sanitizedTab = sanitizeLayoutTab(
     {
-      path: source.path || process.cwd(),
+      path: source.path || workspaceRoot,
       viewMode: format.viewMode,
       sortKey: format.sortKey,
       sortDir: format.sortDir,
@@ -2096,7 +2112,7 @@ function sanitizeDisplayPreset(displayPreset) {
       kindFilter: format.kindFilter,
       labelFilter: format.labelFilter
     },
-    process.cwd()
+    workspaceRoot
   );
 
   return {
@@ -2165,7 +2181,7 @@ function sanitizeSearchPresetOptions(options) {
   const dateOp = allowedDateOps.has(source.dateOp) ? source.dateOp : "any";
   const dateDays = Number(source.dateDays);
   return {
-    path: resolveUserPath(source.path || process.cwd()),
+    path: resolveUserPath(source.path || workspaceRoot),
     query: String(source.query || "").trim().slice(0, 200),
     content: String(source.content || "").trim().slice(0, 200),
     kind: allowedKinds.has(source.kind) ? source.kind : "all",
@@ -2205,7 +2221,7 @@ function sanitizeSyncProfileOptions(options) {
   const source = options && typeof options === "object" ? options : {};
   const maxEntries = Number(source.maxEntries || 20000);
   return {
-    leftPath: resolveUserPath(source.leftPath || process.cwd()),
+    leftPath: resolveUserPath(source.leftPath || workspaceRoot),
     rightPath: resolveUserPath(source.rightPath || os.homedir()),
     recursive: source.recursive !== false,
     includeHidden: Boolean(source.includeHidden),
@@ -4268,8 +4284,48 @@ async function windowsAttributeMap(dir) {
   return map;
 }
 
-async function optionalWindowsAttributeMap(dir, includeAttributes) {
-  return includeAttributes ? windowsAttributeMap(dir) : new Map();
+async function nativeWindowsAttributeMap(dir, signal = null) {
+  if (
+    process.platform !== "win32" ||
+    String(dir || "").startsWith("\\\\") ||
+    process.env.EXPLORE_BETTER_DISABLE_NATIVE_LISTING === "1" ||
+    !nativeFilesystemHelperPath()
+  ) {
+    return null;
+  }
+  const result = await nativeFilesystemHelperRequest(
+    "browse",
+    { path: dir, maxEntries: 100000, compact: true },
+    { signal, timeoutMs: 60000 }
+  );
+  if (result.data?.truncated) {
+    return null;
+  }
+  const payload = result.data?.entries;
+  const rowCount = nativeBrowseEntryCount(payload);
+  const map = new Map();
+  for (let index = 0; index < rowCount; index += 1) {
+    const entry = entryFromNativeBrowseRow(dir, Array.isArray(payload) ? payload[index] : payload, index);
+    map.set(pathIdentity(entry.path), entry.attributeText || "");
+  }
+  return map;
+}
+
+async function optionalWindowsAttributeMap(dir, includeAttributes, signal = null) {
+  if (!includeAttributes) {
+    return new Map();
+  }
+  try {
+    const nativeMap = await nativeWindowsAttributeMap(dir, signal);
+    if (nativeMap) {
+      return nativeMap;
+    }
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+  }
+  return windowsAttributeMap(dir);
 }
 
 function attributesForEntry(name, stats, flags = "") {
@@ -5464,7 +5520,7 @@ async function buildDirectoryListingFromDisk(params) {
   try {
     [dirents, attributeMap, labelMap, dimensionsCacheState] = await Promise.all([
       fs.readdir(dir, { withFileTypes: true }),
-      optionalWindowsAttributeMap(dir, includeAttributes),
+      optionalWindowsAttributeMap(dir, includeAttributes, signal),
       labelState ? Promise.resolve(labelState.labelMap) : readLabelMap(),
       includeDimensions ? readFolderDimensionsCache(dir) : Promise.resolve(null)
     ]);
@@ -5480,24 +5536,53 @@ async function buildDirectoryListingFromDisk(params) {
   let hiddenFiltered = 0;
 
   const statStart = monotonicMs();
-  const statResults = await mapConcurrent(dirents, statConcurrency, async (dirent, index, workerSignal) => {
-    let entry;
+  let statResults;
+  let listingProvider = "node";
+  let nativeProviderFallback = null;
+  let nativeProviderMetrics = null;
+  if (
+    nativeDirectoryListingEligible(dir, dirents.length, {
+      includeDimensions,
+      includeLinks
+    })
+  ) {
     try {
-      entry = await statEntry(dir, dirent, attributeMap, {
-        signal: workerSignal,
-        includeDimensions,
-        includeLinks,
-        includeAttributes,
-        dimensionsCache: dimensionsCacheState
-      });
+      const nativeListing = await nativeDirectoryListing(dir, dirents.length, signal);
+      statResults = nativeListing.entries;
+      listingProvider = "win32-find-files";
+      nativeProviderMetrics = {
+        helperPid: nativeListing.helperPid,
+        clientReused: nativeListing.clientReused,
+        requestMs: nativeListing.requestMs,
+        helperStartupMs: nativeListing.helperStartupMs
+      };
     } catch (error) {
       if (isAbortError(error)) {
         throw error;
       }
-      entry = unavailableEntry(dir, dirent, attributeMap);
+      nativeProviderFallback = String(error?.message || error).slice(0, 240);
     }
-    return entry;
-  }, { signal });
+  }
+  if (!statResults) {
+    statResults = await mapConcurrent(dirents, statConcurrency, async (dirent, index, workerSignal) => {
+      let entry;
+      try {
+        entry = await statEntry(dir, dirent, attributeMap, {
+          signal: workerSignal,
+          includeDimensions,
+          includeLinks,
+          includeAttributes,
+          dimensionsCache: dimensionsCacheState
+        });
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
+        entry = unavailableEntry(dir, dirent, attributeMap);
+      }
+      return entry;
+    }, { signal });
+  }
   const statMs = elapsedMs(statStart);
   const dimensionsCacheStart = monotonicMs();
   const dimensionsCacheSummary = includeDimensions ? await flushFolderDimensionsCache(dimensionsCacheState, statResults) : null;
@@ -5572,7 +5657,10 @@ async function buildDirectoryListingFromDisk(params) {
       labelMs,
       scanned: dirents.length,
       returned: labelledEntries.length,
-      concurrency: statConcurrency,
+      concurrency: listingProvider === "node" ? statConcurrency : 1,
+      provider: listingProvider,
+      ...(nativeProviderMetrics ? { native: nativeProviderMetrics } : {}),
+      ...(nativeProviderFallback ? { nativeProviderFallback } : {}),
       priority,
       ...(cacheInfo ? { cache: cacheInfo } : {})
     },
@@ -5594,6 +5682,7 @@ async function listDirectory(targetPath, options = {}) {
   const showHidden = options.showHidden !== false;
   const includeAttributes = options.includeAttributes === true || !showHidden;
   const bypassCache = options.bypassCache === true;
+  const windowOptions = options.windowOptions || null;
   const priority = options.priority === "background" ? "background" : "foreground";
   const statConcurrency = listStatConcurrency(priority);
   throwIfAborted(signal);
@@ -5665,6 +5754,94 @@ async function listDirectory(targetPath, options = {}) {
       listingCacheContext.probeMs = elapsedMs(cacheProbeStart);
     }
   }
+  if (
+    streamingDirectoryWindowListingEligible(targetStats, {
+      showHidden,
+      includeDimensions,
+      includeLinks,
+      includeAttributes,
+      includeSignature,
+      windowOptions
+    })
+  ) {
+    try {
+      return await coalescedDirectoryListing(listingCacheContext, () =>
+        streamingDirectoryWindowListing({
+          timingStart,
+          signal,
+          priority,
+          statConcurrency,
+          requestedOriginal,
+          redirected,
+          targetStats,
+          dir,
+          targetMs,
+          labelState,
+          windowOptions
+        })
+      );
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+    }
+  }
+  if (
+    nativeDirectoryWindowListingEligible(dir, targetStats, {
+      includeDimensions,
+      includeLinks,
+      includeSignature,
+      windowOptions
+    })
+  ) {
+    try {
+      return await coalescedDirectoryListing(listingCacheContext, () =>
+        nativeDirectoryWindowListing({
+          timingStart,
+          signal,
+          showHidden,
+          includeAttributes,
+          priority,
+          requestedOriginal,
+          redirected,
+          targetStats,
+          dir,
+          targetMs,
+          labelState,
+          windowOptions
+        })
+      );
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+    }
+  }
+  if (
+    nativeFullDirectoryListingEligible(dir, targetStats, {
+      includeDimensions,
+      includeLinks,
+      windowOptions
+    })
+  ) {
+    try {
+      return await coalescedDirectoryListing(listingCacheContext, () =>
+        nativeFullDirectoryListing({
+          timingStart,
+          signal,
+          showHidden,
+          includeAttributes,
+          includeSignature,
+          priority,
+          requestedOriginal,
+          redirected,
+          targetStats,
+          dir,
+          targetMs,
+          labelState,
+          listingCacheContext
+        })
+      );
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+    }
+  }
   return coalescedDirectoryListing(listingCacheContext, () =>
     buildDirectoryListingFromDisk({
       timingStart,
@@ -5689,6 +5866,9 @@ async function listDirectory(targetPath, options = {}) {
 }
 
 function windowDirectoryListing(listing, options = null) {
+  if (listing?.window?.nativeFastPath || listing?.window?.streamingFastPath) {
+    return listing;
+  }
   if (!options) {
     return listing;
   }
@@ -5719,6 +5899,159 @@ function windowDirectoryListing(listing, options = null) {
       totalEntries,
       window: windowInfo
     }
+  };
+}
+
+function compactDirectoryEntryFlags(entry) {
+  return (
+    (entry.isDirectory ? 1 : 0) |
+    (entry.isFile ? 2 : 0) |
+    (entry.readonly ? 4 : 0) |
+    (entry.hidden ? 8 : 0) |
+    (entry.system ? 16 : 0) |
+    (entry.archive ? 32 : 0) |
+    (entry.isSymlink ? 64 : 0) |
+    (entry.unavailable ? 128 : 0)
+  );
+}
+
+function compactDirectoryListing(listing, format = "") {
+  if (format !== "compact-v1") {
+    return listing;
+  }
+  const { entries = [], ...metadata } = listing || {};
+  return {
+    ...metadata,
+    entryFormat: "compact-v1",
+    entryRows: entries.map((entry) => {
+      const row = [
+        entry.name,
+        compactDirectoryEntryFlags(entry),
+        entry.extension || "",
+        entry.kind || "File",
+        entry.size ?? null,
+        entry.modified ?? null,
+        entry.created ?? null,
+        entry.accessed ?? null,
+        entry.attributeText || entry.attributes?.text || "",
+        entry.label || null,
+        entry.dimensionText || entry.dimensions?.text || "",
+        entry.dimensionPixels || entry.dimensions?.pixels || null,
+        entry.linkType || "",
+        entry.linkTarget || "",
+        entry.linkTargetRaw || "",
+        entry.linkCount ?? null,
+        entry.mode ?? null
+      ];
+      while (row.length && (row.at(-1) === null || row.at(-1) === "" || row.at(-1) === undefined)) {
+        row.pop();
+      }
+      return row;
+    })
+  };
+}
+
+const compactDirectoryV2Cache = new WeakMap();
+
+function compactDirectoryTimestamp(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const timestamp = typeof value === "number" ? value : Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.round(timestamp) : value;
+}
+
+function compactDirectoryListingV2(listing, format = "") {
+  if (format !== "compact-v2") {
+    return listing;
+  }
+  const { entries = [], ...metadata } = listing || {};
+  const cached = compactDirectoryV2Cache.get(entries);
+  if (cached) {
+    return { ...metadata, ...cached };
+  }
+  const dictionaries = {
+    extensions: [""],
+    kinds: ["File"],
+    attributes: [""],
+    linkTypes: [""]
+  };
+  const dictionaryIndexes = Object.fromEntries(
+    Object.entries(dictionaries).map(([key, values]) => [key, new Map(values.map((value, index) => [value, index]))])
+  );
+  const dictionaryIndex = (key, value, fallback) => {
+    const normalized = String(value || fallback);
+    const known = dictionaryIndexes[key].get(normalized);
+    if (known !== undefined) {
+      return known;
+    }
+    const index = dictionaries[key].length;
+    dictionaries[key].push(normalized);
+    dictionaryIndexes[key].set(normalized, index);
+    return index;
+  };
+  const entryRows = entries.map((entry) => {
+    const row = [
+      entry.name,
+      compactDirectoryEntryFlags(entry),
+      dictionaryIndex("extensions", entry.extension, ""),
+      dictionaryIndex("kinds", entry.kind, "File"),
+      entry.size ?? null,
+      compactDirectoryTimestamp(entry.modified),
+      compactDirectoryTimestamp(entry.created),
+      compactDirectoryTimestamp(entry.accessed),
+      dictionaryIndex("attributes", entry.attributeText || entry.attributes?.text, "") || null,
+      entry.label || null,
+      entry.dimensionText || entry.dimensions?.text || "",
+      entry.dimensionPixels || entry.dimensions?.pixels || null,
+      dictionaryIndex("linkTypes", entry.linkType, "") || null,
+      entry.linkTarget || "",
+      entry.linkTargetRaw || "",
+      entry.linkCount ?? null,
+      entry.mode ?? null
+    ];
+    while (row.length && (row.at(-1) === null || row.at(-1) === "" || row.at(-1) === undefined)) {
+      row.pop();
+    }
+    return row;
+  });
+  const compact = { entryFormat: "compact-v2", entryDictionaries: dictionaries, entryRows };
+  compactDirectoryV2Cache.set(entries, compact);
+  return { ...metadata, ...compact };
+}
+
+function verboseDirectoryEntry(entry) {
+  if (entry?.attributes) {
+    return entry;
+  }
+  const attributes = attributesForEntry(entry?.name, null, entry?.attributeText || "");
+  return {
+    ...entry,
+    dimensions: null,
+    dimensionText: entry?.dimensionText || "",
+    dimensionPixels: entry?.dimensionPixels ?? null,
+    mode: entry?.mode ?? (entry?.isDirectory ? 0o40777 : entry?.readonly ? 0o100444 : 0o100666),
+    attributes,
+    linkType: entry?.linkType || "",
+    linkTarget: entry?.linkTarget || "",
+    linkTargetRaw: entry?.linkTargetRaw || "",
+    linkCount: entry?.linkCount ?? null
+  };
+}
+
+function formattedDirectoryListing(listing, format = "") {
+  if (format === "compact-v2") {
+    return compactDirectoryListingV2(listing, format);
+  }
+  if (format === "compact-v1") {
+    return compactDirectoryListing(listing, format);
+  }
+  if (!Array.isArray(listing?.entries) || listing.entries.every((entry) => entry?.attributes)) {
+    return listing;
+  }
+  return {
+    ...listing,
+    entries: listing.entries.map(verboseDirectoryEntry)
   };
 }
 
@@ -13517,86 +13850,697 @@ function nativeFilesystemHelperPath() {
   const executable = process.platform === "win32" ? "explore-better-fs.exe" : "explore-better-fs";
   const candidates = [
     process.env.EXPLORE_BETTER_FS_HELPER,
-    path.join(__dirname, "native", "bin", executable),
-    process.resourcesPath ? path.join(process.resourcesPath, "native", executable) : null
+    process.resourcesPath ? path.join(process.resourcesPath, "native", executable) : null,
+    path.join(__dirname, "native", "bin", executable)
   ].filter(Boolean);
   return candidates.find((candidate) => existsSync(candidate)) || null;
+}
+
+const windowsBrowseAttributeFlags = [
+  [0x00000001, "R"],
+  [0x00000002, "H"],
+  [0x00000004, "S"],
+  [0x00000020, "A"],
+  [0x00000400, "L"],
+  [0x00000800, "C"],
+  [0x00002000, "I"],
+  [0x00004000, "E"]
+];
+
+function nativeBrowseFlags(mask) {
+  const value = Number(mask || 0);
+  return windowsBrowseAttributeFlags
+    .filter(([bit]) => (value & bit) !== 0)
+    .map(([, flag]) => flag)
+    .join("");
+}
+
+function nativeBrowseEntryCount(payload) {
+  if (Array.isArray(payload)) return payload.length;
+  if (payload?.format === "columns-v1" && Array.isArray(payload.n)) return payload.n.length;
+  return 0;
+}
+
+function nativeBrowseField(payload, index, key) {
+  if (payload?.format === "columns-v1") {
+    return payload[key]?.[index];
+  }
+  return payload?.[key];
+}
+
+function entryFromNativeBrowseRow(parent, row, index = 0) {
+  const name = String(nativeBrowseField(row, index, "n") || "");
+  const separator = parent.endsWith("\\") || parent.endsWith("/") ? "" : path.sep;
+  const fullPath = `${parent}${separator}${name}`;
+  const attributeMask = Number(nativeBrowseField(row, index, "a") || 0);
+  const isDirectory = (attributeMask & 0x00000010) !== 0;
+  const flags = nativeBrowseFlags(attributeMask);
+  const readonly = flags.includes("R");
+  const hidden = flags.includes("H") || name.startsWith(".");
+  const system = flags.includes("S");
+  const archive = flags.includes("A");
+  const isSymlink = flags.includes("L");
+  return {
+    name,
+    path: fullPath,
+    parent,
+    isDirectory,
+    isFile: !isDirectory,
+    extension: isDirectory ? "" : path.extname(name).toLowerCase(),
+    kind: entryKind(name, isDirectory),
+    size: isDirectory ? null : Number(nativeBrowseField(row, index, "s") || 0),
+    modified: Number(nativeBrowseField(row, index, "m") || 0) || null,
+    created: Number(nativeBrowseField(row, index, "c") || 0) || null,
+    accessed: Number(nativeBrowseField(row, index, "x") || 0) || null,
+    readonly,
+    hidden,
+    system,
+    archive,
+    attributeText: flags,
+    isSymlink
+  };
+}
+
+function nativeDirectoryListingEligible(dir, entryCount, options = {}) {
+  return (
+    process.platform === "win32" &&
+    process.env.EXPLORE_BETTER_DISABLE_NATIVE_LISTING !== "1" &&
+    Number(entryCount || 0) >= nativeDirectoryListingThreshold &&
+    !String(dir || "").startsWith("\\\\") &&
+    options.includeDimensions !== true &&
+    options.includeLinks !== true &&
+    Boolean(nativeFilesystemHelperPath())
+  );
+}
+
+let nativeFilesystemHelperClientState = null;
+
+function failNativeFilesystemHelperClient(client, error) {
+  if (!client || client.failed) return;
+  client.failed = true;
+  if (nativeFilesystemHelperClientState === client) {
+    nativeFilesystemHelperClientState = null;
+  }
+  const failure = error instanceof Error ? error : new Error(String(error || "Native filesystem helper failed."));
+  for (const pending of [...client.pending.values()]) {
+    pending.complete(failure);
+  }
+  client.pending.clear();
+}
+
+function ensureNativeFilesystemHelperClient() {
+  const helperPath = nativeFilesystemHelperPath();
+  if (!helperPath) {
+    throw new Error("Native filesystem helper is unavailable.");
+  }
+  const current = nativeFilesystemHelperClientState;
+  if (current && !current.failed && current.helperPath === helperPath && current.child.exitCode === null) {
+    return current;
+  }
+  if (current && current.child.exitCode === null) {
+    current.child.kill();
+  }
+  const spawnStartedAt = monotonicMs();
+  const child = spawn(helperPath, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  const client = {
+    child,
+    helperPath,
+    stdout: "",
+    stderr: "",
+    pending: new Map(),
+    requests: 0,
+    startedAt: spawnStartedAt,
+    spawnedAt: null,
+    failed: false
+  };
+  nativeFilesystemHelperClientState = client;
+  child.once("spawn", () => {
+    client.spawnedAt = monotonicMs();
+  });
+  child.stdout.on("data", (chunk) => {
+    client.stdout += chunk.toString();
+    let index;
+    while ((index = client.stdout.indexOf("\n")) !== -1) {
+      const line = client.stdout.slice(0, index).trim();
+      client.stdout = client.stdout.slice(index + 1);
+      if (!line) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch (error) {
+        failNativeFilesystemHelperClient(client, error);
+        if (child.exitCode === null) child.kill();
+        return;
+      }
+      const pending = client.pending.get(message.id);
+      if (!pending) continue;
+      if (message.type === "progress") {
+        pending.onProgress?.(message.data || {});
+        continue;
+      }
+      if (!message.ok) {
+        pending.complete(new Error(message.error?.message || "Native filesystem helper request failed."));
+        continue;
+      }
+      pending.complete(null, message.data || {});
+    }
+  });
+  child.stderr.on("data", (chunk) => {
+    client.stderr = `${client.stderr}${chunk.toString()}`.slice(-8192);
+  });
+  child.once("error", (error) => failNativeFilesystemHelperClient(client, error));
+  child.once("exit", (code) => {
+    failNativeFilesystemHelperClient(
+      client,
+      new Error(`Native filesystem helper exited ${code}: ${client.stderr.trim()}`)
+    );
+  });
+  return client;
+}
+
+function nativeFilesystemHelperRequest(op, payload = {}, options = {}) {
+  const { signal = null, timeoutMs = 60000, onProgress = null } = options;
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason || operationCanceledError());
+  }
+  let client;
+  try {
+    client = ensureNativeFilesystemHelperClient();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  const requestId = crypto.randomUUID();
+  const requestStartedAt = monotonicMs();
+  const reused = client.requests > 0;
+  client.requests += 1;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const sendCancel = () => {
+      if (client.failed || client.child.exitCode !== null || !client.child.stdin.writable) return;
+      client.child.stdin.write(
+        `${JSON.stringify({ version: 1, id: crypto.randomUUID(), op: "cancel", targetId: requestId })}\n`
+      );
+    };
+    const onAbort = () => {
+      sendCancel();
+      complete(signal.reason || operationCanceledError());
+    };
+    const complete = (error, data = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      client.pending.delete(requestId);
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve({
+        data,
+        helperPath: client.helperPath,
+        helperPid: client.child.pid || null,
+        clientReused: reused,
+        requestMs: elapsedMs(requestStartedAt),
+        helperStartupMs: client.spawnedAt ? Math.max(0, client.spawnedAt - client.startedAt) : null
+      });
+    };
+    const timeout = setTimeout(() => {
+      sendCancel();
+      complete(new Error(`Native filesystem helper ${op} timed out.`));
+    }, Math.max(100, Number(timeoutMs || 60000)));
+    client.pending.set(requestId, { complete, onProgress });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    client.child.stdin.write(
+      `${JSON.stringify({ version: 1, id: requestId, op, ...payload })}\n`,
+      (error) => {
+        if (error) complete(error);
+      }
+    );
+  });
+}
+
+function stopNativeFilesystemHelperClient() {
+  const client = nativeFilesystemHelperClientState;
+  nativeFilesystemHelperClientState = null;
+  if (!client) return;
+  failNativeFilesystemHelperClient(client, new Error("Native filesystem helper stopped."));
+  if (client.child.exitCode === null) {
+    client.child.stdin.end();
+    client.child.kill();
+  }
+}
+
+function shouldWarmNativeFilesystemHelper() {
+  const configured = process.env.EXPLORE_BETTER_NATIVE_HELPER_WARMUP;
+  return (
+    process.platform === "win32" &&
+    configured !== "0" &&
+    (configured === "1" || Boolean(process.versions.electron)) &&
+    Boolean(nativeFilesystemHelperPath())
+  );
+}
+
+async function warmNativeFilesystemHelper() {
+  if (!shouldWarmNativeFilesystemHelper()) return null;
+  return nativeFilesystemHelperRequest("hello", {}, { timeoutMs: 5000 });
+}
+
+async function nativeDirectoryListing(dir, expectedEntries, signal) {
+  const result = await nativeFilesystemHelperRequest(
+    "browse",
+    { path: dir, maxEntries: expectedEntries, compact: true },
+    { signal, timeoutMs: 60000 }
+  );
+  const payload = result.data?.entries;
+  const rowCount = nativeBrowseEntryCount(payload);
+  if (result.data?.truncated || rowCount !== Number(expectedEntries || 0)) {
+    throw new Error(`Native directory browse returned ${rowCount} of ${expectedEntries} entries.`);
+  }
+  return {
+    entries: Array.from({ length: rowCount }, (_, index) =>
+      entryFromNativeBrowseRow(dir, Array.isArray(payload) ? payload[index] : payload, index)
+    ),
+    helperPath: result.helperPath,
+    helperPid: result.helperPid,
+    clientReused: result.clientReused,
+    requestMs: result.requestMs,
+    helperStartupMs: result.helperStartupMs,
+    returned: rowCount
+  };
+}
+
+function streamingDirectoryWindowListingEligible(targetStats, options = {}) {
+  const windowOptions = options.windowOptions;
+  return (
+    process.env.EXPLORE_BETTER_STREAMING_WINDOW !== "0" &&
+    targetStats?.isDirectory?.() === true &&
+    options.showHidden === true &&
+    options.includeDimensions !== true &&
+    options.includeLinks !== true &&
+    options.includeAttributes !== true &&
+    options.includeSignature !== true &&
+    windowOptions &&
+    Number(windowOptions.offset || 0) === 0 &&
+    Number(windowOptions.limit || 0) > 0
+  );
+}
+
+async function streamingDirectoryWindowListing(params) {
+  const {
+    timingStart,
+    signal,
+    priority,
+    statConcurrency,
+    requestedOriginal,
+    redirected,
+    targetStats,
+    dir,
+    targetMs,
+    labelState,
+    windowOptions
+  } = params;
+  const limit = boundedInteger(windowOptions?.limit, directoryListingWindowMaxEntries, {
+    min: 1,
+    max: directoryListingWindowMaxEntries
+  });
+  const readStart = monotonicMs();
+  const sampled = [];
+  const directory = await fs.opendir(dir, { bufferSize: Math.min(1024, Math.max(32, limit + 1)) });
+  try {
+    for await (const dirent of directory) {
+      throwIfAborted(signal);
+      sampled.push(dirent);
+      if (sampled.length > limit) break;
+    }
+  } finally {
+    await directory.close().catch(() => {});
+  }
+  const hasMore = sampled.length > limit;
+  const dirents = sampled.slice(0, limit);
+  const readMs = elapsedMs(readStart);
+  const statStart = monotonicMs();
+  const statResults = await mapConcurrent(
+    dirents,
+    statConcurrency,
+    async (dirent, index, workerSignal) => {
+      try {
+        return await statEntry(dir, dirent, null, {
+          signal: workerSignal,
+          includeDimensions: false,
+          includeLinks: false,
+          includeAttributes: false,
+          dimensionsCache: null
+        });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        return unavailableEntry(dir, dirent, null);
+      }
+    },
+    { signal }
+  );
+  const statMs = elapsedMs(statStart);
+  const labelStart = monotonicMs();
+  const labelMap = labelState ? labelState.labelMap : await readLabelMap();
+  const entries = attachPathLabels(statResults, labelMap);
+  const labelMs = elapsedMs(labelStart);
+  const totalEntries = hasMore ? null : entries.length;
+  const windowInfo = {
+    offset: 0,
+    limit,
+    returned: entries.length,
+    total: totalEntries,
+    totalKnown: !hasMore,
+    hasMore,
+    maxLimit: directoryListingWindowMaxEntries,
+    streamingFastPath: true
+  };
+  return {
+    path: dir,
+    requestedPath: requestedOriginal,
+    redirectedFrom: redirected ? requestedOriginal : null,
+    selectedPath: null,
+    targetKind: targetStats.isDirectory() ? "directory" : targetStats.isFile() ? "file" : "other",
+    name: isRoot(dir) ? dir : path.basename(dir),
+    parent: isRoot(dir) ? null : path.dirname(dir),
+    folderSignature: null,
+    showHidden: true,
+    hiddenFiltered: 0,
+    includeDimensions: false,
+    includeLinks: false,
+    includeAttributes: false,
+    includeSignature: false,
+    dimensionsCache: null,
+    window: windowInfo,
+    timing: {
+      totalMs: elapsedMs(timingStart),
+      targetMs,
+      readMs,
+      statMs,
+      dimensionsCacheMs: 0,
+      filterMs: 0,
+      signatureMs: 0,
+      labelMs,
+      scanned: sampled.length,
+      returned: entries.length,
+      totalEntries,
+      concurrency: statConcurrency,
+      provider: "node-stream-window",
+      priority,
+      window: windowInfo
+    },
+    entries
+  };
+}
+
+function nativeFullDirectoryListingEligible(dir, targetStats, options = {}) {
+  return (
+    process.platform === "win32" &&
+    process.env.EXPLORE_BETTER_DISABLE_NATIVE_LISTING !== "1" &&
+    process.env.EXPLORE_BETTER_NATIVE_FULL_LISTING !== "0" &&
+    targetStats?.isDirectory?.() === true &&
+    !String(dir || "").startsWith("\\\\") &&
+    options.includeDimensions !== true &&
+    options.includeLinks !== true &&
+    !options.windowOptions &&
+    Boolean(nativeFilesystemHelperPath())
+  );
+}
+
+async function nativeFullDirectoryListing(params) {
+  const {
+    timingStart,
+    signal,
+    showHidden,
+    includeAttributes,
+    includeSignature,
+    priority,
+    requestedOriginal,
+    redirected,
+    targetStats,
+    dir,
+    targetMs,
+    labelState,
+    listingCacheContext
+  } = params;
+  const nativeResult = await nativeFilesystemHelperRequest(
+    "browse",
+    { path: dir, maxEntries: 500000, showHidden, compact: true },
+    { signal, timeoutMs: 60000 }
+  );
+  const payload = nativeResult.data?.entries;
+  const rowCount = nativeBrowseEntryCount(payload);
+  const totalEntries = Math.max(rowCount, Number(nativeResult.data?.total ?? rowCount));
+  if (nativeResult.data?.truncated || rowCount !== totalEntries) {
+    throw new Error(`Native full browse returned ${rowCount} of ${totalEntries} entries.`);
+  }
+  throwIfAborted(signal);
+
+  const mapStart = monotonicMs();
+  const mappedEntries = Array.from({ length: rowCount }, (_, index) =>
+    entryFromNativeBrowseRow(dir, Array.isArray(payload) ? payload[index] : payload, index)
+  );
+  const mapMs = elapsedMs(mapStart);
+  const signatureStart = monotonicMs();
+  const folderSignature = includeSignature ? folderSignatureFromEntries(mappedEntries) : null;
+  const signatureMs = includeSignature ? elapsedMs(signatureStart) : 0;
+  const labelStart = monotonicMs();
+  const labelMap = labelState ? labelState.labelMap : await readLabelMap();
+  const entries = attachPathLabels(mappedEntries, labelMap);
+  const labelMs = elapsedMs(labelStart);
+  const hiddenFiltered = Number(nativeResult.data?.hiddenFiltered || 0);
+  const cacheInfo = listingCacheContext
+    ? {
+        hit: false,
+        source: "server-listing-cache",
+        eligible: true,
+        watcherAvailable: listingCacheContext.watcherAvailable,
+        watcherVersion: listingCacheContext.watchVersion,
+        includeDimensions: false,
+        includeLinks: false,
+        includeAttributes,
+        includeSignature,
+        probeMs: listingCacheContext.probeMs,
+        stampValidated: false,
+        directoryStamp: listingCacheContext.dirStamp || null,
+        stored: false,
+        missReason: listingCacheContext.skipReason || "miss",
+        reason: listingCacheContext.skipReason || "miss",
+        entries: entries.length,
+        totalEntriesCached: directoryListingCacheEntryTotal()
+      }
+    : null;
+  const listing = {
+    path: dir,
+    requestedPath: requestedOriginal,
+    redirectedFrom: redirected ? requestedOriginal : null,
+    selectedPath: null,
+    targetKind: targetStats.isDirectory() ? "directory" : "other",
+    name: isRoot(dir) ? dir : path.basename(dir),
+    parent: isRoot(dir) ? null : path.dirname(dir),
+    folderSignature,
+    showHidden,
+    hiddenFiltered,
+    includeDimensions: false,
+    includeLinks: false,
+    includeAttributes,
+    includeSignature,
+    dimensionsCache: null,
+    timing: {
+      totalMs: elapsedMs(timingStart),
+      targetMs,
+      readMs: 0,
+      statMs: nativeResult.requestMs,
+      mapMs,
+      dimensionsCacheMs: 0,
+      filterMs: 0,
+      signatureMs,
+      labelMs,
+      scanned: totalEntries + hiddenFiltered,
+      returned: entries.length,
+      concurrency: 1,
+      provider: "win32-find-files-full",
+      priority,
+      native: {
+        helperPid: nativeResult.helperPid,
+        clientReused: nativeResult.clientReused,
+        requestMs: nativeResult.requestMs,
+        helperStartupMs: nativeResult.helperStartupMs,
+        serializedEntries: rowCount,
+        wireFormat: payload?.format || "objects-v1"
+      },
+      ...(cacheInfo ? { cache: cacheInfo } : {})
+    },
+    ...(cacheInfo ? { cache: cacheInfo } : {}),
+    entries
+  };
+  if (cacheInfo) {
+    Object.assign(cacheInfo, rememberDirectoryListingCache(listing, listingCacheContext));
+  }
+  return listing;
+}
+
+function nativeDirectoryWindowListingEligible(dir, targetStats, options = {}) {
+  const windowOptions = options.windowOptions;
+  return (
+    process.platform === "win32" &&
+    process.env.EXPLORE_BETTER_DISABLE_NATIVE_LISTING !== "1" &&
+    process.env.EXPLORE_BETTER_NATIVE_LISTING_FASTPATH !== "0" &&
+    targetStats?.isDirectory?.() === true &&
+    !String(dir || "").startsWith("\\\\") &&
+    options.includeDimensions !== true &&
+    options.includeLinks !== true &&
+    options.includeSignature !== true &&
+    windowOptions &&
+    Number(windowOptions.offset || 0) === 0 &&
+    Number(windowOptions.limit || 0) > 0 &&
+    Boolean(nativeFilesystemHelperPath())
+  );
+}
+
+async function nativeDirectoryWindowListing(params) {
+  const {
+    timingStart,
+    signal,
+    showHidden,
+    includeAttributes,
+    priority,
+    requestedOriginal,
+    redirected,
+    targetStats,
+    dir,
+    targetMs,
+    labelState,
+    windowOptions
+  } = params;
+  const limit = boundedInteger(windowOptions?.limit, directoryListingWindowMaxEntries, {
+    min: 1,
+    max: directoryListingWindowMaxEntries
+  });
+  const nativeResult = await nativeFilesystemHelperRequest(
+    "browse",
+    { path: dir, maxEntries: limit, showHidden, compact: true },
+    { signal, timeoutMs: 60000 }
+  );
+  const payload = nativeResult.data?.entries;
+  const rowCount = nativeBrowseEntryCount(payload);
+  const totalEntries = Math.max(rowCount, Number(nativeResult.data?.total ?? rowCount));
+  if (rowCount > limit || (nativeResult.data?.truncated && rowCount !== Math.min(limit, totalEntries))) {
+    throw new Error(`Native window browse returned an invalid ${rowCount}/${totalEntries} entry window.`);
+  }
+  const labelStart = monotonicMs();
+  const labelMap = labelState ? labelState.labelMap : await readLabelMap();
+  const entries = attachPathLabels(
+    Array.from({ length: rowCount }, (_, index) =>
+      entryFromNativeBrowseRow(dir, Array.isArray(payload) ? payload[index] : payload, index)
+    ),
+    labelMap
+  );
+  const labelMs = elapsedMs(labelStart);
+  const hiddenFiltered = Number(nativeResult.data?.hiddenFiltered || 0);
+  const windowInfo = {
+    offset: 0,
+    limit,
+    returned: entries.length,
+    total: totalEntries,
+    hasMore: entries.length < totalEntries,
+    maxLimit: directoryListingWindowMaxEntries,
+    nativeFastPath: true
+  };
+  return {
+    path: dir,
+    requestedPath: requestedOriginal,
+    redirectedFrom: redirected ? requestedOriginal : null,
+    selectedPath: null,
+    targetKind: targetStats.isDirectory() ? "directory" : targetStats.isFile() ? "file" : "other",
+    name: isRoot(dir) ? dir : path.basename(dir),
+    parent: isRoot(dir) ? null : path.dirname(dir),
+    folderSignature: null,
+    showHidden,
+    hiddenFiltered,
+    includeDimensions: false,
+    includeLinks: false,
+    includeAttributes,
+    includeSignature: false,
+    dimensionsCache: null,
+    window: windowInfo,
+    timing: {
+      totalMs: elapsedMs(timingStart),
+      targetMs,
+      readMs: 0,
+      statMs: nativeResult.requestMs,
+      dimensionsCacheMs: 0,
+      filterMs: 0,
+      signatureMs: 0,
+      labelMs,
+      scanned: totalEntries + hiddenFiltered,
+      returned: entries.length,
+      totalEntries,
+      concurrency: 1,
+      provider: "win32-find-files-window",
+      priority,
+      window: windowInfo,
+      native: {
+        helperPid: nativeResult.helperPid,
+        clientReused: nativeResult.clientReused,
+        requestMs: nativeResult.requestMs,
+        helperStartupMs: nativeResult.helperStartupMs,
+        serializedEntries: rowCount,
+        wireFormat: payload?.format || "objects-v1"
+      }
+    },
+    entries
+  };
 }
 
 async function nativeAllocationSnapshot(rootPath, maxEntries, signal) {
   if (process.platform !== "win32" || String(rootPath).startsWith("\\\\")) {
     return null;
   }
-  const helperPath = nativeFilesystemHelperPath();
-  if (!helperPath) {
+  if (!nativeFilesystemHelperPath()) {
     return null;
   }
-  const requestId = crypto.randomUUID();
-  return new Promise((resolve, reject) => {
-    const child = spawn(helperPath, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onAbort);
-      child.stdin.end();
-      if (child.exitCode === null) child.kill();
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const processLines = () => {
-      let index;
-      while ((index = stdout.indexOf("\n")) !== -1) {
-        const line = stdout.slice(0, index).trim();
-        stdout = stdout.slice(index + 1);
-        if (!line) continue;
-        let message;
-        try {
-          message = JSON.parse(line);
-        } catch (error) {
-          finish(error);
-          return;
-        }
-        if (message.id !== requestId || message.type === "progress") continue;
-        if (!message.ok) {
-          finish(new Error(message.error?.message || "Native filesystem helper failed."));
-          return;
-        }
-        const entries = new Map();
-        for (const entry of message.data?.entries || []) {
-          entries.set(pathIdentity(entry.path), Number(entry.allocatedBytes || 0));
-        }
-        finish(null, {
-          entries,
-          allocatedSource: message.data?.volume?.allocatedSource || "win32-get-compressed-file-size",
-          allocationAccuracy: message.data?.volume?.allocationAccuracy || "exact",
-          clusterSize: Number(message.data?.volume?.clusterSize || 0),
-          helperPath,
-          helperFiles: Number(message.data?.files || 0),
-          skipped: Number(message.data?.skipped || 0)
-        });
-      }
-    };
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-      processLines();
-    });
-    child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
-    child.once("error", (error) => finish(error));
-    child.once("exit", (code) => {
-      if (!settled) finish(new Error(`Native filesystem helper exited ${code}: ${stderr.trim()}`));
-    });
-    const timeout = setTimeout(() => finish(new Error("Native filesystem helper timed out.")), 120000);
-    const onAbort = () => {
-      child.stdin.write(`${JSON.stringify({ version: 1, id: crypto.randomUUID(), op: "cancel", targetId: requestId })}\n`);
-      setTimeout(() => finish(signal.reason || operationCanceledError()), 150).unref();
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    child.stdin.write(`${JSON.stringify({ version: 1, id: requestId, op: "scan-tree", path: rootPath, maxEntries })}\n`);
-  });
+  const result = await nativeFilesystemHelperRequest(
+    "scan-tree",
+    { path: rootPath, maxEntries, compact: true },
+    { signal, timeoutMs: 120000 }
+  );
+  const payload = result.data?.entries;
+  const rows = Array.isArray(payload)
+    ? payload
+    : payload?.format === "columns-v1" && Array.isArray(payload.p)
+      ? payload.p.map((itemPath, index) => ({
+          path: path.isAbsolute(itemPath) ? itemPath : path.join(String(payload.root || rootPath), itemPath),
+          directory: Number(payload.d?.[index] || 0) === 1,
+          logicalBytes: Number(payload.s?.[index] || 0),
+          allocatedBytes: Number(payload.a?.[index] || 0),
+          modifiedMs: Number(payload.m?.[index] || 0)
+        }))
+      : [];
+  const entries = new Map();
+  for (const entry of rows) {
+    if (!entry.directory) {
+      entries.set(pathIdentity(entry.path), Number(entry.allocatedBytes || 0));
+    }
+  }
+  return {
+    entries,
+    rows,
+    completeEntries: result.data?.entryLimitMode === "all-entries",
+    truncated: result.data?.truncated === true,
+    allocatedSource: result.data?.volume?.allocatedSource || "win32-get-compressed-file-size",
+    allocationAccuracy: result.data?.volume?.allocationAccuracy || "exact",
+    clusterSize: Number(result.data?.volume?.clusterSize || 0),
+    helperPath: result.helperPath,
+    helperPid: result.helperPid,
+    clientReused: result.clientReused,
+    requestMs: result.requestMs,
+    helperFiles: Number(result.data?.files || 0),
+    helperFolders: Number(result.data?.folders || 0),
+    helperScannedEntries: Number(result.data?.scannedEntries || rows.length || 0),
+    wireFormat: result.data?.wireFormat || payload?.format || "objects-v1",
+    timing: result.data?.timing || null,
+    skipped: Number(result.data?.skipped || 0)
+  };
 }
 
 function allocatedBytesForPath(itemPath, bytes, allocationSnapshot) {
@@ -13619,7 +14563,10 @@ const sizeAnalysisCategoryExtensions = [
 ];
 
 function sizeAnalysisCategoryForExtension(extension) {
-  const label = extensionBucketFor(extension);
+  const value = String(extension || "").trim().toLowerCase();
+  const label = value.startsWith(".") && !value.includes("/") && !value.includes("\\")
+    ? value
+    : extensionBucketFor(value);
   if (label === "(none)") {
     return "No Extension";
   }
@@ -13795,7 +14742,7 @@ function readSizeAnalysisCache(context, startedAt) {
 }
 
 function rememberSizeAnalysisCache(report, context) {
-  if (!context?.cacheKey || report?.accessError || report?.truncated || context?.inFlightEntry?.invalidated === true) {
+  if (!context?.cacheKey || report?.accessError || context?.inFlightEntry?.invalidated === true) {
     return {
       stored: false,
       reason: context?.inFlightEntry?.invalidated === true ? "invalidated-during-scan" : "not-cacheable"
@@ -14016,74 +14963,125 @@ async function sizeAnalysisReport(body = {}, options = {}) {
       modified: rootStats.mtimeMs
     });
   } else if (rootStats.isDirectory()) {
-    const stack = [rootNode];
     folders.push(rootNode);
-    while (stack.length) {
-      throwIfAborted(signal);
-      if (scanned >= maxEntries) {
-        truncated = true;
-        break;
-      }
-      const current = stack.pop();
-      let dirents;
-      try {
-        dirents = await fs.readdir(current.path, { withFileTypes: true });
+    if (allocationSnapshot?.completeEntries && !followLinks) {
+      const nodesByPath = new Map([[pathIdentity(rootPath), rootNode]]);
+      const nativeRows = allocationSnapshot.rows.slice(0, maxEntries);
+      for (const row of nativeRows.filter((item) => item.directory === true)) {
         throwIfAborted(signal);
-      } catch (error) {
-        skipped.push({ path: current.path, reason: error.code || error.message || "unreadable" });
-        continue;
+        const fullPath = String(row.path || "");
+        const current = nodesByPath.get(pathIdentity(path.dirname(fullPath)));
+        if (!fullPath || !current) {
+          skipped.push({ path: fullPath || rootPath, reason: "native parent unavailable" });
+          continue;
+        }
+        const child = makeSizeNode(fullPath, current, current.depth + 1);
+        child.modified = Number(row.modifiedMs || 0) || null;
+        current.children.push(child);
+        folders.push(child);
+        nodesByPath.set(pathIdentity(fullPath), child);
+        addFolderToSizeNode(current);
+        scanned += 1;
       }
-      for (const dirent of dirents) {
+      for (const row of nativeRows.filter((item) => item.directory !== true)) {
+        throwIfAborted(signal);
+        const fullPath = String(row.path || "");
+        const fileName = String(row.name || path.basename(fullPath));
+        const current = nodesByPath.get(pathIdentity(path.dirname(fullPath)));
+        if (!fullPath || !current) {
+          skipped.push({ path: fullPath || rootPath, reason: "native parent unavailable" });
+          continue;
+        }
+        const bytes = Number(row.logicalBytes || 0);
+        const allocated = Number(row.allocatedBytes || allocatedBytesForPath(fullPath, bytes, allocationSnapshot));
+        const modified = Number(row.modifiedMs || 0) || null;
+        addFileToSizeNode(current, bytes, allocated, modified);
+        rememberExtensionStat(extensionStats, fileName, bytes, allocated);
+        rememberCategoryStat(categoryStats, fileName, bytes, allocated);
+        rememberTopFile(topFiles, {
+          name: fileName,
+          path: fullPath,
+          parent: current.path,
+          extension: extensionBucketFor(fileName),
+          kind: entryKind(fileName, false),
+          category: sizeAnalysisCategoryForExtension(fileName),
+          size: bytes,
+          allocated,
+          modified
+        });
+        scanned += 1;
+      }
+      scanned = Math.max(scanned, allocationSnapshot.helperScannedEntries);
+      truncated = allocationSnapshot.truncated || scanned >= maxEntries;
+    } else {
+      const stack = [rootNode];
+      while (stack.length) {
         throwIfAborted(signal);
         if (scanned >= maxEntries) {
           truncated = true;
           break;
         }
-        const fullPath = path.join(current.path, dirent.name);
+        const current = stack.pop();
+        let dirents;
         try {
-          const lstat = await fs.lstat(fullPath);
+          dirents = await fs.readdir(current.path, { withFileTypes: true });
           throwIfAborted(signal);
-          scanned += 1;
-          if (lstat.isSymbolicLink() && !followLinks) {
-            skipped.push({ path: fullPath, reason: "link skipped" });
-            continue;
-          }
-          const stats = lstat.isSymbolicLink() ? await fs.stat(fullPath) : lstat;
-          throwIfAborted(signal);
-          if (stats.isDirectory()) {
-            const child = makeSizeNode(fullPath, current, current.depth + 1);
-            current.children.push(child);
-            folders.push(child);
-            addFolderToSizeNode(current);
-            stack.push(child);
-          } else if (stats.isFile()) {
-            const bytes = Number(stats.size || 0);
-            const allocated = allocatedBytesForPath(fullPath, bytes, allocationSnapshot);
-            addFileToSizeNode(current, bytes, allocated, stats.mtimeMs);
-            rememberExtensionStat(extensionStats, dirent.name, bytes, allocated);
-            rememberCategoryStat(categoryStats, dirent.name, bytes, allocated);
-            rememberTopFile(topFiles, {
-              name: dirent.name,
-              path: fullPath,
-              parent: current.path,
-              extension: extensionBucketFor(dirent.name),
-              kind: entryKind(dirent.name, false),
-              category: sizeAnalysisCategoryForExtension(dirent.name),
-              size: bytes,
-              allocated,
-              modified: stats.mtimeMs
-            });
-          }
         } catch (error) {
-          if (isAbortError(error)) {
-            throw error;
-          }
-          skipped.push({ path: fullPath, reason: error.code || error.message || "unavailable" });
+          skipped.push({ path: current.path, reason: error.code || error.message || "unreadable" });
+          continue;
         }
-      }
-      if (scanned > 0 && scanned % 1500 === 0) {
-        await yieldToEventLoop();
-        throwIfAborted(signal);
+        for (const dirent of dirents) {
+          throwIfAborted(signal);
+          if (scanned >= maxEntries) {
+            truncated = true;
+            break;
+          }
+          const fullPath = path.join(current.path, dirent.name);
+          try {
+            const lstat = await fs.lstat(fullPath);
+            throwIfAborted(signal);
+            scanned += 1;
+            if (lstat.isSymbolicLink() && !followLinks) {
+              skipped.push({ path: fullPath, reason: "link skipped" });
+              continue;
+            }
+            const stats = lstat.isSymbolicLink() ? await fs.stat(fullPath) : lstat;
+            throwIfAborted(signal);
+            if (stats.isDirectory()) {
+              const child = makeSizeNode(fullPath, current, current.depth + 1);
+              current.children.push(child);
+              folders.push(child);
+              addFolderToSizeNode(current);
+              stack.push(child);
+            } else if (stats.isFile()) {
+              const bytes = Number(stats.size || 0);
+              const allocated = allocatedBytesForPath(fullPath, bytes, allocationSnapshot);
+              addFileToSizeNode(current, bytes, allocated, stats.mtimeMs);
+              rememberExtensionStat(extensionStats, dirent.name, bytes, allocated);
+              rememberCategoryStat(categoryStats, dirent.name, bytes, allocated);
+              rememberTopFile(topFiles, {
+                name: dirent.name,
+                path: fullPath,
+                parent: current.path,
+                extension: extensionBucketFor(dirent.name),
+                kind: entryKind(dirent.name, false),
+                category: sizeAnalysisCategoryForExtension(dirent.name),
+                size: bytes,
+                allocated,
+                modified: stats.mtimeMs
+              });
+            }
+          } catch (error) {
+            if (isAbortError(error)) {
+              throw error;
+            }
+            skipped.push({ path: fullPath, reason: error.code || error.message || "unavailable" });
+          }
+        }
+        if (scanned > 0 && scanned % 1500 === 0) {
+          await yieldToEventLoop();
+          throwIfAborted(signal);
+        }
       }
     }
   } else {
@@ -14115,6 +15113,7 @@ async function sizeAnalysisReport(body = {}, options = {}) {
   const categories = [...categoryStats.values()]
     .sort((left, right) => Number(right.size || 0) - Number(left.size || 0))
     .slice(0, 40);
+  const nativeSkipped = allocationSnapshot?.completeEntries ? Number(allocationSnapshot.skipped || 0) : 0;
 
   const report = {
     generatedAt: new Date().toISOString(),
@@ -14131,6 +15130,20 @@ async function sizeAnalysisReport(body = {}, options = {}) {
     clusterSize,
     allocationAccuracy,
     allocationProvider: allocationSnapshot ? "native-go-helper" : "node-fallback",
+    scanProvider: allocationSnapshot?.completeEntries ? "native-go-helper-single-pass" : "node-walk",
+    native: allocationSnapshot
+      ? {
+          requestMs: allocationSnapshot.requestMs,
+          helperPid: allocationSnapshot.helperPid,
+          clientReused: allocationSnapshot.clientReused,
+          scannedEntries: allocationSnapshot.helperScannedEntries,
+          files: allocationSnapshot.helperFiles,
+          folders: allocationSnapshot.helperFolders,
+          wireFormat: allocationSnapshot.wireFormat,
+          timing: allocationSnapshot.timing,
+          singlePass: allocationSnapshot.completeEntries === true
+        }
+      : null,
     summary: {
       bytes: rootNode.size,
       allocated: rootNode.allocated,
@@ -14138,7 +15151,7 @@ async function sizeAnalysisReport(body = {}, options = {}) {
       folders: rootNode.folders,
       extensions: extensionStats.size,
       categories: categoryStats.size,
-      skipped: skipped.length,
+      skipped: skipped.length + nativeSkipped,
       elapsedMs: elapsedMs(startedAt)
     },
     tree: compactSizeTree(rootNode, { maxDepth, maxChildren }),
@@ -14178,7 +15191,7 @@ function normalizeChecksumOptions(body = {}) {
 
 function commonParentForPaths(paths) {
   if (!paths.length) {
-    return process.cwd();
+    return workspaceRoot;
   }
   const parents = paths.map((itemPath) => path.dirname(itemPath));
   const firstRoot = path.parse(parents[0]).root.toLowerCase();
@@ -14195,7 +15208,7 @@ function commonParentForPaths(paths) {
       common = path.dirname(common);
     }
   }
-  return common || path.parse(paths[0]).root || process.cwd();
+  return common || path.parse(paths[0]).root || workspaceRoot;
 }
 
 function checksumManifestName(itemPath, rootPath) {
@@ -14605,7 +15618,7 @@ async function getRoots() {
     { name: "Desktop", path: path.join(os.homedir(), "Desktop"), kind: "desktop" },
     { name: "Documents", path: path.join(os.homedir(), "Documents"), kind: "documents" },
     { name: "Downloads", path: path.join(os.homedir(), "Downloads"), kind: "downloads" },
-    { name: "Workspace", path: process.cwd(), kind: "workspace" }
+    { name: workspaceLabel, path: workspaceRoot, kind: "workspace" }
   ];
 
   const availableShortcuts = [];
@@ -14628,12 +15641,12 @@ async function getRoots() {
   }
 
   return {
-    cwd: process.cwd(),
+    cwd: workspaceRoot,
     home: os.homedir(),
     appDataRoot,
     stateFile,
     trashRoot,
-    shortcuts: availableShortcuts,
+    shortcuts: uniqueExistingPathItems(availableShortcuts),
     drives
   };
 }
@@ -15553,7 +16566,7 @@ function contentSnippet(content, query) {
 }
 
 async function advancedSearchUncached(options) {
-  const root = resolveUserPath(options.path || options.root || process.cwd());
+  const root = resolveUserPath(options.path || options.root || workspaceRoot);
   const nameNeedle = String(options.query || options.name || "").toLowerCase();
   const contentNeedle = String(options.content || "").trim();
   const kind = String(options.kind || "all");
@@ -15581,30 +16594,31 @@ async function advancedSearchUncached(options) {
 
   while (stack.length && results.length < limit && scanned < maxScanned) {
     const current = stack.pop();
-    let dirents;
+    let listing;
     try {
-      dirents = await fs.readdir(current, { withFileTypes: true });
+      listing = await listDirectory(current, {
+        showHidden: true,
+        includeAttributes: false,
+        includeSignature: true,
+        priority: "foreground"
+      });
     } catch (error) {
       skipped.push({ path: current, reason: error.code || "unreadable" });
       continue;
     }
-    const attributeMap = await windowsAttributeMap(current);
+    if (listing?.accessDenied) {
+      skipped.push({ path: current, reason: listing.errorCode || "unreadable" });
+      continue;
+    }
 
-    for (const dirent of dirents) {
+    for (const listedEntry of listing?.entries || []) {
       if (results.length >= limit || scanned >= maxScanned) {
         break;
       }
       scanned += 1;
-      const fullPath = path.join(current, dirent.name);
-      const lowerName = dirent.name.toLowerCase();
-
-      let entry;
-      try {
-        entry = await statEntry(current, dirent, attributeMap);
-      } catch (error) {
-        skipped.push({ path: fullPath, reason: error.code || "unavailable" });
-        continue;
-      }
+      const entry = listedEntry;
+      const fullPath = entry.path || path.join(current, entry.name || "");
+      const lowerName = String(entry.name || "").toLowerCase();
 
       if (!includeHidden && !visibleByHiddenSetting(entry, false)) {
         continue;
@@ -15637,7 +16651,7 @@ async function advancedSearchUncached(options) {
       }
 
       if (
-        dirent.isDirectory() &&
+        entry.isDirectory &&
         (includeHidden || visibleByHiddenSetting(entry, false)) &&
         ![".git", "node_modules", ".venv", "dist", "build"].includes(lowerName)
       ) {
@@ -15665,7 +16679,7 @@ async function advancedSearchUncached(options) {
 }
 
 function advancedSearchCacheKey(options = {}) {
-  const root = resolveUserPath(options.path || options.root || process.cwd());
+  const root = resolveUserPath(options.path || options.root || workspaceRoot);
   const ordered = {};
   for (const key of Object.keys(options).sort()) {
     ordered[key] = options[key];
@@ -15674,7 +16688,7 @@ function advancedSearchCacheKey(options = {}) {
 }
 
 async function advancedSearch(options = {}) {
-  const rootPath = resolveUserPath(options.path || options.root || process.cwd());
+  const rootPath = resolveUserPath(options.path || options.root || workspaceRoot);
   const cacheKey = advancedSearchCacheKey(options);
   const now = Date.now();
   const cached = advancedSearchCache.get(cacheKey);
@@ -15714,7 +16728,7 @@ async function searchDirectory(rootPath, query, limit = 200) {
 }
 
 async function flatView(options = {}) {
-  const root = resolveUserPath(options.path || options.root || process.cwd());
+  const root = resolveUserPath(options.path || options.root || workspaceRoot);
   const mode = ["all", "files", "folders"].includes(options.mode) ? options.mode : "files";
   const limit = Math.max(1, Math.min(Number(options.limit || 1000), 10_000));
   const maxScanned = Math.max(100, Math.min(Number(options.maxScanned || 20_000), 100_000));
@@ -15791,7 +16805,7 @@ async function flatView(options = {}) {
 }
 
 async function duplicateFiles(options = {}) {
-  const root = resolveUserPath(options.path || options.root || process.cwd());
+  const root = resolveUserPath(options.path || options.root || workspaceRoot);
   const mode = options.mode === "hash" ? "hash" : "size";
   const recursive = options.recursive !== false;
   const includeHidden = Boolean(options.includeHidden);
@@ -16665,12 +17679,12 @@ function limitedAppend(current, chunk, limit = 200_000) {
 }
 
 async function buildCommandContext(body) {
-  const activePath = resolveUserPath(body.activePath || body.contextPath || process.cwd());
+  const activePath = resolveUserPath(body.activePath || body.contextPath || workspaceRoot);
   const otherPath = resolveUserPath(body.otherPath || activePath);
   const selectedPaths = Array.isArray(body.selectedPaths)
     ? body.selectedPaths.map(resolveUserPath)
     : [];
-  const cwd = (await pathExists(activePath)) ? activePath : process.cwd();
+  const cwd = (await pathExists(activePath)) ? activePath : workspaceRoot;
   return {
     activePath,
     otherPath,
@@ -17296,8 +18310,8 @@ function sanitizeScriptPathList(paths) {
   return Array.isArray(paths) ? paths.filter(Boolean).map(resolveUserPath).slice(0, 1000) : [];
 }
 
-function scriptPaneContext(source = {}, fallbackPath = process.cwd(), fallbackSelected = []) {
-  const panePath = resolveUserPath(source.path || fallbackPath || process.cwd());
+function scriptPaneContext(source = {}, fallbackPath = workspaceRoot, fallbackSelected = []) {
+  const panePath = resolveUserPath(source.path || fallbackPath || workspaceRoot);
   return {
     path: panePath,
     selectedPaths: sanitizeScriptPathList(
@@ -17318,7 +18332,7 @@ async function runTrustedScript(body, hooks = {}) {
     }
   };
   const activePane = normalizeScriptPaneName(body.activePane);
-  const activePath = resolveUserPath(body.activePath || body.contextPath || process.cwd());
+  const activePath = resolveUserPath(body.activePath || body.contextPath || workspaceRoot);
   const otherPath = resolveUserPath(body.otherPath || activePath);
   const explicitSelectedPaths = sanitizeScriptPathList(body.selectedPaths);
   const leftDefaults =
@@ -17511,6 +18525,10 @@ async function runTrustedScript(body, hooks = {}) {
 
 async function handleApi(req, res, url) {
   const route = `${req.method} ${url.pathname}`;
+
+  if (route === "GET /api/desktop/health") {
+    return sendJson(res, 200, { ok: true, desktopInstanceToken });
+  }
 
   if (route === "GET /api/manual") {
     const manualPath = path.join(__dirname, "USER_MANUAL.md");
@@ -18004,12 +19022,16 @@ async function handleApi(req, res, url) {
       includeLinks: url.searchParams.get("includeLinks") === "true",
       includeAttributes: url.searchParams.get("includeAttributes") === "true",
       includeSignature: url.searchParams.get("includeSignature") === "true",
-      bypassCache: url.searchParams.get("bypassCache") === "true"
+      bypassCache: url.searchParams.get("bypassCache") === "true",
+      windowOptions
     });
     return sendJson(
       res,
       200,
-      windowDirectoryListing(listing, windowOptions)
+      formattedDirectoryListing(
+        windowDirectoryListing(listing, windowOptions),
+        url.searchParams.get("format") || ""
+      )
     );
   }
 
@@ -18565,7 +19587,7 @@ async function handleApi(req, res, url) {
           result: {
             scriptId: body.scriptId ? String(body.scriptId).slice(0, 120) : null,
             name: scriptName || "Ad hoc script",
-            contextPath: resolveUserPath(body.contextPath || body.activePath || process.cwd()),
+            contextPath: resolveUserPath(body.contextPath || body.activePath || workspaceRoot),
             selectedCount: Array.isArray(body.selectedPaths) ? body.selectedPaths.length : 0,
             logs: boundedLogLines(output.logs),
             events: Array.isArray(output.events) ? output.events.slice(0, 100) : [],
@@ -18652,6 +19674,9 @@ export function startServer() {
   if (server.listening) {
     return Promise.resolve(server);
   }
+  warmNativeFilesystemHelper().catch((error) => {
+    console.warn(`Could not warm native filesystem helper: ${error.message}`);
+  });
   return new Promise((resolve, reject) => {
     const onError = (error) => {
       server.off("listening", onListening);
@@ -18673,6 +19698,7 @@ export function startServer() {
 
 export function stopServer() {
   if (!server.listening) {
+    stopNativeFilesystemHelperClient();
     return Promise.resolve();
   }
   return new Promise((resolve, reject) => {
@@ -18681,6 +19707,7 @@ export function stopServer() {
         reject(error);
         return;
       }
+      stopNativeFilesystemHelperClient();
       resolve();
     });
   });

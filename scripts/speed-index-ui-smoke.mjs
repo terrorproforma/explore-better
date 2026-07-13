@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { clickDockAction } from "./ui-helpers.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -293,7 +294,7 @@ async function main() {
       waitUntil: "domcontentloaded"
     });
     await page.waitForSelector('.pane[data-pane="left"] [data-entry-path]', { timeout: 10000 });
-    await page.locator('[data-global-action="speed"]').click();
+    await clickDockAction(page, "speed");
     await page.waitForSelector("#speed-dialog[open]", { timeout: 10000 });
     initial = await waitForResult(
       page,

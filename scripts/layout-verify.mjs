@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { clickDockAction } from "./ui-helpers.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -119,9 +120,10 @@ async function inspectLayout(page, mode = "workbench") {
             [".pane.active .toolbar input", "toolbar"],
             [".pane.active .toolbar select", "toolbar"],
             [".pane.active .file-head button", "file-head"],
-            [".command-dock > button:not([hidden])", "dock"],
-            [".command-dock > select", "dock"],
-            [".command-dock > label", "dock"],
+            [".dock-action-strip > button:not([hidden])", "dock"],
+            [".dock-action-strip > select", "dock"],
+            [".dock-mode-strip > label", "dock"],
+            [".dock-context > button, .dock-context > span", "dock"],
             [".layout-toggle button", "layout-toggle"]
           ];
     const issues = [];
@@ -138,6 +140,9 @@ async function inspectLayout(page, mode = "workbench") {
       if (area === "breadcrumbs") {
         return false;
       }
+      if (element.classList.contains("pane-command")) {
+        return false;
+      }
       const text = (element.innerText || element.textContent || element.value || "").trim();
       return text.length > 2 && element.scrollWidth > element.clientWidth + 4;
     };
@@ -148,7 +153,18 @@ async function inspectLayout(page, mode = "workbench") {
         const rect = element.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) continue;
         const text = (element.innerText || element.textContent || element.value || "").trim().replace(/\s+/g, " ");
-        const isIcon = text.length <= 2;
+        const isCollapsedToggle =
+          element.classList.contains("dock-toggle") && getComputedStyle(element.querySelector("span")).display === "none";
+        const isCollapsedStatus =
+          element.classList.contains("dock-status") &&
+          getComputedStyle(element.querySelector(".dock-status-value"))?.display === "none";
+        const isIcon =
+          text.length <= 2 ||
+          isCollapsedToggle ||
+          isCollapsedStatus ||
+          element.classList.contains("icon-button") ||
+          element.classList.contains("pane-command") ||
+          Boolean(element.querySelector(".view-glyph, .layout-glyph"));
         const minWidth = area === "breadcrumbs" ? (isIcon ? 20 : 30) : isIcon ? 24 : 36;
         const minHeight = area === "breadcrumbs" ? 20 : 24;
         const clipped = clippedText(element, area);
@@ -222,8 +238,13 @@ async function inspectTopbarReachability(page) {
         .replace(/\s+/g, " ");
     const topbar = document.querySelector(".topbar");
     const rootStrip = document.querySelector(".root-strip");
-    const fixedElements = [...document.querySelectorAll(".topbar .brand, .topbar .status-pill")];
-    const rootButtons = [...document.querySelectorAll(".root-strip button")];
+    const isVisible = (element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const fixedElements = [...document.querySelectorAll(".topbar .brand, .topbar .status-pill")].filter(isVisible);
+    const rootButtons = [...document.querySelectorAll(".root-strip button")].filter(isVisible);
     const issues = [];
     const samples = [];
     const topbarRect = topbar?.getBoundingClientRect();
@@ -326,9 +347,19 @@ async function inspectChromeReachability(page) {
         selector: ".pane.active .toolbar button, .pane.active .toolbar input, .pane.active .toolbar select"
       },
       {
-        area: "dock-reachability",
-        container: document.querySelector(".command-dock"),
-        selector: ".command-dock > button:not([hidden]), .command-dock > select, .command-dock > label, .command-dock > .layout-toggle"
+        area: "dock-action-reachability",
+        container: document.querySelector(".dock-action-strip"),
+        selector: ".dock-action-strip > button:not([hidden]), .dock-action-strip > select, .saved-command-strip > button:not([hidden])"
+      },
+      {
+        area: "dock-mode-reachability",
+        container: document.querySelector(".dock-mode-strip"),
+        selector: ".dock-mode-strip > label, .layout-toggle > button"
+      },
+      {
+        area: "dock-context-reachability",
+        container: document.querySelector(".dock-context"),
+        selector: ".dock-context > button, .dock-context > span"
       }
     ];
     const issues = [];
@@ -350,11 +381,23 @@ async function inspectChromeReachability(page) {
         const containerRect = container.getBoundingClientRect();
         const rect = element.getBoundingClientRect();
         const text = textFor(element);
+        const collapsedToggle =
+          element.classList.contains("dock-toggle") && getComputedStyle(element.querySelector("span")).display === "none";
+        const collapsedStatus =
+          element.classList.contains("dock-status") &&
+          getComputedStyle(element.querySelector(".dock-status-value"))?.display === "none";
+        const iconOnly =
+          collapsedToggle ||
+          collapsedStatus ||
+          element.classList.contains("icon-button") ||
+          element.classList.contains("pane-command") ||
+          Boolean(element.querySelector(".view-glyph, .layout-glyph"));
         const clipped =
+          !iconOnly &&
           !element.matches("input, select, textarea") &&
           text.length > 2 &&
           element.scrollWidth > element.clientWidth + 4;
-        const squished = rect.width < (text.length <= 2 ? 24 : 36) || rect.height < 24;
+        const squished = rect.width < (iconOnly || text.length <= 2 ? 24 : 36) || rect.height < 24;
         const outsideContainer =
           rect.left < containerRect.left - 1 ||
           rect.right > containerRect.right + 1 ||
@@ -387,24 +430,132 @@ async function inspectChromeReachability(page) {
       samples,
       counts: {
         toolbar: samples.filter((sample) => sample.area === "toolbar-reachability").length,
-        dock: samples.filter((sample) => sample.area === "dock-reachability").length
+        dock: samples.filter((sample) => sample.area.startsWith("dock-")).length
       }
     };
+  });
+}
+
+async function inspectPaneMoreMenu(page) {
+  const summary = page.locator(".pane.active .pane-more > summary");
+  await summary.click();
+  await page.waitForFunction(() => document.querySelector(".pane.active .pane-more[open] .pane-more-menu")?.classList.contains("positioned"));
+  const report = await page.evaluate(() => {
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    const menu = document.querySelector(".pane.active .pane-more[open] .pane-more-menu");
+    const issues = [];
+    const controls = [];
+    if (!menu) {
+      return { mode: "pane-more", viewport, issues: [{ area: "pane-more", reason: "missing-open-menu" }], controls };
+    }
+    const menuRect = menu.getBoundingClientRect();
+    const paneRect = menu.closest(".pane")?.getBoundingClientRect();
+    const outsideViewport = menuRect.left < -1 || menuRect.right > viewport.width + 1 || menuRect.top < -1 || menuRect.bottom > viewport.height + 1;
+    if (outsideViewport) {
+      issues.push({ area: "pane-more", reason: "outside-viewport", rect: { left: menuRect.left, top: menuRect.top, right: menuRect.right, bottom: menuRect.bottom } });
+    }
+    if (paneRect && (menuRect.left < paneRect.left - 1 || menuRect.right > paneRect.right + 1)) {
+      issues.push({
+        area: "pane-more",
+        reason: "outside-pane-horizontal-bounds",
+        rect: { left: menuRect.left, right: menuRect.right },
+        pane: { left: paneRect.left, right: paneRect.right }
+      });
+    }
+    for (const element of menu.querySelectorAll("button, select")) {
+      const rect = element.getBoundingClientRect();
+      const text = (element.textContent || element.value || element.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ");
+      const clipped = !element.matches("select") && element.scrollWidth > element.clientWidth + 4;
+      const outsideMenu = rect.left < menuRect.left - 1 || rect.right > menuRect.right + 1 || rect.top < menuRect.top - 1 || rect.bottom > menuRect.bottom + 1;
+      const item = { text, clipped, outsideMenu, width: Math.round(rect.width), height: Math.round(rect.height) };
+      controls.push(item);
+      if (clipped || outsideMenu || rect.width < 36 || rect.height < 24) {
+        issues.push({ area: "pane-more-control", ...item });
+      }
+    }
+    return { mode: "pane-more", viewport, issues, controls };
+  });
+  await summary.click();
+  return report;
+}
+
+async function verifyFocusWorkspace(page) {
+  const before = await page.evaluate(() => ({
+    viewportWidth: window.innerWidth,
+    paneWidth: [...document.querySelectorAll(".pane")].reduce((sum, pane) => sum + pane.getBoundingClientRect().width, 0),
+    navDisplay: getComputedStyle(document.querySelector(".nav-rail")).display,
+    inspectorDisplay: getComputedStyle(document.querySelector(".inspector")).display
+  }));
+  await page.locator('[data-topbar-action="focus"]').click();
+  await page.waitForFunction(() => document.querySelector(".app-shell")?.classList.contains("focus-files"));
+  const focused = await page.evaluate(() => ({
+    paneWidth: [...document.querySelectorAll(".pane")].reduce((sum, pane) => sum + pane.getBoundingClientRect().width, 0),
+    navDisplay: getComputedStyle(document.querySelector(".nav-rail")).display,
+    inspectorDisplay: getComputedStyle(document.querySelector(".inspector")).display,
+    pressed: document.querySelector('[data-topbar-action="focus"]')?.getAttribute("aria-pressed")
+  }));
+  await page.locator('[data-topbar-action="focus"]').click();
+  await page.waitForFunction(() => !document.querySelector(".app-shell")?.classList.contains("focus-files"));
+  const restored = await page.evaluate(() => ({
+    navDisplay: getComputedStyle(document.querySelector(".nav-rail")).display,
+    inspectorDisplay: getComputedStyle(document.querySelector(".inspector")).display,
+    pressed: document.querySelector('[data-topbar-action="focus"]')?.getAttribute("aria-pressed")
+  }));
+  const issues = [];
+  if (focused.navDisplay !== "none" || focused.inspectorDisplay !== "none" || focused.pressed !== "true") {
+    issues.push({ area: "focus-workspace", reason: "chrome-not-hidden", focused });
+  }
+  if (before.viewportWidth >= 1000 && focused.paneWidth <= before.paneWidth + 100) {
+    issues.push({ area: "focus-workspace", reason: "pane-area-did-not-grow", before, focused });
+  }
+  if (restored.navDisplay === "none" || restored.inspectorDisplay === "none" || restored.pressed !== "false") {
+    issues.push({ area: "focus-workspace", reason: "chrome-not-restored", restored });
+  }
+  return { mode: "focus-workspace", before, focused, restored, issues };
+}
+
+async function clickHorizontalLayoutToggle(page) {
+  const horizontalToggle = page.locator('[data-layout-mode="horizontal"]');
+  const toggleCount = await horizontalToggle.count();
+  if (toggleCount !== 1) {
+    throw new Error(`Expected one horizontal layout toggle, found ${toggleCount}.`);
+  }
+  await horizontalToggle.scrollIntoViewIfNeeded();
+  const toggleHitTarget = await horizontalToggle.evaluate((element) => {
+    const data = (node) => {
+      const rect = node?.getBoundingClientRect?.();
+      return rect
+        ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom }
+        : null;
+    };
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return {
+      button: data(element),
+      modeStrip: data(element.closest(".dock-mode-strip")),
+      dock: data(element.closest(".command-dock")),
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      hitTag: hit?.tagName || "",
+      hitClass: hit?.className || "",
+      hitOwnsButton: hit === element || element.contains(hit)
+    };
+  });
+  if (!toggleHitTarget.hitOwnsButton) {
+    throw new Error(`Horizontal layout toggle is not hit-testable: ${JSON.stringify(toggleHitTarget)}`);
+  }
+  await page.mouse.click(
+    toggleHitTarget.button.x + toggleHitTarget.button.width / 2,
+    toggleHitTarget.button.y + toggleHitTarget.button.height / 2
+  );
+  await page.waitForFunction(() => document.querySelector(".workbench")?.classList.contains("layout-horizontal"), {
+    timeout: 5000
   });
 }
 
 async function verifyDoubleClickNavigation(page) {
   const folderName = "Folder With A Very Long Name For Header Verification";
   const targetPath = path.join(fixture, folderName);
-  const horizontalToggle = page.locator('[data-layout-mode="horizontal"]');
-  const toggleCount = await horizontalToggle.count();
-  if (toggleCount !== 1) {
-    throw new Error(`Expected one horizontal layout toggle, found ${toggleCount}.`);
-  }
-  await horizontalToggle.click();
-  await page.waitForFunction(() => document.querySelector(".workbench")?.classList.contains("layout-horizontal"), {
-    timeout: 5000
-  });
+  await clickHorizontalLayoutToggle(page);
   const row = page.locator('.pane[data-pane="left"] [data-entry-path]').filter({ hasText: folderName });
   const rowCount = await row.count();
   if (rowCount !== 1) {
@@ -438,15 +589,7 @@ async function verifyDoubleClickNavigation(page) {
 async function verifyFolderRowHitTarget(page) {
   const paneName = "left";
   const folderName = "Folder With A Very Long Name For Header Verification";
-  const horizontalToggle = page.locator('[data-layout-mode="horizontal"]');
-  const toggleCount = await horizontalToggle.count();
-  if (toggleCount !== 1) {
-    throw new Error(`Expected one horizontal layout toggle, found ${toggleCount}.`);
-  }
-  await horizontalToggle.click();
-  await page.waitForFunction(() => document.querySelector(".workbench")?.classList.contains("layout-horizontal"), {
-    timeout: 5000
-  });
+  await clickHorizontalLayoutToggle(page);
   const row = page.locator(`.pane[data-pane="${paneName}"] [data-entry-path]`).filter({ hasText: folderName });
   const rowCount = await row.count();
   if (rowCount !== 1) {
@@ -642,11 +785,13 @@ async function main() {
       const workbenchReport = await inspectLayout(page, "workbench");
       const topbarReachability = await inspectTopbarReachability(page);
       const chromeReachability = await inspectChromeReachability(page);
+      const paneMore = await inspectPaneMoreMenu(page);
+      const focusWorkspace = await verifyFocusWorkspace(page);
       const rowHitTargets = await verifyFolderRowHitTarget(page);
       const workbenchScreenshot = path.join(artifactsDir, `layout-${viewport.name}.png`);
       await page.screenshot({ path: workbenchScreenshot, fullPage: true });
       const interactions = await verifyDoubleClickNavigation(page);
-      await page.locator('[data-global-action="speed"]').click();
+      await clickDockAction(page, "speed");
       await page.waitForSelector("#speed-dialog[open]");
       const speedTelemetry = await verifySpeedTelemetry(page);
       const speedReport = await inspectLayout(page, "speed");
@@ -656,6 +801,8 @@ async function main() {
         ...workbenchReport.issues.map((issue) => ({ mode: "workbench", ...issue })),
         ...topbarReachability.issues.map((issue) => ({ mode: "topbar-reachability", ...issue })),
         ...chromeReachability.issues.map((issue) => ({ mode: "chrome-reachability", ...issue })),
+        ...paneMore.issues.map((issue) => ({ mode: "pane-more", ...issue })),
+        ...focusWorkspace.issues.map((issue) => ({ mode: "focus-workspace", ...issue })),
         ...speedReport.issues.map((issue) => ({ mode: "speed", ...issue }))
       ];
       reports.push({
@@ -669,6 +816,8 @@ async function main() {
         workbench: workbenchReport,
         topbarReachability,
         chromeReachability,
+        paneMore,
+        focusWorkspace,
         speed: speedReport
       });
       console.log(`${viewport.name}: ${issues.length} layout issue(s), row hit target ok, double-click ok`);

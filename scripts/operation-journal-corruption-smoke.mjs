@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { clickDockAction } from "./ui-helpers.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -279,9 +280,7 @@ async function main() {
       waitUntil: "domcontentloaded"
     });
     await page.waitForSelector('.pane[data-pane="left"] [data-entry-path]', { timeout: 10_000 });
-    const opsButton = page.locator('[data-global-action="ops"]');
-    await opsButton.scrollIntoViewIfNeeded();
-    await opsButton.click();
+    await clickDockAction(page, "ops");
     await page.waitForSelector("#ops-dialog[open]", { timeout: 5000 });
     const browserSnapshot = await page.evaluate(() => ({
       rows: [...document.querySelectorAll("#operation-list .operation-row")].map((row) => ({

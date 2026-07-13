@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { clickDockAction } from "./ui-helpers.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -111,7 +112,7 @@ async function collectSpeedMetrics(page) {
 }
 
 async function openSpeedSnapshot(page, label) {
-  await page.locator('[data-global-action="speed"]').click();
+  await clickDockAction(page, "speed");
   await page.waitForSelector("#speed-dialog[open]", { timeout: 10000 });
   await page.waitForFunction(() => {
     const metric = document.querySelector('#speed-dialog[open] [data-speed-metric="source"] strong');

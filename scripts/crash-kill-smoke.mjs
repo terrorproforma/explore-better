@@ -267,13 +267,31 @@ function assertRecoveredBase(operation, type) {
   assert(operation.result?.recovery?.interrupted === true, `${type} details should mark interruption.`);
 }
 
+async function waitForRecoveredOperation(baseUrl, type, timeoutMs = 6000) {
+  const started = Date.now();
+  let lastState = null;
+  let lastOperation = null;
+  while (Date.now() - started < timeoutMs) {
+    lastState = await requestJson(baseUrl, "/api/state");
+    lastOperation = latestOperationByType(lastState, type);
+    if (
+      lastOperation?.status === "failed" &&
+      lastOperation?.progress?.phase === "Interrupted" &&
+      lastOperation?.result?.recovery?.interrupted === true
+    ) {
+      return { state: lastState, operation: lastOperation };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  return { state: lastState, operation: lastOperation };
+}
+
 async function recoverAfterKill({ baseUrl, port, server, inFlight, type }) {
   await stopServer(server);
   const result = await inFlight;
   assert(result instanceof Error, `In-flight ${type} request should fail when the server is killed.`);
   const nextServer = await startReadyServer(baseUrl, port, false);
-  const state = await requestJson(baseUrl, "/api/state");
-  const operation = latestOperationByType(state, type);
+  const { state, operation } = await waitForRecoveredOperation(baseUrl, type);
   assertRecoveredBase(operation, type);
   return { server: nextServer, operation, state };
 }

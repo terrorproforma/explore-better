@@ -1512,7 +1512,7 @@ const coverageAreas = [
         const foldersOk = (data.ui?.folders || []).some((row) => /media/i.test(row));
         const fileOk = (data.ui?.files || []).some((row) => /movie\.mkv/i.test(row));
         const extensionOk = (data.ui?.extensions || []).some((row) => /\.mkv/i.test(row));
-        const scanStripOk = /Scan complete/i.test(data.ui?.scanStrip || "");
+        const scanStripOk = /(Scan complete|Warm cache)/i.test(data.ui?.scanStrip || "");
         const bandOk = (data.ui?.bands || []).length >= 4;
         const spaceOk = data.apiReport?.space?.available === true && Number(data.apiReport?.space?.totalBytes || 0) > 0;
         const treemapOk = Number(data.ui?.canvas?.coloredPixels || 0) > 500;

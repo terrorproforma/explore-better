@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+const paneValueCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
 let serverOutput = "";
 
 function optionValue(name, fallback = "") {
@@ -235,12 +236,7 @@ function clientFilter(entries, query, options = {}) {
     if (["size", "dimensions", "modified", "created", "accessed"].includes(sortKey)) {
       return ((left || 0) - (right || 0)) * factor;
     }
-    return (
-      String(left).localeCompare(String(right), undefined, {
-        sensitivity: "base",
-        numeric: true
-      }) * factor
-    );
+    return paneValueCollator.compare(String(left), String(right)) * factor;
   });
   return {
     returned: visible.length,
@@ -273,7 +269,8 @@ async function waitForBackgroundIndex(baseUrl, rootId) {
     if (!root.job || root.job.status === "complete") {
       return root;
     }
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    const elapsed = performance.now() - started;
+    await new Promise((resolve) => setTimeout(resolve, elapsed < 1000 ? 25 : 100));
   }
   throw new Error("Background index did not complete within 30 seconds.");
 }

@@ -20,6 +20,7 @@
     "perf:guard": "node scripts/perf-guard.mjs",
     "verify:speed-health": "node scripts/speed-health-audit.mjs",
     "verify:startup-latency": "node scripts/startup-latency-smoke.mjs",
+    "verify:startup-recovery-ui": "node scripts/startup-recovery-ui-smoke.mjs",
     "verify:goal": "node scripts/goal-stress-audit.mjs",
     "verify:all": "node scripts/verify-all.mjs",
     "verify:all:full": "node scripts/verify-all.mjs --full",
@@ -54,6 +55,8 @@
     "verify:elevation-ui": "node scripts/elevation-ui-smoke.mjs",
     "verify:no-admin-access": "node scripts/no-admin-access-smoke.mjs",
     "verify:native-helper": "node scripts/native-helper-smoke.mjs",
+    "verify:packaged-native-helper": "node scripts/packaged-native-helper-smoke.mjs",
+    "verify:native-listing-provider": "node scripts/native-listing-provider-smoke.mjs",
     "verify:path-diagnostics": "node scripts/path-diagnostics-smoke.mjs",
     "verify:real-paths": "node scripts/real-paths-verify.mjs",
     "verify:network-loopback": "node scripts/network-loopback-smoke.mjs",
@@ -103,6 +106,10 @@
     "verify:speed-index-ui": "node scripts/speed-index-ui-smoke.mjs",
     "verify:search-background-ui": "node scripts/search-background-ui-smoke.mjs",
     "verify:interaction-resize": "node scripts/interaction-resize-smoke.mjs",
+    "verify:adaptive-pane-chrome": "node scripts/adaptive-pane-chrome-ui-smoke.mjs",
+    "verify:workspace-panels-ui": "node scripts/workspace-panels-ui-smoke.mjs",
+    "verify:pane-activity": "node scripts/pane-activity-ui-smoke.mjs",
+    "verify:dual-pane-safety": "node scripts/dual-pane-safety-ui-smoke.mjs",
     "verify:layout": "node scripts/layout-verify.mjs",
     "verify:pane-layout-no-scrollbars": "node scripts/pane-layout-no-scrollbars-smoke.mjs",
     "verify:size-analysis-ui": "node scripts/size-analysis-ui-smoke.mjs",
@@ -111,9 +118,13 @@
     "verify:large-folder-ui": "node scripts/large-folder-ui-verify.mjs",
     "verify:large-folder-100k-ui": "node scripts/large-folder-ui-verify.mjs --count=100000 --viewports=desktop --output=large-folder-100k-ui-latest.json --screenshot-prefix=large-folder-100k-ui",
     "verify:keyboard-workflows-ui": "node scripts/keyboard-workflows-ui-smoke.mjs",
+    "verify:command-center-ui": "node scripts/command-center-ui-smoke.mjs",
     "verify:accessibility": "node scripts/accessibility-verify.mjs",
+    "prepackage:dir": "npm run build:native-helper",
     "package:dir": "electron-builder --dir",
+    "prepackage:win": "npm run build:native-helper",
     "package:win": "electron-builder --win portable",
+    "prepackage:installer": "npm run build:native-helper",
     "package:installer": "electron-builder --win nsis"
   },
   "engines": {
@@ -122,6 +133,7 @@
   "devDependencies": {
     "electron": "^42.6.1",
     "electron-builder": "^26.15.3",
+    "lucide-static": "^1.24.0",
     "playwright-core": "^1.61.1"
   },
   "build": {

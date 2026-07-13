@@ -311,7 +311,7 @@ async function main() {
       const keyboard = viewport.name === "desktop" ? await verifyKeyboardNavigation(page, folderPath) : null;
       const command = viewport.name === "desktop" ? await verifyCommandHotkey(page) : null;
       const commandIssues = [];
-      if (command && command.dialogName !== "Command") {
+      if (command && command.dialogName !== "Command Center") {
         commandIssues.push({ kind: "command-dialog-missing-name", ...command });
       }
       if (command && command.focusedId !== "command-input") {

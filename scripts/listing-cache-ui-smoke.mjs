@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { clickDockAction } from "./ui-helpers.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -101,7 +102,7 @@ async function collectSpeedMetrics(page) {
 }
 
 async function openSpeedSnapshot(page, label) {
-  await page.locator('[data-global-action="speed"]').click();
+  await clickDockAction(page, "speed");
   await page.waitForSelector("#speed-dialog[open]", { timeout: 10000 });
   await page.waitForFunction(() => {
     const metric = document.querySelector('#speed-dialog[open] [data-speed-metric="source"] strong');
@@ -255,6 +256,21 @@ async function main() {
     );
     const warmClipped = noMetricClipping(warm);
     check(checks, "warm-speed-layout", warmClipped.length === 0, `${warmClipped.length} clipped Speed metric cell(s).`);
+    const missingPath = path.join(runRoot, "missing-folder");
+    await pathInput.fill(missingPath);
+    await pathInput.press("Enter");
+    await page.waitForFunction(
+      () => document.querySelector("#status-pill")?.textContent?.includes("Could not open"),
+      { timeout: 10000 }
+    );
+    const missingPathState = await page.evaluate(() => ({
+      status: document.querySelector("#status-pill")?.textContent || "",
+      path: document.querySelector('[data-path-input="left"]')?.value || "",
+      rows: document.querySelectorAll('.pane[data-pane="left"] [data-entry-path]').length
+    }));
+    check(checks, "missing-path-status", /Could not open/.test(missingPathState.status), missingPathState.status);
+    check(checks, "missing-path-restores-current", missingPathState.path === leftFixture, missingPathState.path);
+    check(checks, "missing-path-preserves-list", missingPathState.rows === 4, `${missingPathState.rows} rows`);
     check(checks, "browser-console-clean", pageErrors.length === 0, `${pageErrors.length} page error(s).`);
   } catch (error) {
     check(checks, "smoke-execution", false, error.message);

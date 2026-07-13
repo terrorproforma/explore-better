@@ -36,6 +36,7 @@ async function main() {
     const hello = await request({ id: "hello", op: "hello" });
     const allocated = await request({ id: "allocated", op: "allocated-size", path: sample });
     const volume = await request({ id: "volume", op: "volume-info", path: fixture });
+    const browsed = await request({ id: "browse", op: "browse", path: fixture });
     const listed = await request({ id: "list", op: "enumerate", path: fixture });
     const scanned = await request({ id: "scan", op: "scan-tree", path: fixture });
     const cancelTarget = request({ id: "cancel-target", op: "scan-tree", path: fixture, maxEntries: 500000 });
@@ -47,16 +48,25 @@ async function main() {
     if (!allocated.ok || allocated.data.logicalBytes !== 18 || allocated.data.allocatedBytes < 18) throw new Error("Allocated-size response is invalid.");
     if (process.platform === "win32" && allocated.data.allocationAccuracy !== "exact") throw new Error("Windows allocation must be labeled exact.");
     if (!volume.ok || Number(volume.data.clusterSize) <= 0) throw new Error("Volume geometry is missing.");
+    if (!browsed.ok || browsed.data.returned !== 2 || !browsed.data.entries.every((entry) => entry.n)) throw new Error("Native browse response is invalid.");
     if (!listed.ok || listed.data.returned !== 2) throw new Error("Directory enumeration returned the wrong entries.");
     if (!scanned.ok || scanned.data.files !== 1 || scanned.data.folders !== 1) throw new Error("Tree scan returned the wrong totals.");
+    if (
+      scanned.data.entryLimitMode !== "all-entries" ||
+      scanned.data.scannedEntries !== 2 ||
+      scanned.data.entries?.length !== 2 ||
+      !scanned.data.entries.some((entry) => entry.directory === true && entry.name === "folder")
+    ) {
+      throw new Error("Tree scan did not return the complete bounded folder/file stream.");
+    }
     if (!canceled.ok || canceled.data.canceled !== "cancel-target" || cancelResponseMs > 150) throw new Error(`Cancellation acknowledgement took ${cancelResponseMs.toFixed(1)} ms.`);
-    const report = { generatedAt: new Date().toISOString(), helperPath, hello: hello.data, allocated: allocated.data, volume: volume.data, enumeration: { returned: listed.data.returned }, scan: { files: scanned.data.files, folders: scanned.data.folders }, cancellation: { responseMs: Math.round(cancelResponseMs * 10) / 10 } };
+    const report = { generatedAt: new Date().toISOString(), helperPath, hello: hello.data, allocated: allocated.data, volume: volume.data, enumeration: { returned: listed.data.returned }, scan: { files: scanned.data.files, folders: scanned.data.folders, scannedEntries: scanned.data.scannedEntries, entryLimitMode: scanned.data.entryLimitMode }, cancellation: { responseMs: Math.round(cancelResponseMs * 10) / 10 } };
     await fs.mkdir(path.join(root, "artifacts"), { recursive: true });
     await fs.writeFile(path.join(root, "artifacts", "native-helper-latest.json"), `${JSON.stringify(report, null, 2)}\n`);
     console.log(`Native helper: protocol v${hello.data.protocolVersion}, ${hello.data.platform}/${hello.data.architecture}`);
     console.log(`Allocated: ${allocated.data.logicalBytes} logical, ${allocated.data.allocatedBytes} exact bytes, cluster ${volume.data.clusterSize}`);
     console.log(`Cancellation acknowledgement: ${cancelResponseMs.toFixed(1)} ms`);
-    console.log("Native helper: 6 pass, 0 fail");
+    console.log("Native helper: 8 pass, 0 fail");
   } finally {
     child.stdin.end();
     await Promise.race([new Promise((resolve) => child.once("exit", resolve)), new Promise((resolve) => setTimeout(resolve, 2000))]);
