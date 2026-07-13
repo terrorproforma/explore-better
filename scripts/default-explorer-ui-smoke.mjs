@@ -135,6 +135,27 @@ async function main() {
   try {
     await waitForServer(baseUrl, server, () => serverOutput);
     browser = await chromium.launch({ executablePath: edgePath(), headless: true });
+    const promptContext = await browser.newContext({ viewport: { width: 1366, height: 768 } });
+    await promptContext.addInitScript(() => {
+      window.exploreBetterDesktop = {
+        appInfo: async () => ({ packaged: true, smoke: false })
+      };
+    });
+    const promptPage = await promptContext.newPage();
+    promptPage.on("pageerror", (error) => pageErrors.push(`prompt: ${error.message}`));
+    await promptPage.goto(`${baseUrl}/?left=${encodeURIComponent(workspace)}&right=${encodeURIComponent(workspace)}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000
+    });
+    await promptPage.waitForSelector("#default-explorer-dialog[open]", { timeout: 10000 });
+    const promptScreenshot = path.join(artifactsDir, "default-explorer-prompt-desktop.png");
+    await promptPage.screenshot({ path: promptScreenshot });
+    const promptSnapshot = await integrationSnapshot(promptPage);
+    snapshots.push({ viewport: { name: "prompt", width: 1366, height: 768 }, screenshot: promptScreenshot, ...promptSnapshot });
+    check(checks, "packaged-prompt-open", promptSnapshot.promptOpen, "Packaged first launch offers the default-file-manager choice.");
+    check(checks, "packaged-prompt-complete", promptSnapshot.promptConfigured, "First-run choice includes both actions and the explorer.exe limitation.");
+    await promptContext.close();
+
     const page = await browser.newPage();
     page.on("pageerror", (error) => pageErrors.push(error.message));
     for (const viewport of viewports) {
