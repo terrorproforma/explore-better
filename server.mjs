@@ -1326,7 +1326,7 @@ async function cacheStateAfterStartupRecovery(state, stat = null, contentHash = 
 }
 
 async function ensureStateCacheWatcher() {
-  if (stateCache.watcher) {
+  if (stateCache.watcher || process.env.EXPLORE_BETTER_DISABLE_STATE_WATCH === "1") {
     return;
   }
   try {

@@ -88,7 +88,13 @@ async function main() {
   const baseUrl = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, [path.join(root, "server.mjs")], {
     cwd: root,
-    env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), LOCALAPPDATA: appData },
+    env: {
+      ...process.env,
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      LOCALAPPDATA: appData,
+      EXPLORE_BETTER_DISABLE_STATE_WATCH: "1"
+    },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
   });
