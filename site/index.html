@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Explore Better is a fast dual-pane Windows file manager with tabs, transactional operations, instant search, a nested disk map, and reversible Explorer integration."
+    />
+    <meta name="theme-color" content="#111715" />
+    <meta property="og:title" content="Explore Better - A serious Windows file manager" />
+    <meta
+      property="og:description"
+      content="Dual panes, nested disk maps, transactional file operations, and an optional reversible Explorer replacement."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="assets/workspace.png" />
+    <title>Explore Better - A serious Windows file manager</title>
+    <link rel="icon" type="image/png" href="assets/app-icon.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header" data-header>
+      <a class="brand" href="#top" aria-label="Explore Better home">
+        <img src="assets/app-icon.png" alt="" width="34" height="34" />
+        <span>Explore Better</span>
+      </a>
+
+      <button class="icon-button nav-toggle" type="button" data-nav-toggle aria-expanded="false" aria-controls="site-nav">
+        <img src="assets/icons/menu.svg" alt="" width="20" height="20" />
+        <span class="sr-only">Open navigation</span>
+      </button>
+
+      <nav class="site-nav" id="site-nav" data-nav aria-label="Primary navigation">
+        <a href="#workspace">Workspace</a>
+        <a href="#analyzer">Disk Map</a>
+        <a href="#performance">Performance</a>
+        <a href="#integration">Explorer Integration</a>
+        <a href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md">Manual</a>
+      </nav>
+
+      <a class="header-download" href="https://github.com/terrorproforma/explore-better/releases/download/v0.1.2/ExploreBetter-0.1.2-x64-setup.exe">
+        <img src="assets/icons/download.svg" alt="" width="18" height="18" />
+        <span>Download</span>
+      </a>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <img
+          class="hero__media"
+          src="assets/workspace.png"
+          alt=""
+          width="1366"
+          height="768"
+          fetchpriority="high"
+        />
+        <div class="hero__veil" aria-hidden="true"></div>
+        <div class="hero__content page-shell">
+          <p class="eyebrow light">Windows 11 / x64 / Public preview</p>
+          <h1 id="hero-title">Explore Better</h1>
+          <p class="hero__lede">A serious file manager for people who have outgrown File Explorer.</p>
+          <p class="hero__copy">
+            Two independent panes, tabs, instant search, transactional operations, scripting, and a nested view of every byte on disk.
+          </p>
+          <div class="hero__actions">
+            <a class="button button--primary" href="https://github.com/terrorproforma/explore-better/releases/download/v0.1.2/ExploreBetter-0.1.2-x64-setup.exe">
+              <img src="assets/icons/download.svg" alt="" width="20" height="20" />
+              Download for Windows
+            </a>
+            <a class="button button--ghost" href="https://github.com/terrorproforma/explore-better">
+              <img src="assets/icons/code-2.svg" alt="" width="20" height="20" />
+              View source
+            </a>
+          </div>
+          <p class="hero__meta">v0.1.2 / Windows x64 / Per-user install / No admin required for normal use</p>
+        </div>
+        <div class="hero__proof" aria-label="Product highlights">
+          <div><strong>100,000</strong><span>entry folders tested</span></div>
+          <div><strong>403.3 ms</strong><span>median first window</span></div>
+          <div><strong>Reversible</strong><span>Explorer integration</span></div>
+        </div>
+      </section>
+
+      <section class="section workspace-section" id="workspace" aria-labelledby="workspace-title">
+        <div class="page-shell">
+          <div class="section-heading reveal">
+            <p class="eyebrow">01 / The workspace</p>
+            <h2 id="workspace-title">Two panes. No waiting around.</h2>
+            <p>
+              Work across folders without opening a pile of windows. Each pane keeps its own tabs, history, filters, layout, and selection state.
+            </p>
+          </div>
+
+          <div class="workspace-layout reveal">
+            <figure class="product-frame product-frame--large">
+              <div class="frame-bar" aria-hidden="true">
+                <span></span><span></span><span></span>
+                <small>Explore Better / dual-pane workspace</small>
+              </div>
+              <img src="assets/workspace.png" alt="Explore Better showing independent horizontal source and target panes" width="1366" height="768" />
+            </figure>
+            <div class="feature-rail">
+              <article>
+                <span class="feature-index">A</span>
+                <div><h3>Independent by design</h3><p>Vertical or horizontal panes, separate tabs, history, sorting, and view modes.</p></div>
+              </article>
+              <article>
+                <span class="feature-index teal">B</span>
+                <div><h3>Built for selection</h3><p>Compare, filter, label, queue, rename, and transfer without losing context.</p></div>
+              </article>
+              <article>
+                <span class="feature-index coral">C</span>
+                <div><h3>Everything is reachable</h3><p>Navigator, command center, favorites, aliases, layouts, hotkeys, and scripting.</p></div>
+              </article>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section tour-section" id="tour" aria-labelledby="tour-title">
+        <div class="page-shell">
+          <div class="section-heading section-heading--row reveal">
+            <div>
+              <p class="eyebrow">02 / One tool, many jobs</p>
+              <h2 id="tour-title">Stay inside the flow.</h2>
+            </div>
+            <p>Switch the view below to inspect real screens from the current Windows build.</p>
+          </div>
+
+          <div class="tour reveal">
+            <div class="tour-tabs" role="tablist" aria-label="Explore Better product screens">
+              <button class="tour-tab active" type="button" role="tab" aria-selected="true" data-tour-tab data-src="assets/workspace.png" data-alt="Dual-pane Explore Better workspace" data-label="Dual panes" data-caption="Independent panes, tabs, filters, navigation, and source/target safety.">
+                <img src="assets/icons/panels-top-left.svg" alt="" width="18" height="18" /> Dual panes
+              </button>
+              <button class="tour-tab" type="button" role="tab" aria-selected="false" data-tour-tab data-src="assets/disk-map.png" data-alt="Explore Better Size Analyzer with nested disk treemap" data-label="Disk Map" data-caption="Logical and allocated bytes, folder tables, file types, top files, and nested treemap drilldown.">
+                <img src="assets/icons/chart-no-axes-combined.svg" alt="" width="18" height="18" /> Disk Map
+              </button>
+              <button class="tour-tab" type="button" role="tab" aria-selected="false" data-tour-tab data-src="assets/command-center.png" data-alt="Explore Better Command Center" data-label="Command Center" data-caption="Search more than one hundred built-in commands, tools, and scripts without leaving the keyboard.">
+                <img src="assets/icons/command.svg" alt="" width="18" height="18" /> Command Center
+              </button>
+              <button class="tour-tab" type="button" role="tab" aria-selected="false" data-tour-tab data-src="assets/integration.png" data-alt="Explore Better Explorer Integration Center" data-label="Integration" data-caption="Make Explore Better the default folder handler, then restore the exact previous setup whenever you choose.">
+                <img src="assets/icons/refresh-cw.svg" alt="" width="18" height="18" /> Integration
+              </button>
+            </div>
+            <figure class="tour-stage">
+              <img data-tour-image src="assets/workspace.png" alt="Dual-pane Explore Better workspace" width="1366" height="768" />
+              <figcaption>
+                <strong data-tour-label>Dual panes</strong>
+                <span data-tour-caption aria-live="polite">Independent panes, tabs, filters, navigation, and source/target safety.</span>
+              </figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="section analyzer-section" id="analyzer" aria-labelledby="analyzer-title">
+        <div class="page-shell analyzer-shell">
+          <div class="section-heading section-heading--dark reveal">
+            <p class="eyebrow light">03 / Size Analyzer</p>
+            <h2 id="analyzer-title">See where every byte went.</h2>
+            <p>
+              Scan a folder or volume, compare logical and allocated size, then move through a nested treemap from broad folders down to individual files.
+            </p>
+          </div>
+
+          <figure class="analyzer-visual reveal">
+            <img src="assets/disk-map.png" alt="Nested file map and size analysis tables in Explore Better" width="1366" height="768" loading="lazy" />
+          </figure>
+
+          <div class="analyzer-details reveal">
+            <div><span class="swatch blue"></span><strong>True allocation</strong><p>Exact Win32 allocated bytes with cluster-size context.</p></div>
+            <div><span class="swatch magenta"></span><strong>Nested drilldown</strong><p>Click from a volume to a folder, then open the result in a pane.</p></div>
+            <div><span class="swatch amber"></span><strong>Warm in 9.3 ms</strong><p>Cached 10,000-entry Analyzer verification on the current test machine.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="performance-section" id="performance" aria-labelledby="performance-title">
+        <div class="page-shell performance-heading reveal">
+          <p class="eyebrow">04 / Measured, not imagined</p>
+          <h2 id="performance-title">Large folders stay usable.</h2>
+          <p>Windowed loading and virtualization keep the visible work small, even when the directory is not.</p>
+        </div>
+        <div class="performance-grid reveal">
+          <div><strong data-count="100000">100,000</strong><span>entries in the verified fixture</span></div>
+          <div><strong>403.3 ms</strong><span>median first visible window</span></div>
+          <div><strong>48 rows</strong><span>rendered for the first window</span></div>
+          <div><strong>1.10 s</strong><span>median full hydration</span></div>
+        </div>
+        <div class="page-shell performance-proof reveal">
+          <figure class="product-frame">
+            <div class="frame-bar" aria-hidden="true"><span></span><span></span><span></span><small>100,000-entry verification</small></div>
+            <img src="assets/large-folder.png" alt="Explore Better displaying a virtualized 100,000-entry folder" width="1440" height="920" loading="lazy" />
+          </figure>
+          <p class="fine-print">Windows test fixture, three measured repetitions. Results vary by machine, volume, security software, and directory contents.</p>
+        </div>
+      </section>
+
+      <section class="section safety-section" id="safety" aria-labelledby="safety-title">
+        <div class="page-shell">
+          <div class="section-heading section-heading--row reveal">
+            <div>
+              <p class="eyebrow">05 / Operations</p>
+              <h2 id="safety-title">Fast should never mean reckless.</h2>
+            </div>
+            <p>Copy, move, overwrite, and sync operations are staged, journaled, and recoverable after interruption.</p>
+          </div>
+
+          <ol class="transaction-line reveal">
+            <li><span>01</span><strong>Plan</strong><small>Preview targets and conflicts</small></li>
+            <li><span>02</span><strong>Stage</strong><small>Build beside the destination</small></li>
+            <li><span>03</span><strong>Commit</strong><small>Atomically promote completed work</small></li>
+            <li><span>04</span><strong>Recover</strong><small>Resume, restore, or keep destination</small></li>
+          </ol>
+
+          <div class="module-grid reveal">
+            <article class="module-card accent-green">
+              <img src="assets/icons/shield-check.svg" alt="" width="24" height="24" />
+              <h3>Transactional operations</h3>
+              <p>Sibling staging, backups, durable journal phases, cancellation, pause, resume, and deterministic recovery.</p>
+            </article>
+            <article class="module-card accent-blue">
+              <img src="assets/icons/search.svg" alt="" width="24" height="24" />
+              <h3>Search and index</h3>
+              <p>Folder indexes, background content search, labels, saved searches, and responsive foreground work.</p>
+            </article>
+            <article class="module-card accent-coral">
+              <img src="assets/icons/terminal.svg" alt="" width="24" height="24" />
+              <h3>Commands and scripting</h3>
+              <p>Built-in command center, keyboard workflows, tool presets, JavaScript actions, and open-with rules.</p>
+            </article>
+            <article class="module-card accent-amber">
+              <img src="assets/icons/folder-kanban.svg" alt="" width="24" height="24" />
+              <h3>Workspace memory</h3>
+              <p>Layouts, tab groups, pane snapshots, favorites, aliases, labels, selection sets, and file baskets.</p>
+            </article>
+            <article class="module-card accent-teal">
+              <img src="assets/icons/hard-drive.svg" alt="" width="24" height="24" />
+              <h3>Native Windows provider</h3>
+              <p>A bundled normal-user Go helper handles fast Win32 listing and exact allocated-size lookup.</p>
+            </article>
+            <article class="module-card accent-violet">
+              <img src="assets/icons/monitor-down.svg" alt="" width="24" height="24" />
+              <h3>Desktop, not a web wrapper</h3>
+              <p>Packaged Electron app, native shell entry points, auto-update feed, drag and drop, and Windows shortcuts.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section integration-section" id="integration" aria-labelledby="integration-title">
+        <div class="page-shell integration-layout">
+          <div class="integration-copy reveal">
+            <p class="eyebrow light">06 / Explorer integration</p>
+            <h2 id="integration-title">Make it the default. Change your mind later.</h2>
+            <p>
+              Explore Better can handle normal folder and drive opens, folder backgrounds, and file-location commands for your Windows account. No administrator access is required.
+            </p>
+            <ul class="check-list">
+              <li><img src="assets/icons/check.svg" alt="" width="18" height="18" />Exact backup of existing shell handlers</li>
+              <li><img src="assets/icons/check.svg" alt="" width="18" height="18" />One-click Restore Previous action</li>
+              <li><img src="assets/icons/check.svg" alt="" width="18" height="18" />Optional Win+E helper, off by default</li>
+              <li><img src="assets/icons/check.svg" alt="" width="18" height="18" />Windows Explorer remains installed</li>
+            </ul>
+            <a class="text-link" href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md#explorer-integration">
+              Read the integration guide <img src="assets/icons/arrow-right.svg" alt="" width="17" height="17" />
+            </a>
+          </div>
+          <figure class="integration-visual reveal">
+            <img src="assets/integration.png" alt="Explore Better Integration Center with Make Default and Restore Previous controls" width="1366" height="768" loading="lazy" />
+          </figure>
+        </div>
+      </section>
+
+      <section class="download-section" id="download" aria-labelledby="download-title">
+        <div class="page-shell download-layout">
+          <div class="reveal">
+            <p class="eyebrow">Ready when you are</p>
+            <h2 id="download-title">Replace the window.<br />Keep your workflow.</h2>
+          </div>
+          <div class="download-panel reveal">
+            <a class="button button--dark button--wide" href="https://github.com/terrorproforma/explore-better/releases/download/v0.1.2/ExploreBetter-0.1.2-x64-setup.exe">
+              <img src="assets/icons/download.svg" alt="" width="22" height="22" />
+              Download Explore Better v0.1.2
+            </a>
+            <p>Windows x64 / 98.9 MB / Per-user installer</p>
+            <div class="checksum-row">
+              <code data-checksum>2851cc5ab923a9a1bae9f5ee860c2be07d54b3fcd21812b50e99cc6d6d27d0a0</code>
+              <button class="icon-button copy-button" type="button" data-copy-checksum title="Copy SHA-256">
+                <img src="assets/icons/copy.svg" alt="" width="18" height="18" />
+                <span class="sr-only">Copy SHA-256 checksum</span>
+              </button>
+            </div>
+            <small data-copy-status aria-live="polite">SHA-256 checksum</small>
+            <p class="signing-note">Public preview: not yet Authenticode-signed. Verify the checksum before continuing through SmartScreen.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="page-shell footer-layout">
+        <a class="brand brand--footer" href="#top"><img src="assets/app-icon.png" alt="" width="32" height="32" /><span>Explore Better</span></a>
+        <p>Built because Windows file work deserves better tools.</p>
+        <div class="footer-links">
+          <a href="https://github.com/terrorproforma/explore-better">Source</a>
+          <a href="https://github.com/terrorproforma/explore-better/releases">Releases</a>
+          <a href="https://github.com/terrorproforma/explore-better/issues">Issues</a>
+          <a href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md">Manual</a>
+        </div>
+        <small>&copy; <span data-year></span> Explore Better</small>
+      </div>
+    </footer>
+  </body>
+</html>

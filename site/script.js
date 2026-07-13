@@ -1,0 +1,94 @@
+const header = document.querySelector("[data-header]");
+const nav = document.querySelector("[data-nav]");
+const navToggle = document.querySelector("[data-nav-toggle]");
+
+function setNavigation(open) {
+  nav?.classList.toggle("open", open);
+  header?.classList.toggle("nav-visible", open);
+  document.body.classList.toggle("nav-open", open);
+  navToggle?.setAttribute("aria-expanded", String(open));
+  const label = navToggle?.querySelector(".sr-only");
+  if (label) label.textContent = open ? "Close navigation" : "Open navigation";
+}
+
+navToggle?.addEventListener("click", () => {
+  setNavigation(navToggle.getAttribute("aria-expanded") !== "true");
+});
+
+nav?.querySelectorAll("a").forEach((link) => {
+  link.addEventListener("click", () => setNavigation(false));
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") setNavigation(false);
+});
+
+window.addEventListener(
+  "scroll",
+  () => header?.classList.toggle("scrolled", window.scrollY > 24),
+  { passive: true }
+);
+
+const tourImage = document.querySelector("[data-tour-image]");
+const tourLabel = document.querySelector("[data-tour-label]");
+const tourCaption = document.querySelector("[data-tour-caption]");
+
+document.querySelectorAll("[data-tour-tab]").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll("[data-tour-tab]").forEach((candidate) => {
+      const selected = candidate === tab;
+      candidate.classList.toggle("active", selected);
+      candidate.setAttribute("aria-selected", String(selected));
+    });
+    if (tourImage) {
+      tourImage.src = tab.dataset.src || tourImage.src;
+      tourImage.alt = tab.dataset.alt || "Explore Better product screen";
+    }
+    if (tourLabel) tourLabel.textContent = tab.dataset.label || "Product view";
+    if (tourCaption) tourCaption.textContent = tab.dataset.caption || "";
+  });
+});
+
+const copyButton = document.querySelector("[data-copy-checksum]");
+const checksum = document.querySelector("[data-checksum]");
+const copyStatus = document.querySelector("[data-copy-status]");
+
+copyButton?.addEventListener("click", async () => {
+  const value = checksum?.textContent?.trim() || "";
+  try {
+    await navigator.clipboard.writeText(value);
+    if (copyStatus) copyStatus.textContent = "Checksum copied";
+  } catch {
+    const input = document.createElement("textarea");
+    input.value = value;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.append(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+    if (copyStatus) copyStatus.textContent = "Checksum copied";
+  }
+});
+
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const revealItems = document.querySelectorAll(".reveal");
+
+if (reducedMotion || !("IntersectionObserver" in window)) {
+  revealItems.forEach((item) => item.classList.add("visible"));
+} else {
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("visible");
+        observer.unobserve(entry.target);
+      });
+    },
+    { rootMargin: "0px 0px -8%", threshold: 0.08 }
+  );
+  revealItems.forEach((item) => observer.observe(item));
+}
+
+const year = document.querySelector("[data-year]");
+if (year) year.textContent = String(new Date().getFullYear());
