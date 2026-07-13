@@ -16,6 +16,7 @@
     "url": "https://github.com/terrorproforma/explore-better/issues"
   },
   "scripts": {
+    "postinstall": "install-electron",
     "prestart": "npm run build:renderer",
     "start": "node server.mjs",
     "predesktop": "npm run build:renderer",
