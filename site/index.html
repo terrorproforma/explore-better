@@ -5,13 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Explore Better is a fast dual-pane Windows file manager with tabs, per-tab terminals, transactional operations, instant search, a nested disk map, and reversible Explorer integration."
+      content="Explore Better is a fast dual-pane Windows file manager with per-tab terminals, a local MCP AI bridge, transactional operations, a nested disk map, and reversible Explorer integration."
     />
     <meta name="theme-color" content="#111715" />
     <meta property="og:title" content="Explore Better - A serious Windows file manager" />
     <meta
       property="og:description"
-      content="Dual panes, per-tab terminals, nested disk maps, transactional file operations, and an optional reversible Explorer replacement."
+      content="Dual panes, real per-tab terminals, a secure local MCP AI bridge, nested disk maps, transactional file operations, and reversible Explorer integration."
     />
     <meta property="og:type" content="website" />
     <meta property="og:image" content="assets/workspace.png" />
@@ -35,9 +35,9 @@
       </button>
 
       <nav class="site-nav" id="site-nav" data-nav aria-label="Primary navigation">
-        <a href="#workspace">Workspace</a>
+        <a href="#terminal">Terminal</a>
+        <a href="#ai-bridge">AI Bridge</a>
         <a href="#analyzer">Disk Map</a>
-        <a href="#performance">Performance</a>
         <a href="#integration">Explorer Integration</a>
         <a href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md">Manual</a>
       </nav>
@@ -64,7 +64,7 @@
           <h1 id="hero-title">Explore Better</h1>
           <p class="hero__lede">A serious file manager for people who have outgrown File Explorer.</p>
           <p class="hero__copy">
-            Two independent panes, tabs, integrated terminals, instant search, transactional operations, and a nested view of every byte on disk.
+            Two independent panes, a real terminal for every tab, structured MCP tools for local AI clients, transactional operations, and a nested view of every byte on disk.
           </p>
           <div class="hero__actions">
             <a class="button button--primary" href="#download">
@@ -76,19 +76,69 @@
               View source
             </a>
           </div>
-          <p class="hero__meta">v0.1.3 / Windows x64 / Per-user install / No admin required for normal use</p>
+          <p class="hero__meta">v0.2.0 / Windows x64 / Per-user install / No admin required for normal use</p>
         </div>
         <div class="hero__proof" aria-label="Product highlights">
-          <div><strong>100,000</strong><span>entry folders tested</span></div>
-          <div><strong>403.3 ms</strong><span>median first window</span></div>
+          <div><strong>1 per tab</strong><span>live ConPTY terminal</span></div>
+          <div><strong>17 tools</strong><span>scoped MCP profile</span></div>
           <div><strong>Reversible</strong><span>Explorer integration</span></div>
+        </div>
+      </section>
+
+      <section class="section terminal-release-section" id="terminal" aria-labelledby="terminal-title">
+        <div class="page-shell major-feature-layout">
+          <div class="major-feature-copy reveal">
+            <p class="eyebrow light">01 / Per-tab terminal</p>
+            <h2 id="terminal-title">The shell is already in the right folder.</h2>
+            <p class="major-feature-lede">
+              Every file tab can own a real Windows terminal. Open it only when needed, keep the process alive while switching tabs, and work without rebuilding paths by hand.
+            </p>
+            <ul class="major-feature-list">
+              <li><strong>Real ConPTY sessions</strong><span>PowerShell 7, Windows PowerShell, or Command Prompt rendered through xterm.js.</span></li>
+              <li><strong>One session per file tab</strong><span>Independent output, profile, selection, scroll position, and resizable drawer height.</span></li>
+              <li><strong>Folder-aware, never intrusive</strong><span>New shells start in the tab folder and follow navigation only while the prompt is idle.</span></li>
+              <li><strong>Narrow elevation</strong><span>Open one administrator terminal through UAC without elevating the file manager or backend.</span></li>
+            </ul>
+            <p class="major-feature-footnote"><span>Ctrl + `</span> toggles the active pane terminal. Both pane terminals can stay open together.</p>
+          </div>
+          <figure class="product-frame major-feature-visual reveal">
+            <div class="frame-bar" aria-hidden="true"><span></span><span></span><span></span><small>Explore Better / live per-tab PowerShell</small></div>
+            <img src="assets/terminal.png" alt="Explore Better with a live PowerShell terminal open beneath the left file pane" width="1440" height="900" loading="lazy" />
+          </figure>
+        </div>
+      </section>
+
+      <section class="section ai-release-section" id="ai-bridge" aria-labelledby="ai-bridge-title">
+        <div class="page-shell major-feature-layout major-feature-layout--reverse">
+          <figure class="product-frame major-feature-visual reveal">
+            <div class="frame-bar" aria-hidden="true"><span></span><span></span><span></span><small>Explore Better / local MCP permissions</small></div>
+            <img src="assets/ai-bridge.png" alt="Explore Better AI Bridge preferences showing a folder-scoped read-only Codex profile and its permitted MCP tools" width="1440" height="900" loading="lazy" />
+          </figure>
+          <div class="major-feature-copy reveal">
+            <p class="eyebrow">02 / Local MCP AI Bridge</p>
+            <h2 id="ai-bridge-title">Give AI file tools, not a pile of terminal text.</h2>
+            <p class="major-feature-lede">
+              Explore Better exposes its live panes, indexes, Analyzer, comparisons, and recoverable operation system as typed local MCP tools for Codex, Claude, VS Code, and other stdio clients.
+            </p>
+            <ul class="major-feature-list major-feature-list--dark">
+              <li><strong>Read-first profiles</strong><span>Authorize exact folders and tools per client; revoke a profile without changing the rest.</span></li>
+              <li><strong>Structured context</strong><span>Active tabs, visible selection, indexed discovery, checksums, duplicates, disk analysis, and jobs.</span></li>
+              <li><strong>Preview before writes</strong><span>Write profiles must plan first, then use a short-lived one-use token bound to current filesystem signatures.</span></li>
+              <li><strong>Local security boundary</strong><span>Stdio sidecar, authenticated same-user named pipe, bounded messages, and no shell or terminal control.</span></li>
+            </ul>
+            <div class="major-feature-stats" aria-label="AI Bridge release facts">
+              <div><strong>17</strong><span>tools in the shown read-only profile</span></div>
+              <div><strong>5.3 ms</strong><span>measured bridge p95</span></div>
+              <div><strong>14.1 MB</strong><span>measured sidecar RSS</span></div>
+            </div>
+          </div>
         </div>
       </section>
 
       <section class="section workspace-section" id="workspace" aria-labelledby="workspace-title">
         <div class="page-shell">
           <div class="section-heading reveal">
-            <p class="eyebrow">01 / The workspace</p>
+            <p class="eyebrow">03 / The workspace</p>
             <h2 id="workspace-title">Two panes. No waiting around.</h2>
             <p>
               Work across folders without opening a pile of windows. Each pane keeps its own tabs, history, filters, layout, and selection state.
@@ -125,7 +175,7 @@
         <div class="page-shell">
           <div class="section-heading section-heading--row reveal">
             <div>
-              <p class="eyebrow">02 / One tool, many jobs</p>
+              <p class="eyebrow">04 / One tool, many jobs</p>
               <h2 id="tour-title">Stay inside the flow.</h2>
             </div>
             <p>Switch the view below to inspect real screens from the current Windows build.</p>
@@ -135,6 +185,12 @@
             <div class="tour-tabs" role="tablist" aria-label="Explore Better product screens">
               <button class="tour-tab active" type="button" role="tab" aria-selected="true" data-tour-tab data-src="assets/workspace.png" data-width="1440" data-height="920" data-alt="Dual-pane Explore Better workspace" data-label="Dual panes" data-caption="Independent panes, tabs, filters, navigation, and source/target safety.">
                 <img src="assets/icons/panels-top-left.svg" alt="" width="18" height="18" /> Dual panes
+              </button>
+              <button class="tour-tab" type="button" role="tab" aria-selected="false" data-tour-tab data-src="assets/terminal.png" data-width="1440" data-height="900" data-alt="Explore Better with a live terminal beneath the left file pane" data-label="Per-tab Terminal" data-caption="A lazy, persistent ConPTY shell starts in each tab's folder and follows navigation only while idle.">
+                <img src="assets/icons/terminal.svg" alt="" width="18" height="18" /> Per-tab Terminal
+              </button>
+              <button class="tour-tab" type="button" role="tab" aria-selected="false" data-tour-tab data-src="assets/ai-bridge.png" data-width="1440" data-height="900" data-alt="Explore Better AI Bridge profile permissions" data-label="AI Bridge" data-caption="Folder-scoped MCP profiles expose only the context, discovery, analysis, and operation tools each client is allowed to use.">
+                <img src="assets/icons/code-2.svg" alt="" width="18" height="18" /> AI Bridge
               </button>
               <button class="tour-tab" type="button" role="tab" aria-selected="false" data-tour-tab data-src="assets/disk-map.png" data-width="1440" data-height="920" data-alt="Explore Better Size Analyzer with nested disk treemap" data-label="Disk Map" data-caption="Logical and allocated bytes, folder tables, file types, top files, and nested treemap drilldown.">
                 <img src="assets/icons/chart-no-axes-combined.svg" alt="" width="18" height="18" /> Disk Map
@@ -160,7 +216,7 @@
       <section class="section analyzer-section" id="analyzer" aria-labelledby="analyzer-title">
         <div class="page-shell analyzer-shell">
           <div class="section-heading section-heading--dark reveal">
-            <p class="eyebrow light">03 / Size Analyzer</p>
+            <p class="eyebrow light">05 / Size Analyzer</p>
             <h2 id="analyzer-title">See where every byte went.</h2>
             <p>
               Scan a folder or volume, compare logical and allocated size, then move through a nested treemap from broad folders down to individual files.
@@ -181,15 +237,15 @@
 
       <section class="performance-section" id="performance" aria-labelledby="performance-title">
         <div class="page-shell performance-heading reveal">
-          <p class="eyebrow">04 / Measured, not imagined</p>
+          <p class="eyebrow">06 / Measured, not imagined</p>
           <h2 id="performance-title">Large folders stay usable.</h2>
           <p>Windowed loading and virtualization keep the visible work small, even when the directory is not.</p>
         </div>
         <div class="performance-grid reveal">
           <div><strong data-count="100000">100,000</strong><span>entries in the verified fixture</span></div>
           <div><strong>403.3 ms</strong><span>median first visible window</span></div>
-          <div><strong>48 rows</strong><span>rendered for the first window</span></div>
-          <div><strong>1.10 s</strong><span>median full hydration</span></div>
+          <div><strong>45 rows</strong><span>rendered for the first window</span></div>
+          <div><strong>1.22 s</strong><span>median full hydration</span></div>
         </div>
         <div class="page-shell performance-proof reveal">
           <figure class="product-frame">
@@ -204,7 +260,7 @@
         <div class="page-shell">
           <div class="section-heading section-heading--row reveal">
             <div>
-              <p class="eyebrow">05 / Operations</p>
+              <p class="eyebrow">07 / Operations</p>
               <h2 id="safety-title">Fast should never mean reckless.</h2>
             </div>
             <p>Copy, move, overwrite, and sync operations are staged, journaled, and recoverable after interruption.</p>
@@ -228,11 +284,6 @@
               <h3>Search and index</h3>
               <p>Folder indexes, background content search, labels, saved searches, and responsive foreground work.</p>
             </article>
-            <article class="module-card accent-coral">
-              <img src="assets/icons/terminal.svg" alt="" width="24" height="24" />
-              <h3>Per-tab terminals</h3>
-              <p>Resizable xterm.js and ConPTY drawers start in each tab's folder, retain their sessions, and support optional narrow UAC elevation.</p>
-            </article>
             <article class="module-card accent-amber">
               <img src="assets/icons/folder-kanban.svg" alt="" width="24" height="24" />
               <h3>Workspace memory</h3>
@@ -248,11 +299,6 @@
               <h3>Desktop, not a web wrapper</h3>
               <p>Packaged Electron app, native shell entry points, auto-update feed, drag and drop, and Windows shortcuts.</p>
             </article>
-            <article class="module-card accent-blue">
-              <img src="assets/icons/code-2.svg" alt="" width="24" height="24" />
-              <h3>AI Bridge</h3>
-              <p>Local MCP tools give Codex, Claude, and VS Code bounded pane context, indexed discovery, analysis jobs, and preview-before-apply operations.</p>
-            </article>
             <article class="module-card accent-coral">
               <img src="assets/icons/scan-search.svg" alt="" width="24" height="24" />
               <h3>Preview and compare</h3>
@@ -265,7 +311,7 @@
       <section class="section integration-section" id="integration" aria-labelledby="integration-title">
         <div class="page-shell integration-layout">
           <div class="integration-copy reveal">
-            <p class="eyebrow light">06 / Explorer integration</p>
+            <p class="eyebrow light">08 / Explorer integration</p>
             <h2 id="integration-title">Make it the default. Change your mind later.</h2>
             <p>
               Explore Better can handle normal folder and drive opens, folder backgrounds, and file-location commands for your Windows account. No administrator access is required.
@@ -305,21 +351,21 @@
             </div>
             <a
               class="button button--dark button--wide"
-              href="https://github.com/terrorproforma/explore-better/releases/download/v0.1.3/ExploreBetter-0.1.3-x64-setup.exe"
+              href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.0/ExploreBetter-0.2.0-x64-setup.exe"
               aria-describedby="unsigned-preview-note"
             >
               <img src="assets/icons/download.svg" alt="" width="22" height="22" />
-              Download Explore Better v0.1.3
+              Download Explore Better v0.2.0
             </a>
-            <p class="download-facts">Windows x64 / 104.0 MB / Per-user installer / GitHub Release</p>
+            <p class="download-facts">Windows x64 / 107.7 MB / Per-user installer / GitHub Release</p>
 
             <div class="verification-block">
               <div class="verification-block__heading">
                 <span><img src="assets/icons/shield-check.svg" alt="" width="18" height="18" />Verify before opening</span>
-                <a href="https://github.com/terrorproforma/explore-better/releases/download/v0.1.3/SHA256SUMS.txt">SHA256SUMS.txt</a>
+                <a href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.0/SHA256SUMS.txt">SHA256SUMS.txt</a>
               </div>
               <div class="copy-field copy-field--command">
-                <code data-verify-command>Get-FileHash .\ExploreBetter-0.1.3-x64-setup.exe -Algorithm SHA256</code>
+                <code data-verify-command>Get-FileHash .\ExploreBetter-0.2.0-x64-setup.exe -Algorithm SHA256</code>
                 <button
                   class="icon-button copy-button"
                   type="button"
@@ -334,7 +380,7 @@
               </div>
               <small data-command-copy-status aria-live="polite">Run from the folder containing the installer</small>
               <div class="copy-field copy-field--checksum">
-                <code data-checksum>0e1b07597edf420e6b8c9a05e9af579d10dfdcf5ef4c1eeb040f3a9be6b5234f</code>
+                <code data-checksum>13d1b4870a134a4b9e5bce3c972b22d058d3d328ad4a76e28501c9573a28abd7</code>
                 <button
                   class="icon-button copy-button"
                   type="button"
@@ -358,8 +404,8 @@
             </details>
 
             <div class="release-links" aria-label="Release verification links">
-              <a href="https://github.com/terrorproforma/explore-better/releases/tag/v0.1.3">Full release details</a>
-              <a href="https://github.com/terrorproforma/explore-better/tree/v0.1.3">Source at v0.1.3</a>
+              <a href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.0">Full release details</a>
+              <a href="https://github.com/terrorproforma/explore-better/tree/v0.2.0">Source at v0.2.0</a>
             </div>
           </div>
         </div>

@@ -124,7 +124,12 @@ async function pageSnapshot(page, installerName) {
       relativeParentLinks: [...document.querySelectorAll('a[href^=".."]')].map((link) => link.getAttribute("href")),
       checksum: document.querySelector("[data-checksum]")?.textContent.trim() || "",
       verifyCommand: document.querySelector("[data-verify-command]")?.textContent.trim() || "",
-      unsignedDisclosure: document.querySelector("#unsigned-preview-note")?.textContent.replace(/\s+/g, " ").trim() || ""
+      unsignedDisclosure: document.querySelector("#unsigned-preview-note")?.textContent.replace(/\s+/g, " ").trim() || "",
+      majorFeatures: ["terminal", "ai-bridge"].map((id) => ({
+        id,
+        present: Boolean(document.getElementById(id)),
+        image: document.querySelector(`#${id} img[src^="assets/"]`)?.getAttribute("src") || ""
+      }))
     };
   }, installerName);
 }
@@ -200,6 +205,12 @@ async function main() {
       addCheck(checks, `${viewport.name}-sections`, snapshot.sectionCount >= 8, `${snapshot.sectionCount} main sections`);
       addCheck(
         checks,
+        `${viewport.name}-major-features`,
+        snapshot.majorFeatures.every((feature) => feature.present && feature.image),
+        snapshot.majorFeatures.map((feature) => `${feature.id}: ${feature.image || "missing"}`).join(", ")
+      );
+      addCheck(
+        checks,
         `${viewport.name}-no-horizontal-overflow`,
         snapshot.scrollWidth <= snapshot.viewportWidth + 1,
         snapshot.scrollWidth > snapshot.viewportWidth + 1
@@ -265,11 +276,17 @@ async function main() {
       );
 
       await page.locator('[data-copy-target="[data-verify-command]"]').click();
+      await page.waitForFunction(
+        () => document.querySelector("[data-command-copy-status]")?.textContent?.trim() === "Command copied",
+        null,
+        { timeout: 5_000 }
+      );
+      const commandCopyStatus = (await page.locator("[data-command-copy-status]").textContent())?.trim() || "";
       addCheck(
         checks,
         `${viewport.name}-copy-command`,
-        (await page.locator("[data-command-copy-status]").textContent())?.trim() === "Command copied",
-        (await page.locator("[data-command-copy-status]").textContent())?.trim() || "Missing copy status"
+        commandCopyStatus === "Command copied",
+        commandCopyStatus || "Missing copy status"
       );
 
       await page.locator('[data-tour-tab][data-label="Disk Map"]').click();
@@ -282,7 +299,7 @@ async function main() {
       );
 
       const tourAspectResults = [];
-      for (const label of ["Dual panes", "Disk Map", "Command Center", "Integration"]) {
+      for (const label of ["Dual panes", "Per-tab Terminal", "AI Bridge", "Disk Map", "Command Center", "Integration"]) {
         await page.locator(`[data-tour-tab][data-label="${label}"]`).click();
         const ratio = await page.locator("[data-tour-image]").evaluate(async (image) => {
           if (!image.complete) {
