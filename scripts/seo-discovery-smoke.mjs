@@ -137,7 +137,8 @@ async function main() {
 
   const llms = await fs.readFile(path.join(siteRoot, "llms.txt"), "utf8");
   const llmsFull = await fs.readFile(path.join(siteRoot, "llms-full.txt"), "utf8");
-  add(checks, "llms-format", llms.startsWith("# Explore Better\n\n>") && llms.includes("## MCP Evidence") && llms.includes("## Optional"), "H1, summary, evidence, and optional sections present");
+  const normalizedLlms = llms.replace(/\r\n/g, "\n");
+  add(checks, "llms-format", normalizedLlms.startsWith("# Explore Better\n\n>") && normalizedLlms.includes("## MCP Evidence") && normalizedLlms.includes("## Optional"), "H1, summary, evidence, and optional sections present");
   add(checks, "llms-canonical-links", ["mcp/", "mcp-value.json", "llms-full.txt", "contracts-v1.json"].every((value) => llms.includes(value)), "Product, evidence, context, and contract linked");
   add(checks, "llms-full-substance", llmsFull.length >= 7_000 && llmsFull.includes("## Security Model") && llmsFull.includes("## Deliberate Limitations"), `${llmsFull.length} characters with security and limitations`);
   add(checks, "llms-no-overclaim", llmsFull.includes("MCP does not replace the integrated terminal") && llmsFull.includes("official MCP Registry entry is not yet published"), "Terminal and registry limitations disclosed");
@@ -200,6 +201,9 @@ async function main() {
   };
   await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   console.log(`SEO discovery smoke: ${report.summary.pass} pass, ${report.summary.fail} fail.`);
+  for (const check of checks.filter((item) => item.status === "fail")) {
+    console.error(`FAIL ${check.id}: ${check.detail}`);
+  }
   console.log(`Evidence: ${reportPath}`);
   if (report.summary.fail) process.exitCode = 1;
 }

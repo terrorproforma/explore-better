@@ -18,3 +18,4 @@
 - Added warm-up and 100 measured calls to the unchanged 20 ms MCP bridge p95 gate; three local repeats passed at 6.6 ms, 3.0 ms, and 5.8 ms.
 - Replaced the PowerShell baseline's optional `Get-FileHash` dependency with the built-in .NET SHA-256 API for clean Windows runner compatibility.
 - Canonicalized the live-context navigation target before comparing renderer state so equivalent Windows short and long path spellings produce the same evidence result.
+- Made `llms.txt` format verification CRLF-neutral and added failed-check details to CI output instead of reporting only an aggregate.
