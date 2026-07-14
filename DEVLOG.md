@@ -17,3 +17,4 @@
 - Added an authorized junction-root regression test and changed the pagination proof to validate two bounded, cursor-linked, non-overlapping pages.
 - Added warm-up and 100 measured calls to the unchanged 20 ms MCP bridge p95 gate; three local repeats passed at 6.6 ms, 3.0 ms, and 5.8 ms.
 - Replaced the PowerShell baseline's optional `Get-FileHash` dependency with the built-in .NET SHA-256 API for clean Windows runner compatibility.
+- Canonicalized the live-context navigation target before comparing renderer state so equivalent Windows short and long path spellings produce the same evidence result.

@@ -32,6 +32,15 @@ function asArray(value) {
   return Array.isArray(value) ? value : [value];
 }
 
+function samePath(left, right) {
+  if (!left || !right) return false;
+  const normalize = (value) => {
+    const resolved = path.resolve(value);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
+}
+
 async function makeFixture(base) {
   const catalog = path.join(base, "catalog");
   const reports = path.join(base, "reports");
@@ -175,6 +184,7 @@ async function main() {
   const rawCalls = [];
   try {
     const fixture = harness.preparedFixture;
+    const canonicalContextFolder = await fs.realpath(fixture.contextFolder);
     const outsideFile = path.join(harness.temp, "outside-proof.txt");
     await fs.writeFile(outsideFile, "outside authorized roots\n");
 
@@ -311,11 +321,11 @@ $top = @($files | Sort-Object Length -Descending | Select-Object -First 10 | For
       const context = await callTool("get_context");
       return context.structured?.data?.live ? context : null;
     }, 30_000, 200);
-    const show = await callTool("show_in_explore_better", { path: fixture.contextFolder, pane: "left", mode: "newTab" });
+    const show = await callTool("show_in_explore_better", { path: canonicalContextFolder, pane: "left", mode: "newTab" });
     assert(!show.result.isError, `MCP UI navigation failed: ${JSON.stringify(show.structured?.error)}`);
     const navigatedContext = await waitFor(async () => {
       const context = await callTool("get_context");
-      return context.structured?.data?.panes?.left?.path === fixture.contextFolder ? context : null;
+      return samePath(context.structured?.data?.panes?.left?.path, canonicalContextFolder) ? context : null;
     }, 15_000, 150);
 
     const outside = await callTool("read_text", { path: outsideFile });
@@ -418,7 +428,7 @@ $top = @($files | Sort-Object Length -Descending | Select-Object -First 10 | For
       {
         id: "live-ui-context",
         label: "Live file-manager context",
-        passed: liveContext.structured?.data?.live === true && navigatedContext.structured?.data?.panes?.left?.path === fixture.contextFolder,
+        passed: liveContext.structured?.data?.live === true && samePath(navigatedContext.structured?.data?.panes?.left?.path, canonicalContextFolder),
         detail: "The AI read live tab context, opened a folder in a new left-pane tab, then observed the revised pane state."
       },
       {
