@@ -255,7 +255,17 @@ $ErrorActionPreference = "Stop"
 $root = $env:EB_MCP_VALUE_ROOT
 $files = @(Get-ChildItem -LiteralPath $root -Recurse -File)
 $groups = foreach ($sizeGroup in @($files | Group-Object Length | Where-Object Count -gt 1)) {
-  $hashed = @($sizeGroup.Group | ForEach-Object { $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256; [pscustomobject]@{ hash = $hash.Hash; size = $_.Length } })
+  $hashed = @($sizeGroup.Group | ForEach-Object {
+    $stream = [System.IO.File]::OpenRead($_.FullName)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $hash = ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "")
+      [pscustomobject]@{ hash = $hash; size = $_.Length }
+    } finally {
+      $sha.Dispose()
+      $stream.Dispose()
+    }
+  })
   foreach ($hashGroup in @($hashed | Group-Object hash | Where-Object Count -gt 1)) {
     [pscustomobject]@{ hash = $hashGroup.Name; size = [int64]$hashGroup.Group[0].size; count = $hashGroup.Count; wastedBytes = [int64]$hashGroup.Group[0].size * ($hashGroup.Count - 1) }
   }

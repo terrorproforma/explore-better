@@ -16,3 +16,4 @@
 - Canonicalized profile, client, and internal policy roots before comparison, while continuing to canonicalize every candidate path and deny junction escapes.
 - Added an authorized junction-root regression test and changed the pagination proof to validate two bounded, cursor-linked, non-overlapping pages.
 - Added warm-up and 100 measured calls to the unchanged 20 ms MCP bridge p95 gate; three local repeats passed at 6.6 ms, 3.0 ms, and 5.8 ms.
+- Replaced the PowerShell baseline's optional `Get-FileHash` dependency with the built-in .NET SHA-256 API for clean Windows runner compatibility.
