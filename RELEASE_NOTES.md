@@ -10,6 +10,8 @@
 - Added a reproducible benchmark that runs the real Electron host and Go stdio sidecar against the same deterministic fixture as equivalent PowerShell scripts.
 - Proved 3 of 3 shared workflows and 6 of 6 MCP-specific controls, while documenting that MCP complements rather than replaces a persistent shell.
 - Added automated crawler, structured-data, benchmark-sync, responsive-layout, and AI-discovery verification to Windows CI.
+- Canonicalized authorized, client, and internal roots before policy comparison so Windows path aliases remain usable without weakening junction-escape protection.
+- Strengthened pagination evidence to verify two bounded, non-overlapping pages and stabilized the warm bridge p95 gate with explicit warm-up and 100 measured calls.
 
 ## v0.2.0 - 2026-07-14
 

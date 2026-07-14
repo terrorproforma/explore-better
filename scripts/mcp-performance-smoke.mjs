@@ -3,15 +3,19 @@ import { assert, startElectronMcp } from "./mcp-smoke-helpers.mjs";
 
 const harness = await startElectronMcp();
 try {
+  for (let index = 0; index < 10; index += 1) {
+    const warmup = await harness.call("tools/call", { name: "get_context", arguments: {} });
+    assert(warmup.result?.structuredContent?.status === "ok", "MCP context warm-up failed.");
+  }
   const samples = [];
-  for (let index = 0; index < 25; index += 1) {
+  for (let index = 0; index < 100; index += 1) {
     const started = performance.now();
     const result = await harness.call("tools/call", { name: "get_context", arguments: {} });
     assert(result.result?.structuredContent?.status === "ok", "Warm MCP context call failed.");
     samples.push(performance.now() - started);
   }
   samples.sort((a, b) => a - b);
-  const p95 = samples[Math.floor(samples.length * 0.95)];
+  const p95 = samples[Math.ceil(samples.length * 0.95) - 1];
   const processInfo = await import("node:child_process").then(({ spawnSync }) => spawnSync("powershell.exe", ["-NoProfile", "-Command", `(Get-Process -Id ${harness.sidecar.pid}).WorkingSet64`], { encoding: "utf8", windowsHide: true }));
   const rssMb = Number(processInfo.stdout.trim()) / 1024 / 1024;
   assert(p95 <= 20, `Warm MCP bridge p95 ${p95.toFixed(1)} ms exceeds 20 ms.`);

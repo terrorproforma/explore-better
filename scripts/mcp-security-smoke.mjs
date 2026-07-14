@@ -11,6 +11,12 @@ try {
   await fs.writeFile(path.join(fixture.fixture, "binary.bin"), Buffer.from([0, 1, 0, 2, 0, 3, 255]));
   await fs.symlink(fixture.outside, path.join(fixture.fixture, "escape"), "junction");
 
+  const rootAlias = path.join(fixture.temp, "authorized-alias");
+  await fs.symlink(fixture.fixture, rootAlias, "junction");
+  const aliasedProfile = await fixture.backend.upsertMcpProfile({ name: "Aliased root", access: "read-only", roots: [rootAlias] });
+  const aliasedRead = await fixture.request("read_text", { path: textPath }, { profileId: aliasedProfile.id });
+  assert(aliasedRead.data.text === "safe\n", "A canonical child path was rejected for an authorized aliased root.");
+
   await expectCode(() => fixture.request("read_text", { path: outsidePath }), "OUTSIDE_ROOTS");
   await expectCode(() => fixture.request("read_text", { path: path.join(fixture.fixture, "escape", "outside.txt") }), "OUTSIDE_ROOTS");
   await expectCode(() => fixture.request("read_text", { path: `${textPath}:stream` }), "INVALID_PATH");

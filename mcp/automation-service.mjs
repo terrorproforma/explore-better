@@ -236,6 +236,20 @@ export async function createMcpAutomationService(deps) {
   let lastAuditPruneAt = 0;
 
   const resolvePath = (value) => deps.resolveUserPath(value);
+  const canonicalRootCache = new Map();
+  const canonicalizeRoot = (value) => {
+    const resolved = resolvePath(value);
+    const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    if (!canonicalRootCache.has(key)) {
+      const pending = canonicalizePath(resolved, { allowMissing: true }).catch((error) => {
+        canonicalRootCache.delete(key);
+        throw error;
+      });
+      canonicalRootCache.set(key, pending);
+    }
+    return canonicalRootCache.get(key);
+  };
+  const internalRoots = Object.freeze(await Promise.all((deps.internalRoots || []).map(canonicalizeRoot)));
   const defaultConfig = () => ({ version: 1, enabled: false, auditRetentionDays: 30, profiles: [], updatedAt: new Date().toISOString() });
 
   async function readConfig() {
@@ -271,6 +285,7 @@ export async function createMcpAutomationService(deps) {
       await fs.writeFile(temp, `${JSON.stringify(clean, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
       await fs.rename(temp, configFile);
       configCache = clean;
+      canonicalRootCache.clear();
       return clone(clean);
     };
     configWriteChain = configWriteChain.then(run, run);
@@ -344,26 +359,30 @@ export async function createMcpAutomationService(deps) {
     if (!profile) bridgeError("UNKNOWN_PROFILE", "The AI Bridge profile is missing or revoked.");
     if (!profile.tools.includes(tool.name)) bridgeError("TOOL_NOT_ALLOWED", "This profile does not permit the requested tool.");
     if (tool.access === "write" && profile.access !== "read-write") bridgeError("READ_ONLY_PROFILE", "This profile is read-only.");
-    const clientRoots = (Array.isArray(request.clientRoots) ? request.clientRoots : []).map(normalizeClientRoot).filter(Boolean).map(resolvePath);
+    const profileRoots = await Promise.all(profile.roots.map(canonicalizeRoot));
+    const rawClientRoots = Array.isArray(request.clientRoots) ? request.clientRoots : [];
+    const normalizedClientRoots = rawClientRoots.map(normalizeClientRoot).filter(Boolean);
+    const clientRoots = await Promise.all(normalizedClientRoots.map(canonicalizeRoot));
     return Object.freeze({
       profile: Object.freeze(profile),
       profileId: profile.id,
       sessionId: boundedString(request.sessionId, 120) || "unknown",
+      profileRoots: Object.freeze(profileRoots),
       clientRoots: Object.freeze(clientRoots),
+      clientRootsProvided: rawClientRoots.length > 0,
       context: cleanContext(request.context, null),
       limits: Object.freeze({ pageSize: maxPageSize, textBytes: maxTextBytes, concurrentJobs: 3 })
     });
   }
 
   async function authorizePath(principal, input, options = {}) {
-    if (!principal.profile.roots.length) bridgeError("OUTSIDE_ROOTS", "This profile has no authorized folders.");
+    if (!principal.profileRoots.length) bridgeError("OUTSIDE_ROOTS", "This profile has no authorized folders.");
     const canonical = await canonicalizePath(resolvePath(input), { allowMissing: options.allowMissing === true });
-    const internalRoots = deps.internalRoots.map(resolvePath);
     if (internalRoots.some((root) => isInside(canonical, root) || isInside(root, canonical))) {
       bridgeError("OUTSIDE_ROOTS", "Explore Better internal state cannot be accessed through MCP.", { path: canonical });
     }
-    const profileAllowed = principal.profile.roots.some((root) => isInside(canonical, root));
-    const clientAllowed = !principal.clientRoots.length || principal.clientRoots.some((root) => isInside(canonical, root));
+    const profileAllowed = principal.profileRoots.some((root) => isInside(canonical, root));
+    const clientAllowed = !principal.clientRootsProvided || principal.clientRoots.some((root) => isInside(canonical, root));
     if (!profileAllowed || !clientAllowed) bridgeError("OUTSIDE_ROOTS", "The path is outside the effective authorized roots.", { path: canonical });
     return canonical;
   }

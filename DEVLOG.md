@@ -9,3 +9,10 @@
 - Validation: MCP contract, security, context, analysis, operations, performance, and value suites passed; landing page passed 40/40; SEO discovery passed 56/56 at desktop/mobile sizes with OAI-SearchBot endpoint checks.
 - Final consolidated validation: `verify:all` passed 44/44, release readiness passed 31/31, speed health passed 175/175, packaged MCP matched the source sidecar, and the goal audit completed with 0 failures.
 - Remaining release limitation: the public Windows preview is still unsigned, and official MCP Registry publication needs an independently supported package artifact rather than the current app-bundled sidecar.
+
+## 2026-07-14 22:15 +10:00 - Clean-run MCP root correction
+
+- GitHub's clean Windows runner revealed that a temporary path alias could make a valid child folder fail MCP authorization as `OUTSIDE_ROOTS`; the benchmark's original exact-page assertion obscured the underlying error.
+- Canonicalized profile, client, and internal policy roots before comparison, while continuing to canonicalize every candidate path and deny junction escapes.
+- Added an authorized junction-root regression test and changed the pagination proof to validate two bounded, cursor-linked, non-overlapping pages.
+- Added warm-up and 100 measured calls to the unchanged 20 ms MCP bridge p95 gate; three local repeats passed at 6.6 ms, 3.0 ms, and 5.8 ms.
