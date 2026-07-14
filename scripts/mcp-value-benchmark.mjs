@@ -171,10 +171,10 @@ async function main() {
   assert(process.platform === "win32", "The MCP value benchmark currently targets Windows.");
   await fs.mkdir(path.dirname(reportPath), { recursive: true });
   const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
-  const harness = await startElectronMcp({ visible: true });
+  const harness = await startElectronMcp({ visible: true, prepareFixture: makeFixture });
   const rawCalls = [];
   try {
-    const fixture = await makeFixture(harness.fixture);
+    const fixture = harness.preparedFixture;
     const outsideFile = path.join(harness.temp, "outside-proof.txt");
     await fs.writeFile(outsideFile, "outside authorized roots\n");
 

@@ -94,11 +94,12 @@ export async function waitForOperation(request, operationId, timeoutMs = 30_000)
   }, timeoutMs);
 }
 
-export async function startElectronMcp({ visible = false } = {}) {
+export async function startElectronMcp({ visible = false, prepareFixture = null } = {}) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "eb-mcp-electron-"));
   const fixture = path.join(temp, "authorized");
   await fs.mkdir(fixture, { recursive: true });
   await fs.writeFile(path.join(fixture, "hello.txt"), "hello MCP\n");
+  const preparedFixture = prepareFixture ? await prepareFixture(fixture) : null;
   const env = {
     ...process.env,
     LOCALAPPDATA: path.join(temp, "LocalAppData"),
@@ -191,5 +192,5 @@ export async function startElectronMcp({ visible = false } = {}) {
     await new Promise((resolve) => setTimeout(resolve, 350));
     await removeTreeEventually(temp);
   }
-  return { temp, fixture, env, profile, electron, sidecar, manifest, initialized, call, close, logs: () => ({ electronLog, sidecarError }) };
+  return { temp, fixture, preparedFixture, env, profile, electron, sidecar, manifest, initialized, call, close, logs: () => ({ electronLog, sidecarError }) };
 }
