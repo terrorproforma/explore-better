@@ -349,16 +349,10 @@ button.primary-command:focus-visible {
 }
 
 .brand-mark {
-  display: grid;
+  display: block;
   width: 36px;
   height: 36px;
-  place-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 7px;
-  background: #f9faf8;
-  color: var(--black);
-  font-family: "Bahnschrift", "Segoe UI", sans-serif;
-  font-weight: 800;
+  flex: 0 0 auto;
 }
 
 .brand-copy {

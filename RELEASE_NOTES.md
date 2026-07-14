@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Brand System
+
+- Replaced the detailed legacy app illustration with a geometric `EB` dual-pane monogram matched to the website's ink, paper, acid, and teal palette.
+- Added one deterministic brand generator for the SVG master, website and application PNGs, Windows executable and installer ICO sizes, favicons, README, and MCPB icon.
+
 ### AI Discovery And MCP Evidence
 
 - Added a dedicated crawlable MCP technical page with the complete value case, tool categories, security model, setup path, deliberate limitations, and links to raw evidence.

@@ -1,4 +1,8 @@
-# Explore Better
+<p align="center">
+  <img src="site/assets/brand-mark.svg" width="112" height="112" alt="Explore Better" />
+</p>
+
+<h1 align="center">Explore Better</h1>
 
 [![Latest release](https://img.shields.io/github/v/release/terrorproforma/explore-better)](https://github.com/terrorproforma/explore-better/releases/latest)
 [![Windows CI](https://github.com/terrorproforma/explore-better/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/terrorproforma/explore-better/actions/workflows/windows-ci.yml)

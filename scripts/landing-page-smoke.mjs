@@ -125,6 +125,8 @@ async function pageSnapshot(page, installerName) {
       checksum: document.querySelector("[data-checksum]")?.textContent.trim() || "",
       verifyCommand: document.querySelector("[data-verify-command]")?.textContent.trim() || "",
       unsignedDisclosure: document.querySelector("#unsigned-preview-note")?.textContent.replace(/\s+/g, " ").trim() || "",
+      brandMarks: document.querySelectorAll('.brand img[src$="assets/brand-mark.svg"]').length,
+      svgFavicon: document.querySelector('link[rel="icon"][type="image/svg+xml"]')?.getAttribute("href") || "",
       majorFeatures: ["terminal", "ai-bridge"].map((id) => ({
         id,
         present: Boolean(document.getElementById(id)),
@@ -202,6 +204,12 @@ async function main() {
       const snapshot = await pageSnapshot(page, release.installerName);
       addCheck(checks, `${viewport.name}-title`, snapshot.title.includes("Explore Better"), snapshot.title);
       addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === "The Windows file manager built for humans and AI.", snapshot.h1 || "Missing H1");
+      addCheck(
+        checks,
+        `${viewport.name}-brand-system`,
+        snapshot.brandMarks >= 2 && snapshot.svgFavicon === "assets/brand-mark.svg",
+        `${snapshot.brandMarks} brand marks; favicon ${snapshot.svgFavicon || "missing"}`
+      );
       addCheck(checks, `${viewport.name}-sections`, snapshot.sectionCount >= 8, `${snapshot.sectionCount} main sections`);
       addCheck(
         checks,

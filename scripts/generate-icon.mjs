@@ -4,7 +4,24 @@ import path from "node:path";
 
 const workspace = process.cwd();
 const outDir = path.join(workspace, "build");
+const brandAssetDirs = [path.join(workspace, "site", "assets"), path.join(workspace, "public", "assets")];
 const sizes = [16, 24, 32, 48, 64, 128, 256];
+
+const brandShapes = [
+  { x: 8, y: 8, width: 240, height: 240, radius: 34, fill: "#f4f7f5" },
+  { x: 14, y: 14, width: 228, height: 228, radius: 29, fill: "#111715" },
+  { x: 47, y: 51, width: 27, height: 154, fill: "#f4f7f5" },
+  { x: 47, y: 51, width: 70, height: 25, fill: "#f4f7f5" },
+  { x: 47, y: 116, width: 58, height: 24, fill: "#f4f7f5" },
+  { x: 47, y: 180, width: 70, height: 25, fill: "#f4f7f5" },
+  { x: 122, y: 51, width: 7, height: 154, fill: "#20b8a5" },
+  { x: 136, y: 51, width: 26, height: 154, fill: "#c7ff4a" },
+  { x: 136, y: 51, width: 51, height: 25, fill: "#c7ff4a" },
+  { x: 181, y: 68, width: 27, height: 56, fill: "#c7ff4a" },
+  { x: 136, y: 116, width: 59, height: 24, fill: "#c7ff4a" },
+  { x: 184, y: 133, width: 27, height: 56, fill: "#c7ff4a" },
+  { x: 136, y: 180, width: 54, height: 25, fill: "#c7ff4a" }
+];
 
 const crcTable = new Uint32Array(256);
 for (let n = 0; n < 256; n += 1) {
@@ -74,14 +91,6 @@ function blendPixel(pixels, width, x, y, color) {
   pixels[index + 3] = Math.round(outAlpha * 255);
 }
 
-function mix(a, b, t) {
-  return Math.round(a + (b - a) * t);
-}
-
-function gradientColor(top, bottom, t, alpha = 255) {
-  return [mix(top[0], bottom[0], t), mix(top[1], bottom[1], t), mix(top[2], bottom[2], t), alpha];
-}
-
 function roundedRect(pixels, width, x, y, rectWidth, rectHeight, radius, fill) {
   const x2 = x + rectWidth;
   const y2 = y + rectHeight;
@@ -95,30 +104,6 @@ function roundedRect(pixels, width, x, y, rectWidth, rectHeight, radius, fill) {
       const cy = py < y + radius ? y + radius : py > y2 - radius ? y2 - radius : py;
       const inside = (px - cx) ** 2 + (py - cy) ** 2 <= radius ** 2;
       if (inside) blendPixel(pixels, width, px, py, typeof fill === "function" ? fill(px, py) : fill);
-    }
-  }
-}
-
-function rect(pixels, width, x, y, rectWidth, rectHeight, fill) {
-  roundedRect(pixels, width, x, y, rectWidth, rectHeight, 0, fill);
-}
-
-function line(pixels, width, x1, y1, x2, y2, thickness, fill) {
-  const minX = Math.floor(Math.min(x1, x2) - thickness);
-  const maxX = Math.ceil(Math.max(x1, x2) + thickness);
-  const minY = Math.floor(Math.min(y1, y2) - thickness);
-  const maxY = Math.ceil(Math.max(y1, y2) + thickness);
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const len2 = dx * dx + dy * dy || 1;
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let x = minX; x <= maxX; x += 1) {
-      const t = Math.max(0, Math.min(1, ((x - x1) * dx + (y - y1) * dy) / len2));
-      const px = x1 + t * dx;
-      const py = y1 + t * dy;
-      if ((x - px) ** 2 + (y - py) ** 2 <= (thickness / 2) ** 2) {
-        blendPixel(pixels, width, x, y, fill);
-      }
     }
   }
 }
@@ -157,40 +142,35 @@ function iconPixels(size) {
   const width = size * scale;
   const pixels = Buffer.alloc(width * width * 4);
   const u = width / 256;
-  const top = rgba("#15222d");
-  const bottom = rgba("#0a1118");
-  const panel = rgba("#edfaff", 236);
-  const panelDark = rgba("#17242f", 232);
-  const cyan = rgba("#1cc7ff", 255);
-  const green = rgba("#55f0a2", 255);
-  const yellow = rgba("#ffd166", 255);
-
-  roundedRect(pixels, width, 13 * u, 13 * u, 230 * u, 230 * u, 43 * u, (_x, y) =>
-    gradientColor(top, bottom, Math.max(0, Math.min(1, (y - 13 * u) / (230 * u))), 255)
-  );
-  roundedRect(pixels, width, 20 * u, 20 * u, 216 * u, 216 * u, 34 * u, rgba("#ffffff", 18));
-  roundedRect(pixels, width, 31 * u, 42 * u, 194 * u, 154 * u, 16 * u, rgba("#071019", 198));
-
-  roundedRect(pixels, width, 43 * u, 62 * u, 76 * u, 112 * u, 10 * u, panelDark);
-  roundedRect(pixels, width, 137 * u, 62 * u, 76 * u, 112 * u, 10 * u, panelDark);
-  rect(pixels, width, 43 * u, 62 * u, 76 * u, 19 * u, cyan);
-  rect(pixels, width, 137 * u, 62 * u, 76 * u, 19 * u, green);
-  roundedRect(pixels, width, 55 * u, 96 * u, 52 * u, 11 * u, 5 * u, panel);
-  roundedRect(pixels, width, 55 * u, 119 * u, 42 * u, 11 * u, 5 * u, rgba("#bdeeff", 210));
-  roundedRect(pixels, width, 55 * u, 142 * u, 49 * u, 11 * u, 5 * u, rgba("#bdeeff", 180));
-  roundedRect(pixels, width, 149 * u, 96 * u, 51 * u, 11 * u, 5 * u, panel);
-  roundedRect(pixels, width, 149 * u, 119 * u, 39 * u, 11 * u, 5 * u, rgba("#c8ffd9", 210));
-  roundedRect(pixels, width, 149 * u, 142 * u, 45 * u, 11 * u, 5 * u, rgba("#c8ffd9", 180));
-
-  roundedRect(pixels, width, 124 * u, 56 * u, 8 * u, 126 * u, 4 * u, rgba("#ffffff", 88));
-  line(pixels, width, 70 * u, 194 * u, 112 * u, 209 * u, 9 * u, cyan);
-  line(pixels, width, 112 * u, 209 * u, 185 * u, 185 * u, 9 * u, green);
-  line(pixels, width, 183 * u, 185 * u, 168 * u, 171 * u, 8 * u, green);
-  line(pixels, width, 183 * u, 185 * u, 177 * u, 206 * u, 8 * u, green);
-  roundedRect(pixels, width, 92 * u, 32 * u, 72 * u, 16 * u, 8 * u, yellow);
-  roundedRect(pixels, width, 110 * u, 28 * u, 36 * u, 8 * u, 4 * u, rgba("#ffffff", 150));
+  for (const shape of brandShapes) {
+    roundedRect(
+      pixels,
+      width,
+      shape.x * u,
+      shape.y * u,
+      shape.width * u,
+      shape.height * u,
+      (shape.radius || 0) * u,
+      rgba(shape.fill)
+    );
+  }
 
   return downsample(pixels, size, scale);
+}
+
+function brandMarkSvg() {
+  const shapes = brandShapes
+    .map((shape) => {
+      const radius = shape.radius ? ` rx="${shape.radius}"` : "";
+      return `  <rect x="${shape.x}" y="${shape.y}" width="${shape.width}" height="${shape.height}"${radius} fill="${shape.fill}"/>`;
+    })
+    .join("\n");
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Explore Better</title>
+  <desc id="desc">Geometric EB monogram divided like a dual-pane file manager.</desc>
+${shapes}
+</svg>
+`;
 }
 
 function encodeIco(pngs) {
@@ -218,6 +198,9 @@ function encodeIco(pngs) {
 
 async function main() {
   await fs.mkdir(outDir, { recursive: true });
+  await Promise.all(brandAssetDirs.map((directory) => fs.mkdir(directory, { recursive: true })));
+  const svg = brandMarkSvg();
+  await Promise.all(brandAssetDirs.map((directory) => fs.writeFile(path.join(directory, "brand-mark.svg"), svg)));
   const pngs = [];
   for (const size of sizes) {
     const png = encodePng(size, size, iconPixels(size));
@@ -225,10 +208,11 @@ async function main() {
     await fs.writeFile(path.join(outDir, `icon-${size}.png`), png);
     if (size === 256) {
       await fs.writeFile(path.join(outDir, "icon.png"), png);
+      await Promise.all(brandAssetDirs.map((directory) => fs.writeFile(path.join(directory, "app-icon.png"), png)));
     }
   }
   await fs.writeFile(path.join(outDir, "icon.ico"), encodeIco(pngs));
-  console.log(`generated ${pngs.length} PNG sizes and build\\icon.ico`);
+  console.log(`generated Explore Better brand SVG, ${pngs.length} PNG sizes, and build\\icon.ico`);
 }
 
 main().catch((error) => {
