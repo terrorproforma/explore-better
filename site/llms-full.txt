@@ -4,7 +4,7 @@
 
 Explore Better is the AI-native Windows file manager: an open-source Windows 11 x64 desktop file manager and local MCP server. It is intended as a more capable Windows File Explorer replacement for people and AI clients that need shared live context, dual panes, tabs, keyboard-driven workflows, integrated terminals, disk analysis, indexed search, scripting, recoverable file operations, and optional current-user Explorer integration.
 
-Current public version: 0.2.0.
+Current public version: 0.2.1.
 
 Project home: https://terrorproforma.github.io/explore-better/
 

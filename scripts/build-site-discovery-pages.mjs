@@ -4,6 +4,8 @@ import path from "node:path";
 const root = process.cwd();
 const siteRoot = path.join(root, "site");
 const baseUrl = "https://terrorproforma.github.io/explore-better";
+const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
+const releaseTag = `v${packageJson.version}`;
 
 const integrations = {
   claude: {
@@ -105,7 +107,7 @@ const pages = [
         ["Read-first", "Profiles default to read-only. Permanent deletion and writable tools are separate permissions, disabled unless selected."],
         ["Auditable", "A rotating local audit records the client, tool, paths, policy decision, duration, and job or operation IDs, never file contents or tokens."]
       ]), true),
-      section("Install the standalone MCP bundle", "The Windows MCPB release contains the native stdio sidecar, manifest, tool catalogue, prompts, screenshots, license, and SHA-256 metadata.", `<pre class="detail-code">Registry name: io.github.terrorproforma/explore-better\nTransport: stdio\nPlatform: Windows x64\nProfile: required, separately revocable\nApp: auto-discovered from the normal per-user install</pre><p><a class="button button--primary" href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.0">Download the MCPB release</a></p>`)
+      section("Install the standalone MCP bundle", "The Windows MCPB release contains the native stdio sidecar, manifest, tool catalogue, prompts, screenshots, license, and SHA-256 metadata.", `<pre class="detail-code">Registry name: io.github.terrorproforma/explore-better\nTransport: stdio\nPlatform: Windows x64\nProfile: required, separately revocable\nApp: auto-discovered from the normal per-user install</pre><p><a class="button button--primary" href="https://github.com/terrorproforma/explore-better/releases/tag/${releaseTag}">Download the MCPB release</a></p>`)
     ]
   },
   {

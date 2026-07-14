@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.1 - 2026-07-15
+
 ### Brand System
 
 - Replaced the detailed legacy app illustration with a geometric `EB` dual-pane monogram matched to the website's ink, paper, acid, and teal palette.

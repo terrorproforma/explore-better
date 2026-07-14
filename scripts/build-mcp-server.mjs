@@ -10,6 +10,7 @@ const moduleDir = path.join(root, "native", "mcpserver");
 const generatedContract = path.join(moduleDir, "contracts-v1.json");
 const outputDir = path.join(root, "native", "bin");
 const output = path.join(outputDir, "ExploreBetterMcp.exe");
+const candidateOutput = path.join(outputDir, `ExploreBetterMcp-${process.pid}.tmp.exe`);
 const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
 
 const contract = await fs.readFile(sourceContract);
@@ -19,7 +20,7 @@ await fs.mkdir(outputDir, { recursive: true });
 
 const result = spawnSync(
   "go",
-  ["build", "-trimpath", "-ldflags", `-s -w -X main.version=${packageJson.version}`, "-o", output, "."],
+  ["build", "-trimpath", "-ldflags", `-s -w -X main.version=${packageJson.version}`, "-o", candidateOutput, "."],
   {
     cwd: moduleDir,
     env: { ...process.env, GOTOOLCHAIN: "go1.25.12" },
@@ -29,15 +30,32 @@ const result = spawnSync(
 );
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
-if (result.status !== 0) process.exit(result.status || 1);
+if (result.status !== 0) {
+  await fs.rm(candidateOutput, { force: true }).catch(() => {});
+  process.exit(result.status || 1);
+}
 
-const executable = await fs.readFile(output);
+const executable = await fs.readFile(candidateOutput);
+let reused = false;
+try {
+  const existing = await fs.readFile(output);
+  reused = existing.equals(executable);
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
+if (reused) {
+  await fs.rm(candidateOutput, { force: true });
+} else {
+  await fs.rm(output, { force: true });
+  await fs.rename(candidateOutput, output);
+}
 console.log(
   JSON.stringify({
     output,
     bytes: executable.length,
     sha256: crypto.createHash("sha256").update(executable).digest("hex"),
     contractSha256: crypto.createHash("sha256").update(contract).digest("hex"),
-    goToolchain: "go1.25.12"
+    goToolchain: "go1.25.12",
+    reused
   })
 );
