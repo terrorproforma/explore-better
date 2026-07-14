@@ -6,7 +6,7 @@
 
 **A fast, dual-pane Windows file manager with per-tab terminals, a local MCP AI bridge, transactional file operations, reversible Explorer integration, and a visual disk-space analyzer.**
 
-[Visit the Explore Better website](https://terrorproforma.github.io/explore-better/) | [Download the latest Windows release](https://github.com/terrorproforma/explore-better/releases/latest) | [Read the user manual](USER_MANUAL.md) | [Report an issue](https://github.com/terrorproforma/explore-better/issues)
+[Visit the Explore Better website](https://terrorproforma.github.io/explore-better/) | [See the MCP proof](https://terrorproforma.github.io/explore-better/mcp/) | [Download the latest Windows release](https://github.com/terrorproforma/explore-better/releases/latest) | [Read the user manual](USER_MANUAL.md) | [Report an issue](https://github.com/terrorproforma/explore-better/issues)
 
 ## Why Explore Better Exists
 
@@ -174,6 +174,24 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 - Local stdio and a same-user random named pipe only: no remote listener, arbitrary shell execution, terminal control, registry changes, or AI-driven elevation.
 - One-click reversible setup for Codex, Claude Desktop, and VS Code with byte-for-byte configuration backups and preservation of unrelated MCP servers.
 
+#### Is MCP Actually Useful Here?
+
+Yes, for the parts of file work where a terminal is too broad or too text-oriented. The [public MCP evidence page](https://terrorproforma.github.io/explore-better/mcp/) and [machine-readable benchmark](https://terrorproforma.github.io/explore-better/benchmarks/mcp-value.json) run the real Electron host and bundled Go stdio sidecar against the same deterministic fixture as equivalent PowerShell scripts.
+
+The current evidence proves:
+
+- 3 of 3 shared search, duplicate, and disk-analysis workflows return the correct known result through both interfaces;
+- 6 of 6 MCP-specific controls pass, including schema discovery, bounded pagination, live pane navigation, authorized-root denial, read-only capability reduction, and labeled allocated-size data;
+- the comparison discloses that PowerShell timings include fresh process startup and does not claim MCP is universally faster than a persistent warm shell.
+
+MCP complements the terminal. Use the terminal for arbitrary commands and system administration. Use MCP when an AI needs Explore Better's live panes, selections, indexes, Analyzer, client-specific folder authority, or preview/apply operations backed by the transaction journal.
+
+Reproduce the focused proof on Windows:
+
+```powershell
+npm run verify:mcp-value
+```
+
 ### Windows Shell And Explorer Replacement
 
 - Navigator access to This PC, drives, libraries, Network, Recycle Bin, and discovered shell locations.
@@ -298,6 +316,8 @@ npm run verify:mcp-security
 npm run verify:mcp-context
 npm run verify:mcp-operations
 npm run verify:packaged-mcp
+npm run verify:mcp-value
+npm run verify:seo-discovery
 npm run verify:layout
 npm run verify:speed-health
 npm run verify:release-readiness

@@ -1,5 +1,16 @@
 # Explore Better Release Notes
 
+## Unreleased
+
+### AI Discovery And MCP Evidence
+
+- Added a dedicated crawlable MCP technical page with the complete value case, tool categories, security model, setup path, deliberate limitations, and links to raw evidence.
+- Added canonical URLs, Open Graph and social metadata, honest `SoftwareApplication` JSON-LD, `robots.txt`, `sitemap.xml`, `llms.txt`, and a detailed `llms-full.txt` reference.
+- Explicitly allowed OAI-SearchBot while keeping the public site available to ordinary crawlers and anonymous users.
+- Added a reproducible benchmark that runs the real Electron host and Go stdio sidecar against the same deterministic fixture as equivalent PowerShell scripts.
+- Proved 3 of 3 shared workflows and 6 of 6 MCP-specific controls, while documenting that MCP complements rather than replaces a persistent shell.
+- Added automated crawler, structured-data, benchmark-sync, responsive-layout, and AI-discovery verification to Windows CI.
+
 ## v0.2.0 - 2026-07-14
 
 Explore Better now connects serious file work to both a real shell and structured AI tools. This release adds the local MCP AI Bridge and ships it alongside the per-tab ConPTY terminals introduced in v0.1.3.

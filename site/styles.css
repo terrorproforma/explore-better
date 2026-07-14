@@ -975,6 +975,15 @@ h3 {
   filter: invert(93%) sepia(80%) saturate(744%) hue-rotate(25deg) brightness(106%);
 }
 
+.text-link--dark {
+  margin-top: 24px;
+  color: var(--ink);
+}
+
+.text-link--dark img {
+  filter: none;
+}
+
 .integration-visual {
   overflow: hidden;
   margin: 0;
@@ -1195,6 +1204,428 @@ h3 {
   gap: 18px;
 }
 
+.mcp-page {
+  background: #f7f9f8;
+}
+
+.mcp-masthead {
+  min-height: 740px;
+  padding: 176px 0 110px;
+  color: var(--white);
+  background:
+    linear-gradient(90deg, rgba(17, 23, 21, 0.98) 0%, rgba(17, 23, 21, 0.94) 48%, rgba(17, 23, 21, 0.7) 100%),
+    url("assets/ai-bridge.png") right center / auto 100% no-repeat,
+    var(--ink);
+}
+
+.mcp-masthead__inner {
+  position: relative;
+  z-index: 1;
+}
+
+.mcp-masthead h1 {
+  max-width: 800px;
+  margin-bottom: 26px;
+  font-size: 6.2rem;
+}
+
+.mcp-masthead__lede {
+  max-width: 760px;
+  margin-bottom: 14px;
+  color: var(--white);
+  font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
+  font-size: 1.6rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.mcp-masthead__copy {
+  max-width: 720px;
+  margin-bottom: 34px;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.mcp-stat-band {
+  color: var(--ink);
+  background: var(--acid);
+  border-bottom: 1px solid rgba(17, 23, 21, 0.36);
+}
+
+.mcp-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.mcp-stat-grid div {
+  min-width: 0;
+  padding: 30px 24px;
+  border-right: 1px solid rgba(17, 23, 21, 0.32);
+}
+
+.mcp-stat-grid div:first-child {
+  border-left: 1px solid rgba(17, 23, 21, 0.32);
+}
+
+.mcp-stat-grid strong,
+.mcp-stat-grid span {
+  display: block;
+}
+
+.mcp-stat-grid strong {
+  font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
+  font-size: 2.1rem;
+  line-height: 1;
+}
+
+.mcp-stat-grid span {
+  margin-top: 8px;
+  color: #37423e;
+  font-family: "Cascadia Code", "Aptos Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.mcp-answer-section {
+  background: var(--white);
+}
+
+.mcp-answer-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.78fr) minmax(0, 1.22fr);
+  align-items: start;
+  gap: 90px;
+}
+
+.mcp-answer-layout .section-heading {
+  margin-bottom: 0;
+}
+
+.mcp-answer-copy {
+  padding-top: 42px;
+  border-top: 2px solid var(--ink);
+  font-size: 1.12rem;
+}
+
+.mcp-answer-copy p:last-child {
+  margin-bottom: 0;
+  color: var(--muted);
+}
+
+.mcp-evidence-section {
+  padding: 128px 0;
+  color: var(--white);
+  background: #17231f;
+}
+
+.mcp-benchmark-table-wrap {
+  overflow-x: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.3);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.mcp-benchmark-table {
+  width: 100%;
+  min-width: 780px;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.mcp-benchmark-table th,
+.mcp-benchmark-table td {
+  padding: 20px 16px;
+  border-right: 1px solid rgba(255, 255, 255, 0.13);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.13);
+  font-variant-numeric: tabular-nums;
+}
+
+.mcp-benchmark-table th:last-child,
+.mcp-benchmark-table td:last-child {
+  border-right: 0;
+}
+
+.mcp-benchmark-table tbody tr:last-child th,
+.mcp-benchmark-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.mcp-benchmark-table thead th {
+  color: rgba(255, 255, 255, 0.58);
+  font-family: "Cascadia Code", "Aptos Mono", monospace;
+  font-size: 0.72rem;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.mcp-benchmark-table tbody th {
+  color: var(--white);
+  font-weight: 650;
+}
+
+.proof-pass {
+  color: var(--acid);
+  font-family: "Cascadia Code", "Aptos Mono", monospace;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.mcp-method-note {
+  max-width: 900px;
+  margin: 22px 0 62px;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 0.82rem;
+}
+
+.mcp-proof-list {
+  border-top: 1px solid rgba(255, 255, 255, 0.24);
+}
+
+.mcp-proof-list article {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+  min-height: 104px;
+  padding: 18px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.mcp-proof-list article > span,
+.mcp-proof-list article > b {
+  font-family: "Cascadia Code", "Aptos Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.mcp-proof-list article > span {
+  color: rgba(255, 255, 255, 0.46);
+}
+
+.mcp-proof-list article > b {
+  color: var(--acid);
+}
+
+.mcp-proof-list strong {
+  font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
+  font-size: 1.08rem;
+}
+
+.mcp-proof-list p {
+  margin: 4px 0 0;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.9rem;
+}
+
+.mcp-evidence-links {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 42px;
+}
+
+.mcp-evidence-links code {
+  margin-left: auto;
+  padding: 12px 14px;
+  color: var(--acid);
+  background: #0d1311;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
+.mcp-tool-groups {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  margin-bottom: 34px;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+
+.mcp-tool-groups article {
+  min-height: 260px;
+  padding: 34px;
+  background: var(--white);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.mcp-tool-groups article > span {
+  color: #137d70;
+  font-family: "Cascadia Code", "Aptos Mono", monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.mcp-tool-groups h3 {
+  margin-top: 42px;
+  font-size: 1.55rem;
+}
+
+.mcp-tool-groups p {
+  margin-bottom: 0;
+  color: var(--muted);
+}
+
+.mcp-tool-groups code {
+  color: var(--ink);
+  font-size: 0.82rem;
+}
+
+.mcp-security-section {
+  color: var(--white);
+  background: #182d39;
+}
+
+.mcp-security-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.82fr) minmax(0, 1.18fr);
+  gap: 84px;
+}
+
+.mcp-security-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.24);
+}
+
+.mcp-security-steps li {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 18px;
+  padding: 24px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.mcp-security-steps li > span {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  color: var(--ink);
+  background: var(--acid);
+  border-radius: 4px;
+  font-family: "Cascadia Code", "Aptos Mono", monospace;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.mcp-security-steps strong {
+  font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
+  font-size: 1.15rem;
+}
+
+.mcp-security-steps p {
+  margin: 5px 0 0;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 0.9rem;
+}
+
+.mcp-setup-section {
+  background: #f1f0ff;
+}
+
+.mcp-setup-line {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 2px solid var(--ink);
+  border-bottom: 2px solid var(--ink);
+}
+
+.mcp-setup-line li {
+  min-height: 230px;
+  padding: 26px 22px;
+  border-right: 1px solid rgba(17, 23, 21, 0.28);
+}
+
+.mcp-setup-line li:last-child {
+  border-right: 0;
+}
+
+.mcp-setup-line span,
+.mcp-setup-line strong {
+  display: block;
+}
+
+.mcp-setup-line span {
+  color: #6a59b8;
+  font-family: "Cascadia Code", "Aptos Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.mcp-setup-line strong {
+  margin: 58px 0 10px;
+  font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
+  font-size: 1.4rem;
+}
+
+.mcp-setup-line p {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.mcp-setup-actions {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  margin-top: 36px;
+}
+
+.mcp-setup-actions .text-link {
+  color: var(--ink);
+}
+
+.mcp-setup-actions .text-link img {
+  filter: none;
+}
+
+.mcp-machine-section {
+  padding: 104px 0;
+  color: var(--white);
+  background: #3d202c;
+}
+
+.mcp-machine-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.72fr) minmax(0, 1.28fr);
+  gap: 80px;
+}
+
+.mcp-machine-layout h2 {
+  font-size: 3.4rem;
+}
+
+.mcp-machine-links {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  border-top: 1px solid rgba(255, 255, 255, 0.3);
+  border-left: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.mcp-machine-links a {
+  display: flex;
+  min-height: 112px;
+  padding: 20px;
+  flex-direction: column;
+  justify-content: center;
+  text-decoration: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.3);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.mcp-machine-links a:hover {
+  color: var(--acid);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.mcp-machine-links span {
+  margin-top: 5px;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 0.8rem;
+}
+
 .reveal {
   opacity: 0;
   transform: translateY(24px);
@@ -1221,8 +1652,17 @@ h3 {
   .workspace-layout,
   .integration-layout,
   .major-feature-layout,
-  .major-feature-layout--reverse {
+  .major-feature-layout--reverse,
+  .mcp-answer-layout,
+  .mcp-security-layout,
+  .mcp-machine-layout {
     grid-template-columns: 1fr;
+  }
+
+  .mcp-answer-layout,
+  .mcp-security-layout,
+  .mcp-machine-layout {
+    gap: 48px;
   }
 
   .major-feature-layout {
@@ -1258,6 +1698,18 @@ h3 {
 
   .download-layout h2 {
     font-size: 3.6rem;
+  }
+
+  .mcp-setup-line {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .mcp-setup-line li:nth-child(2) {
+    border-right: 0;
+  }
+
+  .mcp-setup-line li:nth-child(-n + 2) {
+    border-bottom: 1px solid rgba(17, 23, 21, 0.28);
   }
 }
 
@@ -1315,6 +1767,28 @@ h3 {
 
   .hero {
     min-height: min(860px, 92svh);
+  }
+
+  .mcp-masthead {
+    min-height: 680px;
+    padding-top: 148px;
+    background-position: 70% center;
+  }
+
+  .mcp-masthead h1 {
+    font-size: 5rem;
+  }
+
+  .mcp-stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .mcp-stat-grid div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .mcp-stat-grid div:nth-child(-n + 2) {
+    border-bottom: 1px solid rgba(17, 23, 21, 0.32);
   }
 
   .hero__content {
@@ -1401,6 +1875,15 @@ h3 {
   .footer-layout p,
   .footer-links {
     grid-column: 1 / -1;
+  }
+
+  .mcp-evidence-links {
+    flex-wrap: wrap;
+  }
+
+  .mcp-evidence-links code {
+    width: 100%;
+    margin-left: 0;
   }
 }
 
@@ -1539,6 +2022,89 @@ h3 {
     padding-top: 30px;
     border-top: 2px solid var(--ink);
     border-left: 0;
+  }
+
+  .mcp-masthead {
+    min-height: 620px;
+    padding: 128px 0 84px;
+    background-image: linear-gradient(rgba(17, 23, 21, 0.94), rgba(17, 23, 21, 0.94));
+  }
+
+  .mcp-masthead h1 {
+    font-size: 3.6rem;
+  }
+
+  .mcp-masthead__lede {
+    font-size: 1.3rem;
+  }
+
+  .mcp-stat-grid,
+  .mcp-tool-groups,
+  .mcp-machine-links,
+  .mcp-setup-line {
+    grid-template-columns: 1fr;
+  }
+
+  .mcp-stat-grid div,
+  .mcp-stat-grid div:nth-child(2),
+  .mcp-stat-grid div:first-child {
+    border-right: 0;
+    border-left: 0;
+    border-bottom: 1px solid rgba(17, 23, 21, 0.32);
+  }
+
+  .mcp-stat-grid div:last-child {
+    border-bottom: 0;
+  }
+
+  .mcp-answer-copy {
+    padding-top: 28px;
+  }
+
+  .mcp-proof-list article {
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .mcp-proof-list article > b {
+    grid-column: 2;
+  }
+
+  .mcp-evidence-links .button {
+    width: 100%;
+  }
+
+  .mcp-tool-groups article {
+    min-height: 220px;
+    padding: 28px;
+  }
+
+  .mcp-security-steps li {
+    grid-template-columns: 38px 1fr;
+  }
+
+  .mcp-setup-line li,
+  .mcp-setup-line li:nth-child(2) {
+    min-height: 180px;
+    border-right: 0;
+    border-bottom: 1px solid rgba(17, 23, 21, 0.28);
+  }
+
+  .mcp-setup-line li:last-child {
+    border-bottom: 0;
+  }
+
+  .mcp-setup-line strong {
+    margin-top: 36px;
+  }
+
+  .mcp-setup-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .mcp-machine-layout h2 {
+    font-size: 2.7rem;
   }
 
   .footer-layout {

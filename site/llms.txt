@@ -1,0 +1,28 @@
+# Explore Better
+
+> Explore Better is an open-source Windows 11 x64 file manager with dual panes, one real ConPTY terminal per file tab, a folder-scoped local MCP server for AI clients, transactional file operations, indexed discovery, and a nested disk-usage analyzer.
+
+Explore Better's MCP bridge complements a terminal. Use MCP when an AI needs typed file-manager context, bounded search and analysis, least-authority folder profiles, or preview/apply operations backed by the application's journal. Use the terminal for arbitrary commands and system administration. The public preview is free and currently unsigned.
+
+## Product
+
+- [Explore Better home](https://terrorproforma.github.io/explore-better/): Product overview, screenshots, download, checksum, and release status.
+- [Explore Better MCP server](https://terrorproforma.github.io/explore-better/mcp/): Complete MCP value case, setup, tool categories, security model, limitations, and benchmark.
+- [User manual](https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md): Full application and AI Bridge documentation.
+- [Source repository](https://github.com/terrorproforma/explore-better): Source, issues, releases, and verification scripts.
+
+## MCP Evidence
+
+- [Machine-readable benchmark](https://terrorproforma.github.io/explore-better/benchmarks/mcp-value.json): Reproducible MCP-versus-PowerShell results from the real Electron host and Go stdio sidecar.
+- [Benchmark explanation](https://terrorproforma.github.io/explore-better/benchmarks/mcp-value.md): Human- and LLM-readable methodology, results, interpretation, and reproduction command.
+- [Canonical MCP contract](https://github.com/terrorproforma/explore-better/blob/master/mcp/contracts-v1.json): Versioned definitions for 28 tools, five resources, and four prompts.
+- [Full LLM context](https://terrorproforma.github.io/explore-better/llms-full.txt): Detailed product, architecture, tool, safety, setup, and limitation reference.
+
+## Releases
+
+- [Latest release](https://github.com/terrorproforma/explore-better/releases/latest): Public Windows installer and SHA-256 checksums.
+- [Release notes](https://github.com/terrorproforma/explore-better/blob/master/RELEASE_NOTES.md): Version history and known limitations.
+
+## Optional
+
+- [MCP specification](https://modelcontextprotocol.io/specification/2025-11-25): Protocol implemented by the bundled stdio sidecar.

@@ -1,0 +1,173 @@
+{
+  "schema": "explore-better.mcp-value.v1",
+  "generatedAt": "2026-07-14T11:24:55.905Z",
+  "appVersion": "0.2.0",
+  "protocolVersion": "2025-11-25",
+  "methodology": {
+    "repetitions": 3,
+    "correctnessFirst": true,
+    "timingScope": "MCP timings include the tool call and job polling. PowerShell timings include process startup and command execution.",
+    "limitation": "This is a deterministic functional comparison, not a universal performance ranking. A persistent warm shell may have lower startup latency."
+  },
+  "environment": {
+    "platform": "win32",
+    "architecture": "x64",
+    "node": "v24.12.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 275HX"
+  },
+  "fixture": {
+    "files": 380,
+    "logicalBytes": 385495,
+    "catalogEntries": 360,
+    "queryMatches": 8,
+    "duplicateGroups": 3,
+    "duplicateFiles": 9,
+    "reclaimableBytes": 49152
+  },
+  "summary": {
+    "workflowsPassed": 3,
+    "workflowsTotal": 3,
+    "mcpSpecificProofsPassed": 6,
+    "mcpSpecificProofsTotal": 6,
+    "conclusion": "MCP does not replace a shell. It adds typed discovery, live Explore Better context, bounded outputs, least-authority profiles, and application-level file semantics that generic terminal access does not provide by default."
+  },
+  "workflows": [
+    {
+      "id": "filename-search",
+      "label": "Find matching reports",
+      "groundTruth": {
+        "matches": 8
+      },
+      "mcp": {
+        "correct": true,
+        "medianMs": 9.8,
+        "medianOutputBytes": 4646,
+        "runsMs": [
+          11.4,
+          9.8,
+          2
+        ],
+        "interface": "typed search_files response"
+      },
+      "powershell": {
+        "correct": true,
+        "medianMs": 536.1,
+        "medianOutputBytes": 369,
+        "runsMs": [
+          537.5,
+          454.4,
+          536.1
+        ],
+        "interface": "custom Get-ChildItem pipeline serialized to JSON"
+      }
+    },
+    {
+      "id": "duplicate-space",
+      "label": "Find content duplicates",
+      "groundTruth": {
+        "groups": 3,
+        "duplicateFiles": 9,
+        "reclaimableBytes": 49152
+      },
+      "mcp": {
+        "correct": true,
+        "medianMs": 130.4,
+        "medianOutputBytes": 24270,
+        "runsMs": [
+          264.1,
+          130.4,
+          105.5
+        ],
+        "interface": "cancellable find_duplicates job"
+      },
+      "powershell": {
+        "correct": true,
+        "medianMs": 580.5,
+        "medianOutputBytes": 355,
+        "runsMs": [
+          625.3,
+          560.3,
+          580.5
+        ],
+        "interface": "custom size-group and Get-FileHash pipeline"
+      }
+    },
+    {
+      "id": "disk-usage",
+      "label": "Measure disk usage",
+      "groundTruth": {
+        "files": 380,
+        "logicalBytes": 385495
+      },
+      "mcp": {
+        "correct": true,
+        "medianMs": 72.3,
+        "medianOutputBytes": 132639,
+        "runsMs": [
+          60.2,
+          73.3,
+          72.3
+        ],
+        "allocationAccuracy": "exact",
+        "allocatedBytesReported": true,
+        "interface": "cancellable analyzer job with treemap and allocation metadata"
+      },
+      "powershell": {
+        "correct": true,
+        "medianMs": 445.4,
+        "medianOutputBytes": 520,
+        "runsMs": [
+          452.5,
+          426.7,
+          445.4
+        ],
+        "allocationAccuracy": "not-reported",
+        "allocatedBytesReported": false,
+        "interface": "custom Get-ChildItem and Measure-Object pipeline"
+      }
+    }
+  ],
+  "proofs": [
+    {
+      "id": "schema-discovery",
+      "label": "Model-discoverable typed contract",
+      "passed": true,
+      "detail": "17 profile-permitted tools exposed with JSON input schemas; destructive tools are absent from discovery."
+    },
+    {
+      "id": "bounded-pagination",
+      "label": "Bounded pagination",
+      "passed": true,
+      "detail": "A 360-entry folder returned exactly 25 entries and an opaque continuation cursor."
+    },
+    {
+      "id": "live-ui-context",
+      "label": "Live file-manager context",
+      "passed": true,
+      "detail": "The AI read live tab context, opened a folder in a new left-pane tab, then observed the revised pane state."
+    },
+    {
+      "id": "root-boundary",
+      "label": "Authorized-root enforcement",
+      "passed": true,
+      "detail": "A read outside the profile root was rejected with OUTSIDE_ROOTS. A normal shell retains the user's broader filesystem authority."
+    },
+    {
+      "id": "read-only-discovery",
+      "label": "Read-only capability reduction",
+      "passed": true,
+      "detail": "plan_delete, plan_transfer, plan_text_write, and apply_operation were not exposed to the read-only profile."
+    },
+    {
+      "id": "allocation-semantics",
+      "label": "File-manager-specific allocation semantics",
+      "passed": true,
+      "detail": "Analyzer returned labeled exact allocation data; the generic PowerShell baseline reported logical bytes only."
+    }
+  ],
+  "transport": {
+    "implementation": "ExploreBetterMcp.exe Go stdio sidecar over authenticated same-user Electron named pipe",
+    "discoveredTools": 17,
+    "rawToolCalls": 32
+  }
+}

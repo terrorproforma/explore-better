@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Explore Better MCP Server gives Codex, ChatGPT, Claude, and VS Code typed, folder-scoped Windows file tools with live pane context, disk analysis, indexed search, and recoverable operations."
+    />
+    <meta name="application-name" content="Explore Better" />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="googlebot" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="theme-color" content="#111715" />
+    <meta property="og:title" content="Explore Better MCP Server for Windows file management" />
+    <meta
+      property="og:description"
+      content="A local MCP server that adds live file-manager context, typed bounded results, folder-scoped permissions, and transactional file operations to AI clients."
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="Explore Better" />
+    <meta property="og:url" content="https://terrorproforma.github.io/explore-better/mcp/" />
+    <meta property="og:image" content="https://terrorproforma.github.io/explore-better/assets/ai-bridge.png" />
+    <meta property="og:image:width" content="1440" />
+    <meta property="og:image:height" content="900" />
+    <meta property="og:image:alt" content="Explore Better AI Bridge folder and tool permissions" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Explore Better MCP Server for Windows file management" />
+    <meta name="twitter:description" content="Typed local file tools, live pane context, folder-scoped access, disk analysis, and recoverable operations for AI clients." />
+    <meta name="twitter:image" content="https://terrorproforma.github.io/explore-better/assets/ai-bridge.png" />
+    <title>Explore Better MCP Server for Windows File Management</title>
+    <link rel="canonical" href="https://terrorproforma.github.io/explore-better/mcp/" />
+    <link rel="alternate" type="text/plain" href="https://terrorproforma.github.io/explore-better/llms.txt" title="Explore Better LLM index" />
+    <link rel="icon" type="image/png" href="../assets/app-icon.png" />
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../script.js" defer></script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://terrorproforma.github.io/explore-better/mcp/#server",
+            "name": "Explore Better MCP Server",
+            "alternateName": "Explore Better AI Bridge",
+            "url": "https://terrorproforma.github.io/explore-better/mcp/",
+            "softwareVersion": "0.2.0",
+            "operatingSystem": "Windows 11 x64",
+            "applicationCategory": "DeveloperApplication",
+            "applicationSubCategory": "Local MCP server for file management",
+            "isAccessibleForFree": true,
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            },
+            "description": "A local stdio MCP server for typed, folder-scoped Windows file context, discovery, analysis, and recoverable operations through Explore Better.",
+            "downloadUrl": "https://github.com/terrorproforma/explore-better/releases/latest",
+            "sameAs": [
+              "https://github.com/terrorproforma/explore-better",
+              "https://github.com/terrorproforma/explore-better/blob/master/mcp/contracts-v1.json"
+            ]
+          },
+          {
+            "@type": "TechArticle",
+            "@id": "https://terrorproforma.github.io/explore-better/mcp/#article",
+            "headline": "Explore Better MCP Server for Windows File Management",
+            "description": "Architecture, security model, tool catalogue, benchmark, setup, and limitations for the Explore Better local MCP server.",
+            "url": "https://terrorproforma.github.io/explore-better/mcp/",
+            "datePublished": "2026-07-14",
+            "dateModified": "2026-07-14",
+            "inLanguage": "en",
+            "about": { "@id": "https://terrorproforma.github.io/explore-better/mcp/#server" },
+            "image": "https://terrorproforma.github.io/explore-better/assets/ai-bridge.png"
+          },
+          {
+            "@type": "HowTo",
+            "@id": "https://terrorproforma.github.io/explore-better/mcp/#setup",
+            "name": "Connect an AI client to Explore Better MCP",
+            "description": "Create a folder-scoped local MCP profile and install its stdio client configuration.",
+            "totalTime": "PT3M",
+            "step": [
+              { "@type": "HowToStep", "position": 1, "name": "Install Explore Better", "text": "Install the current Windows x64 release and open Preferences." },
+              { "@type": "HowToStep", "position": 2, "name": "Enable AI Bridge", "text": "Enable AI Bridge and create a profile for the intended local AI client." },
+              { "@type": "HowToStep", "position": 3, "name": "Choose authority", "text": "Select read-only or read-write access, exact authorized folders, and individual tools." },
+              { "@type": "HowToStep", "position": 4, "name": "Install client configuration", "text": "Use the reversible setup action for Codex, ChatGPT, Claude Desktop, VS Code, or a generic stdio client." }
+            ]
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body class="mcp-page">
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header" data-header>
+      <a class="brand" href="../" aria-label="Explore Better home">
+        <img src="../assets/app-icon.png" alt="" width="34" height="34" />
+        <span>Explore Better</span>
+      </a>
+
+      <button class="icon-button nav-toggle" type="button" data-nav-toggle aria-expanded="false" aria-controls="site-nav">
+        <img src="../assets/icons/menu.svg" alt="" width="20" height="20" />
+        <span class="sr-only">Open navigation</span>
+      </button>
+
+      <nav class="site-nav" id="site-nav" data-nav aria-label="Primary navigation">
+        <a href="#evidence">Evidence</a>
+        <a href="#tools">Tools</a>
+        <a href="#security">Security</a>
+        <a href="#setup">Setup</a>
+        <a href="../llms.txt">LLM index</a>
+      </nav>
+
+      <a class="header-download" href="../#download">
+        <img src="../assets/icons/download.svg" alt="" width="18" height="18" />
+        <span>Download</span>
+      </a>
+    </header>
+
+    <main id="main">
+      <section class="mcp-masthead" aria-labelledby="mcp-title">
+        <div class="page-shell mcp-masthead__inner">
+          <p class="eyebrow light">Local stdio / Windows x64 / MCP 2025-11-25</p>
+          <h1 id="mcp-title">Explore Better<br />MCP Server</h1>
+          <p class="mcp-masthead__lede">Give AI clients the file manager's context and safety model, not unrestricted command execution.</p>
+          <p class="mcp-masthead__copy">
+            The AI Bridge exposes live panes, indexed discovery, duplicates, disk analysis, comparisons, and recoverable operations as typed tools for Codex, ChatGPT, Claude, VS Code, and other local MCP clients.
+          </p>
+          <div class="hero__actions">
+            <a class="button button--primary" href="#evidence">See the proof</a>
+            <a class="button button--ghost" href="https://github.com/terrorproforma/explore-better/blob/master/mcp/contracts-v1.json">Inspect the contract</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="mcp-stat-band" aria-label="MCP benchmark summary">
+        <div class="page-shell mcp-stat-grid">
+          <div><strong>3 / 3</strong><span>shared tasks correct</span></div>
+          <div><strong>6 / 6</strong><span>MCP controls proven</span></div>
+          <div><strong>17</strong><span>read-only profile tools</span></div>
+          <div><strong>28</strong><span>complete contract tools</span></div>
+        </div>
+      </section>
+
+      <section class="section mcp-answer-section" aria-labelledby="answer-title">
+        <div class="page-shell mcp-answer-layout">
+          <div class="section-heading reveal">
+            <p class="eyebrow">The direct answer</p>
+            <h2 id="answer-title">Yes, this is valuable as MCP.</h2>
+          </div>
+          <div class="mcp-answer-copy reveal">
+            <p>
+              A terminal can already list, hash, search, and modify files. MCP earns its place by adding application context and constrained authority: the model discovers only permitted tools, sees only authorized folders, receives bounded JSON instead of screen text, and can use Explore Better's Analyzer, indexes, transaction planner, journal, recovery, and undo.
+            </p>
+            <p>
+              The terminal still wins for arbitrary commands and system administration. Explore Better deliberately does not expose shell execution through MCP. The two interfaces solve different parts of the problem and work best together.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="mcp-evidence-section" id="evidence" aria-labelledby="evidence-title">
+        <div class="page-shell">
+          <div class="section-heading section-heading--dark reveal">
+            <p class="eyebrow light">Real sidecar / same fixture / known answers</p>
+            <h2 id="evidence-title">Proved against PowerShell.</h2>
+            <p>The benchmark starts the actual Electron host and bundled Go stdio sidecar. Equivalent PowerShell scripts run against the same 379-file fixture. Both must match ground truth.</p>
+          </div>
+
+          <div class="mcp-benchmark-table-wrap reveal">
+            <table class="mcp-benchmark-table">
+              <thead>
+                <tr><th scope="col">Workflow</th><th scope="col">MCP</th><th scope="col">PowerShell</th><th scope="col">MCP median</th><th scope="col">PowerShell median</th></tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">Find matching reports</th><td><span class="proof-pass">Correct</span></td><td><span class="proof-pass">Correct</span></td><td data-benchmark="filename-search:mcp">9.8 ms</td><td data-benchmark="filename-search:powershell">536.1 ms</td></tr>
+                <tr><th scope="row">Find content duplicates</th><td><span class="proof-pass">Correct</span></td><td><span class="proof-pass">Correct</span></td><td data-benchmark="duplicate-space:mcp">130.4 ms</td><td data-benchmark="duplicate-space:powershell">580.5 ms</td></tr>
+                <tr><th scope="row">Measure disk usage</th><td><span class="proof-pass">Correct</span></td><td><span class="proof-pass">Correct</span></td><td data-benchmark="disk-usage:mcp">72.3 ms</td><td data-benchmark="disk-usage:powershell">445.4 ms</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p class="mcp-method-note reveal">
+            Timings are three-run medians. MCP timings include tool calls and job polling. PowerShell timings include fresh process startup and command execution, so these numbers are not a universal speed ranking; a persistent warm shell may start faster.
+          </p>
+
+          <div class="mcp-proof-list reveal" aria-label="MCP-specific proof results">
+            <article><span>01</span><div><strong>Typed discovery</strong><p>17 permitted tools exposed with JSON schemas; destructive tools were absent from the read-only profile.</p></div><b>PASS</b></article>
+            <article><span>02</span><div><strong>Bounded pagination</strong><p>A 360-entry folder returned exactly 25 items and an opaque continuation cursor.</p></div><b>PASS</b></article>
+            <article><span>03</span><div><strong>Live pane context</strong><p>The AI read the open tabs, opened a new left-pane tab, and observed the revised context.</p></div><b>PASS</b></article>
+            <article><span>04</span><div><strong>Authorized roots</strong><p>An attempted read outside the profile folder was rejected with OUTSIDE_ROOTS.</p></div><b>PASS</b></article>
+            <article><span>05</span><div><strong>Capability reduction</strong><p>Delete, transfer, text-write, and apply tools were hidden from read-only discovery.</p></div><b>PASS</b></article>
+            <article><span>06</span><div><strong>Allocation semantics</strong><p>The Analyzer returned explicitly labeled exact allocated bytes; the generic shell baseline did not.</p></div><b>PASS</b></article>
+          </div>
+
+          <div class="mcp-evidence-links reveal">
+            <a class="button button--primary" href="../benchmarks/mcp-value.json">Open raw JSON</a>
+            <a class="button button--ghost" href="../benchmarks/mcp-value.md">Read methodology</a>
+            <code>npm run verify:mcp-value</code>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="tools" aria-labelledby="tools-title">
+        <div class="page-shell">
+          <div class="section-heading section-heading--row reveal">
+            <div><p class="eyebrow">Versioned contract</p><h2 id="tools-title">Tools with a reason to exist.</h2></div>
+            <p>Every tool is bounded, schema-validated, profile-filtered, and implemented by the same services used by the desktop application.</p>
+          </div>
+
+          <div class="mcp-tool-groups reveal">
+            <article><span>Context</span><h3>Work with what is open</h3><p><code>get_context</code>, <code>list_locations</code>, and <code>show_in_explore_better</code> connect the model to panes, tabs, selection, and navigation.</p></article>
+            <article><span>Discovery</span><h3>Find without flooding context</h3><p><code>list_directory</code>, <code>search_files</code>, <code>inspect_paths</code>, <code>read_text</code>, checksums, and index status return bounded typed results.</p></article>
+            <article><span>Analysis</span><h3>Use the file manager's engines</h3><p>Disk analysis, duplicate discovery, folder comparison, durable jobs, pagination, and cancellation reuse Explore Better's native provider and caches.</p></article>
+            <article><span>Operations</span><h3>Preview before any write</h3><p>Transfer, rename, delete, archive, create, and text-write planners issue short-lived one-use tokens for journalled apply, recovery, and undo.</p></article>
+          </div>
+
+          <a class="text-link" href="https://github.com/terrorproforma/explore-better/blob/master/mcp/contracts-v1.json">Read all 28 tool schemas <img src="../assets/icons/arrow-right.svg" alt="" width="17" height="17" /></a>
+        </div>
+      </section>
+
+      <section class="section mcp-security-section" id="security" aria-labelledby="security-title">
+        <div class="page-shell mcp-security-layout">
+          <div class="section-heading section-heading--dark reveal">
+            <p class="eyebrow light">Least authority by default</p>
+            <h2 id="security-title">Local does not mean unrestricted.</h2>
+            <p>The bridge is off until configured. Each client receives a separately revocable profile with exact folders, access mode, and individual tool permissions.</p>
+          </div>
+          <ol class="mcp-security-steps reveal">
+            <li><span>1</span><div><strong>Constrain</strong><p>Intersect profile roots, client roots, and Windows permissions after canonicalizing paths and resolving reparse points.</p></div></li>
+            <li><span>2</span><div><strong>Preview</strong><p>Bind one-use write tokens to the client, operation, paths, policy, plan digest, and filesystem signatures.</p></div></li>
+            <li><span>3</span><div><strong>Journal</strong><p>Apply through staging, backup, durable phases, cancellation, recovery, and recorded undo.</p></div></li>
+            <li><span>4</span><div><strong>Audit</strong><p>Record tool, paths, policy decision, duration, and job or operation IDs without logging file contents or secrets.</p></div></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section mcp-setup-section" id="setup" aria-labelledby="setup-title">
+        <div class="page-shell">
+          <div class="section-heading reveal">
+            <p class="eyebrow">Three-minute local setup</p>
+            <h2 id="setup-title">Connect the client you already use.</h2>
+            <p>The installed app creates and removes the stdio configuration without changing unrelated MCP servers.</p>
+          </div>
+          <ol class="mcp-setup-line reveal">
+            <li><span>01</span><strong>Install</strong><p>Install Explore Better and open Preferences.</p></li>
+            <li><span>02</span><strong>Enable</strong><p>Turn on AI Bridge and create a client profile.</p></li>
+            <li><span>03</span><strong>Scope</strong><p>Choose folders, read/write mode, and individual tools.</p></li>
+            <li><span>04</span><strong>Connect</strong><p>Install the Codex, ChatGPT, Claude, VS Code, or generic stdio entry.</p></li>
+          </ol>
+          <div class="mcp-setup-actions reveal">
+            <a class="button button--dark" href="../#download">Download Explore Better</a>
+            <a class="text-link" href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md#ai-bridge-and-mcp">Open the setup manual <img src="../assets/icons/arrow-right.svg" alt="" width="17" height="17" /></a>
+          </div>
+        </div>
+      </section>
+
+      <section class="mcp-machine-section" aria-labelledby="machine-title">
+        <div class="page-shell mcp-machine-layout">
+          <div><p class="eyebrow light">For crawlers and agents</p><h2 id="machine-title">Machine-readable on purpose.</h2></div>
+          <div class="mcp-machine-links">
+            <a href="../llms.txt"><strong>llms.txt</strong><span>Curated discovery index</span></a>
+            <a href="../llms-full.txt"><strong>llms-full.txt</strong><span>Complete AI reference</span></a>
+            <a href="../benchmarks/mcp-value.json"><strong>mcp-value.json</strong><span>Raw reproducible evidence</span></a>
+            <a href="https://github.com/terrorproforma/explore-better/blob/master/mcp/contracts-v1.json"><strong>contracts-v1.json</strong><span>Canonical tool schemas</span></a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="page-shell footer-layout">
+        <a class="brand brand--footer" href="../"><img src="../assets/app-icon.png" alt="" width="32" height="32" /><span>Explore Better</span></a>
+        <p>Structured file context when a terminal is too broad.</p>
+        <div class="footer-links">
+          <a href="https://github.com/terrorproforma/explore-better">Source</a>
+          <a href="https://github.com/terrorproforma/explore-better/releases">Releases</a>
+          <a href="../llms.txt">LLM index</a>
+          <a href="../">Product</a>
+        </div>
+        <small>&copy; <span data-year></span> Explore Better</small>
+      </div>
+    </footer>
+  </body>
+</html>

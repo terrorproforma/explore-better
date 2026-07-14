@@ -254,6 +254,8 @@ Closing an idle terminal ends it immediately. Closing a terminal with a running 
 
 The installed desktop app includes `ExploreBetterMcp.exe`, a local MCP server that lets compatible AI clients use Explore Better's structured file context and safety systems. It complements the integrated terminal: use the terminal for arbitrary commands and MCP for reliable panes, selections, indexed discovery, disk analysis, recoverable operations, and audit records.
 
+The public [MCP evidence page](https://terrorproforma.github.io/explore-better/mcp/) explains this boundary, lists the complete tool model, and publishes a reproducible comparison with equivalent PowerShell workflows. The machine-readable result is available at [mcp-value.json](https://terrorproforma.github.io/explore-better/benchmarks/mcp-value.json). The benchmark requires both interfaces to match known fixture answers, then separately proves typed discovery, opaque pagination, live pane context, root isolation, read-only capability reduction, and labeled allocated-size semantics. It does not treat MCP as a replacement for a warm interactive shell.
+
 The AI Bridge is disabled until you configure it. It uses local stdio between the AI client and the sidecar, then a random same-user named pipe between the sidecar and Explore Better. It does not open a network port, run arbitrary commands, control terminals, edit the registry, or elevate the app.
 
 ### Enable A Client
@@ -267,7 +269,7 @@ The AI Bridge is disabled until you configure it. It uses local stdio between th
 7. Choose **Set up Codex**, **Set up Claude**, or **Set up VS Code**. For another client, use **Copy generic config**.
 8. Restart or reload the AI client so it discovers the new stdio server.
 
-Client setup deploys the signed sidecar to `%LOCALAPPDATA%\ExploreBetter\MCP\bin\ExploreBetterMcp.exe`. Before changing a client configuration, Explore Better saves its exact original bytes under `%LOCALAPPDATA%\ExploreBetter\MCP\backups`. The installer modifies only the `explore-better` MCP entry and preserves unrelated servers.
+Client setup deploys the bundled sidecar to `%LOCALAPPDATA%\ExploreBetter\MCP\bin\ExploreBetterMcp.exe`. Before changing a client configuration, Explore Better saves its exact original bytes under `%LOCALAPPDATA%\ExploreBetter\MCP\backups`. The setup action modifies only the `explore-better` MCP entry and preserves unrelated servers. The current public preview executables are not yet Authenticode-signed with a publicly trusted certificate.
 
 Codex, the ChatGPT desktop app, and the Codex IDE extension share `~/.codex/config.toml`. Claude Desktop uses `%APPDATA%\Claude\claude_desktop_config.json`. VS Code uses the current profile's user `mcp.json`. The deployment status in Preferences shows the sidecar path, SHA-256 value, and whether each client entry is installed.
 
@@ -512,6 +514,8 @@ Explore Better prioritizes fast browsing:
 - `npm run verify:accessibility` checks useful accessible names, keyboard file-list navigation, command-palette focus, and high-contrast focus styling.
 - `npm run verify:terminal` builds the lazy xterm renderer, exercises real ConPTY input/output and simultaneous pane sessions, runs hostile terminal IPC probes, verifies per-tab UI behavior and resizing, and confirms all test-owned shells are cleaned up.
 - `npm run verify:packaged-terminal` launches the unpacked release executable, requires the x64 node-pty prebuild to be outside the app archive, exercises terminal input/output and both panes, records first-prompt timing, and proves the packaged process exits cleanly.
+- `npm run verify:mcp-value` starts the real Electron host and Go stdio sidecar, compares three file workflows with equivalent PowerShell scripts on a deterministic fixture, and proves six MCP-specific context, schema, pagination, authorization, capability, and allocation controls.
+- `npm run verify:seo-discovery` validates canonical URLs, structured data, crawler access, sitemap and LLM manifests, public benchmark synchronization, responsive MCP-page layout, and anonymous OAI-SearchBot access to every machine-readable endpoint.
 
 If a folder looks stale, press `R` or click Refresh.
 

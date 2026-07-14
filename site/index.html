@@ -7,6 +7,9 @@
       name="description"
       content="Explore Better is a fast dual-pane Windows file manager with per-tab terminals, a local MCP AI bridge, transactional operations, a nested disk map, and reversible Explorer integration."
     />
+    <meta name="application-name" content="Explore Better" />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="googlebot" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
     <meta name="theme-color" content="#111715" />
     <meta property="og:title" content="Explore Better - A serious Windows file manager" />
     <meta
@@ -14,11 +17,89 @@
       content="Dual panes, real per-tab terminals, a secure local MCP AI bridge, nested disk maps, transactional file operations, and reversible Explorer integration."
     />
     <meta property="og:type" content="website" />
-    <meta property="og:image" content="assets/workspace.png" />
+    <meta property="og:site_name" content="Explore Better" />
+    <meta property="og:url" content="https://terrorproforma.github.io/explore-better/" />
+    <meta property="og:image" content="https://terrorproforma.github.io/explore-better/assets/workspace.png" />
+    <meta property="og:image:width" content="1440" />
+    <meta property="og:image:height" content="920" />
+    <meta property="og:image:alt" content="Explore Better dual-pane Windows file manager" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Explore Better - Windows file manager with a local MCP server" />
+    <meta name="twitter:description" content="Dual panes, per-tab terminals, typed local AI tools, disk analysis, and recoverable file operations." />
+    <meta name="twitter:image" content="https://terrorproforma.github.io/explore-better/assets/workspace.png" />
     <title>Explore Better - A serious Windows file manager</title>
+    <link rel="canonical" href="https://terrorproforma.github.io/explore-better/" />
+    <link rel="alternate" type="text/plain" href="https://terrorproforma.github.io/explore-better/llms.txt" title="Explore Better LLM index" />
     <link rel="icon" type="image/png" href="assets/app-icon.png" />
     <link rel="stylesheet" href="styles.css" />
     <script src="script.js" defer></script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://terrorproforma.github.io/explore-better/#website",
+            "url": "https://terrorproforma.github.io/explore-better/",
+            "name": "Explore Better",
+            "description": "A fast dual-pane Windows file manager with per-tab terminals and a folder-scoped local MCP AI bridge.",
+            "inLanguage": "en"
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://terrorproforma.github.io/explore-better/#software",
+            "name": "Explore Better",
+            "alternateName": "Explore Better Windows File Manager",
+            "url": "https://terrorproforma.github.io/explore-better/",
+            "downloadUrl": "https://github.com/terrorproforma/explore-better/releases/download/v0.2.0/ExploreBetter-0.2.0-x64-setup.exe",
+            "softwareVersion": "0.2.0",
+            "operatingSystem": "Windows 11 x64",
+            "applicationCategory": "UtilitiesApplication",
+            "applicationSubCategory": "File manager and local MCP server",
+            "isAccessibleForFree": true,
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            },
+            "description": "A dual-pane Windows file manager with real per-tab ConPTY terminals, a local stdio MCP server for AI clients, transactional file operations, a nested disk map, and reversible Explorer integration.",
+            "featureList": [
+              "Dual-pane tabbed file browsing",
+              "One live ConPTY terminal per file tab",
+              "Local folder-scoped MCP AI bridge",
+              "Indexed file search and duplicate discovery",
+              "Logical and allocated disk-size analysis",
+              "Transactional preview, apply, recovery, and undo",
+              "Reversible current-user Windows Explorer integration"
+            ],
+            "screenshot": [
+              "https://terrorproforma.github.io/explore-better/assets/workspace.png",
+              "https://terrorproforma.github.io/explore-better/assets/terminal.png",
+              "https://terrorproforma.github.io/explore-better/assets/ai-bridge.png",
+              "https://terrorproforma.github.io/explore-better/assets/disk-map.png"
+            ],
+            "releaseNotes": "https://github.com/terrorproforma/explore-better/releases/tag/v0.2.0",
+            "sameAs": [
+              "https://github.com/terrorproforma/explore-better"
+            ]
+          },
+          {
+            "@type": "WebPage",
+            "@id": "https://terrorproforma.github.io/explore-better/#webpage",
+            "url": "https://terrorproforma.github.io/explore-better/",
+            "name": "Explore Better - A serious Windows file manager",
+            "isPartOf": { "@id": "https://terrorproforma.github.io/explore-better/#website" },
+            "about": { "@id": "https://terrorproforma.github.io/explore-better/#software" },
+            "primaryImageOfPage": {
+              "@type": "ImageObject",
+              "url": "https://terrorproforma.github.io/explore-better/assets/workspace.png",
+              "width": 1440,
+              "height": 920
+            }
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
@@ -36,7 +117,7 @@
 
       <nav class="site-nav" id="site-nav" data-nav aria-label="Primary navigation">
         <a href="#terminal">Terminal</a>
-        <a href="#ai-bridge">AI Bridge</a>
+        <a href="mcp/">MCP Proof</a>
         <a href="#analyzer">Disk Map</a>
         <a href="#integration">Explorer Integration</a>
         <a href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md">Manual</a>
@@ -131,6 +212,9 @@
               <div><strong>5.3 ms</strong><span>measured bridge p95</span></div>
               <div><strong>14.1 MB</strong><span>measured sidecar RSS</span></div>
             </div>
+            <a class="text-link text-link--dark" href="mcp/">
+              See the MCP benchmark and complete tool model <img src="assets/icons/arrow-right.svg" alt="" width="17" height="17" />
+            </a>
           </div>
         </div>
       </section>
@@ -421,6 +505,7 @@
           <a href="https://github.com/terrorproforma/explore-better/releases">Releases</a>
           <a href="https://github.com/terrorproforma/explore-better/issues">Issues</a>
           <a href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md">Manual</a>
+          <a href="mcp/">MCP evidence</a>
         </div>
         <small>&copy; <span data-year></span> Explore Better</small>
       </div>
