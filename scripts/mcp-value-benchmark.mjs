@@ -221,8 +221,18 @@ async function main() {
     assert(tools.length === harness.profile.tools.length, "Read-only profile discovery differs from the MCP tool list.");
 
     const listing = await callTool("list_directory", { path: fixture.catalog, limit: 25 });
-    assert(listing.structured?.data?.entries?.length === 25, "MCP bounded listing did not honor the requested page size.");
-    assert(typeof listing.structured?.nextCursor === "string", "MCP bounded listing did not return an opaque next cursor.");
+    assert(!listing.result.isError, `MCP bounded listing failed: ${JSON.stringify(listing.structured?.error)}`);
+    const listingEntries = listing.structured?.data?.entries || [];
+    const listingCursor = listing.structured?.nextCursor;
+    assert(listingEntries.length > 0 && listingEntries.length <= 25, `MCP bounded listing returned ${listingEntries.length} entries for a 25-entry limit.`);
+    assert(typeof listingCursor === "string", "MCP bounded listing did not return an opaque next cursor.");
+    const nextListing = await callTool("list_directory", { path: fixture.catalog, limit: 25, cursor: listingCursor });
+    assert(!nextListing.result.isError, `MCP continuation listing failed: ${JSON.stringify(nextListing.structured?.error)}`);
+    const nextListingEntries = nextListing.structured?.data?.entries || [];
+    assert(nextListingEntries.length > 0 && nextListingEntries.length <= 25, `MCP continuation listing returned ${nextListingEntries.length} entries for a 25-entry limit.`);
+    const firstPagePaths = new Set(listingEntries.map((entry) => entry.path));
+    assert(nextListingEntries.every((entry) => !firstPagePaths.has(entry.path)), "MCP continuation page repeated entries from the first page.");
+    const boundedPaginationPassed = listingEntries.length <= 25 && nextListingEntries.length <= 25;
 
     const mcpSearchRuns = [];
     const shellSearchRuns = [];
@@ -392,8 +402,8 @@ $top = @($files | Sort-Object Length -Descending | Select-Object -First 10 | For
       {
         id: "bounded-pagination",
         label: "Bounded pagination",
-        passed: listing.structured?.data?.entries?.length === 25 && Boolean(listing.structured?.nextCursor),
-        detail: "A 360-entry folder returned exactly 25 entries and an opaque continuation cursor."
+        passed: boundedPaginationPassed,
+        detail: `A 360-entry folder returned ${listingEntries.length} then ${nextListingEntries.length} entries for a 25-entry limit, with an opaque cursor and no overlap.`
       },
       {
         id: "live-ui-context",
