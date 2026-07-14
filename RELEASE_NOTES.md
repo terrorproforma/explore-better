@@ -1,6 +1,8 @@
 # Explore Better Release Notes
 
-## v0.1.3 - 2026-07-13
+## v0.2.0 - 2026-07-14
+
+Explore Better now connects serious file work to both a real shell and structured AI tools. This release adds the local MCP AI Bridge and ships it alongside the per-tab ConPTY terminals introduced in v0.1.3.
 
 ### AI Bridge And MCP
 
@@ -11,6 +13,22 @@
 - Added authenticated same-user named-pipe transport, headless AI-host lifecycle, tray status, heartbeat, reconnect, cancellation, and stable renderer actions.
 - Added reversible setup adapters for Codex/ChatGPT desktop, Claude Desktop, and VS Code plus a generic stdio configuration.
 - Added contract, security, context, analysis, operation, client, performance, and packaged-sidecar verification suites.
+
+### Terminal And AI Workspace
+
+- Made the per-tab terminal and AI Bridge first-class product modules with real desktop release captures and dedicated landing-page sections.
+- Kept arbitrary commands in the terminal while exposing bounded, typed file context, discovery, analysis, and recoverable operations through MCP.
+- Scoped MCP discovery to each client's permitted tools so read-only profiles cannot discover or invoke write planners or apply controls.
+- Added a repeatable packaged-app capture check that proves the terminal is interactive and the AI Bridge profile contract is loaded before release imagery is produced.
+
+### Verification
+
+- Passed the complete 42-check release orchestrator with no failures.
+- Verified the MCP server through the official MCP Inspector with exactly 17 tools exposed to the release read-only profile.
+- Measured 5.3 ms MCP bridge p95, 14.1 MB sidecar RSS, 403.3 ms first visible window, 1.22 s full hydration, and 45 rendered rows in the 100,000-entry fixture.
+- Verified zero production or development audit vulnerabilities.
+
+## v0.1.3 - 2026-07-13
 
 ### Per-Tab Integrated Terminals
 

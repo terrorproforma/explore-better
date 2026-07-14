@@ -1,12 +1,12 @@
 {
   "name": "explore-better",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",
   "main": "electron-main.mjs",
   "author": "Explore Better",
-  "description": "A fast dual-pane Windows file manager with tabs, per-tab terminals, transactional operations, Explorer integration, and a visual disk analyzer.",
+  "description": "A fast dual-pane Windows file manager with per-tab terminals, a local MCP AI bridge, transactional operations, Explorer integration, and a visual disk analyzer.",
   "homepage": "https://terrorproforma.github.io/explore-better/",
   "repository": {
     "type": "git",
@@ -33,6 +33,7 @@
     "build:app": "node scripts/build-app.mjs",
     "build:terminal": "node scripts/build-terminal.mjs",
     "build:renderer": "npm run build:app && npm run build:terminal",
+    "capture:site-assets": "node scripts/capture-release-site-assets.mjs",
     "perf:bench": "node scripts/perf-benchmark.mjs",
     "perf:bench:100k": "node scripts/perf-benchmark.mjs --counts 1000,10000,100000",
     "perf:guard": "node scripts/perf-guard.mjs",

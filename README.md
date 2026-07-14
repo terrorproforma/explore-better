@@ -4,7 +4,7 @@
 [![Windows CI](https://github.com/terrorproforma/explore-better/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/terrorproforma/explore-better/actions/workflows/windows-ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)
 
-**A fast, dual-pane Windows file manager with tabs, per-tab terminals, scripting, transactional file operations, reversible Explorer integration, and a visual disk-space analyzer.**
+**A fast, dual-pane Windows file manager with per-tab terminals, a local MCP AI bridge, transactional file operations, reversible Explorer integration, and a visual disk-space analyzer.**
 
 [Visit the Explore Better website](https://terrorproforma.github.io/explore-better/) | [Download the latest Windows release](https://github.com/terrorproforma/explore-better/releases/latest) | [Read the user manual](USER_MANUAL.md) | [Report an issue](https://github.com/terrorproforma/explore-better/issues)
 
@@ -86,7 +86,7 @@ You can make the same change later from **Integrate** > **Make Default**, add th
 - Native Win32 enumeration for local folders with a Node fallback for unsupported paths and platforms.
 - Persistent Speed Index and Background Index options for repeated searches.
 
-The current 100,000-entry acceptance fixture records a 403.3 ms median first visible window, 1,097.9 ms median full hydration, and 45 rendered rows.
+The current 100,000-entry acceptance fixture records a 403.3 ms median first visible window, 1,216.3 ms median full hydration, and 45 rendered rows.
 
 ### Transactional File Operations
 
