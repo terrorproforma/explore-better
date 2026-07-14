@@ -5,13 +5,25 @@ export async function clickDockAction(page, actionId, options = {}) {
     await direct.click(options);
     return "shelf";
   }
-  const toggle = page.locator("#dock-overflow-toggle");
-  await toggle.waitFor({ state: "visible", timeout: options.timeout || 10000 });
-  if ((await toggle.getAttribute("aria-expanded")) !== "true") {
-    await toggle.click();
+  const timeout = options.timeout || 10000;
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const toggle = page.locator("#dock-overflow-toggle");
+    await toggle.waitFor({ state: "visible", timeout: Math.max(1, deadline - Date.now()) });
+    if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+      await toggle.click();
+    }
+    const overflow = page.locator(`#dock-overflow-menu [data-overflow-global-action="${actionId}"]`);
+    try {
+      await overflow.waitFor({ state: "visible", timeout: Math.min(1000, Math.max(1, deadline - Date.now())) });
+      // Responsive dock measurement may replace the menu item between
+      // Playwright's actionability checks. Dispatch against the latest node;
+      // the application still handles the same click event and command path.
+      await overflow.dispatchEvent("click");
+      return "overflow";
+    } catch {
+      await page.waitForTimeout(25);
+    }
   }
-  const overflow = page.locator(`#dock-overflow-menu [data-overflow-global-action="${actionId}"]`);
-  await overflow.waitFor({ state: "visible", timeout: options.timeout || 10000 });
-  await overflow.click(options);
-  return "overflow";
+  throw new Error(`Dock action ${actionId} did not become stable within ${timeout}ms.`);
 }

@@ -136,6 +136,25 @@ async function inspectorGeometry(page) {
   });
 }
 
+async function waitForStableInspectorPreview(page, marker, timeoutMs = 10000, stableMs = 300) {
+  const deadline = Date.now() + timeoutMs;
+  let stableSince = 0;
+  while (Date.now() < deadline) {
+    const ready = await page.evaluate((expected) => {
+      const body = document.querySelector("#inspector .inspector-body");
+      return Boolean(body && !body.querySelector(".preview-loading") && body.textContent?.includes(expected));
+    }, marker);
+    if (ready) {
+      stableSince ||= Date.now();
+      if (Date.now() - stableSince >= stableMs) return;
+    } else {
+      stableSince = 0;
+    }
+    await page.waitForTimeout(50);
+  }
+  throw new Error(`Inspector preview did not remain ready for ${stableMs} ms.`);
+}
+
 async function main() {
   await fs.mkdir(fixture, { recursive: true });
   await fs.mkdir(appData, { recursive: true });
@@ -176,7 +195,7 @@ async function main() {
     const firstLeftRow = page.locator('.pane[data-pane="left"] [data-entry-path]').first();
     await firstLeftRow.click();
     await page.waitForFunction(() => !document.querySelector(".app-shell")?.classList.contains("inspector-auto-collapsed"));
-    await page.waitForFunction(() => !document.querySelector("#inspector .preview-loading"));
+    await waitForStableInspectorPreview(page, "sample-");
     evidence.inspectorSelected = await inspectorGeometry(page);
     check(
       checks,
@@ -293,7 +312,23 @@ async function main() {
     await page.setViewportSize({ width: 1066, height: 860 });
     await page.waitForFunction(() => {
       const toggle = document.getElementById("dock-overflow-toggle");
-      return toggle && !toggle.hidden && Number(document.getElementById("dock-overflow-count")?.textContent || 0) > 0;
+      const strip = document.querySelector(".dock-action-strip");
+      const visibleButtons = [...(strip?.querySelectorAll("button") || [])].filter((button) => {
+        const style = getComputedStyle(button);
+        return !button.hidden && style.display !== "none" && button.getBoundingClientRect().width > 0;
+      });
+      const bounds = strip?.getBoundingClientRect();
+      return (
+        toggle &&
+        !toggle.hidden &&
+        Number(document.getElementById("dock-overflow-count")?.textContent || 0) > 0 &&
+        strip.scrollWidth <= strip.clientWidth + 1 &&
+        strip.scrollHeight <= strip.clientHeight + 1 &&
+        visibleButtons.every((button) => {
+          const rect = button.getBoundingClientRect();
+          return rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1;
+        })
+      );
     });
     evidence.dockClosed = await dockGeometry(page);
     check(

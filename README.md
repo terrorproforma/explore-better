@@ -163,6 +163,17 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 - Dark, Light, and High Contrast themes plus configurable font size, cursor, and scrollback.
 - Optional administrator terminals through a narrow one-session UAC broker; the main app and local backend remain non-elevated.
 
+### AI Bridge And MCP Automation
+
+- A bundled `ExploreBetterMcp.exe` stdio server for Codex/ChatGPT desktop, Claude Desktop, VS Code, and generic MCP clients.
+- Live structured context for active panes, stable tab IDs, visible selection, focused item, layout, and a monotonic context revision.
+- Typed tools for bounded listing, indexed search, path inspection, text reading, checksums, disk analysis, duplicates, folder comparison, collections, labels, and operation recovery.
+- Durable background jobs with progress, cancellation, paginated results, and bounded output for very large folders.
+- Read-only profiles by default, separately revocable per client, with explicit authorized folders and individual tool permissions.
+- Every write uses a planner and a one-use 120-second apply token bound to the client session, paths, plan digest, conflict policy, and filesystem signatures.
+- Local stdio and a same-user random named pipe only: no remote listener, arbitrary shell execution, terminal control, registry changes, or AI-driven elevation.
+- One-click reversible setup for Codex, Claude Desktop, and VS Code with byte-for-byte configuration backups and preservation of unrelated MCP servers.
+
 ### Windows Shell And Explorer Replacement
 
 - Navigator access to This PC, drives, libraries, Network, Recycle Bin, and discovered shell locations.
@@ -211,6 +222,9 @@ The [user manual](USER_MANUAL.md) covers all primary controls, keyboard workflow
 | Electron desktop shell | `electron-main.mjs` | Native window, backend supervision, single-instance routing, updater bridge, and external URL policy |
 | Renderer bridge | `electron-preload.cjs` | Narrow desktop capabilities exposed to the local UI |
 | Terminal service | `terminal-service.mjs` | Per-tab ConPTY ownership, shell discovery, folder synchronization, IPC isolation, and elevated-session brokering |
+| MCP automation facade | `mcp/automation-service.mjs` | Profiles, root authorization, bounded tools, jobs, planners, audit records, and shared filesystem policy |
+| AI Bridge pipe host | `mcp-bridge-service.mjs` | Same-user authenticated named-pipe transport, lifecycle, cancellation, and renderer context forwarding |
+| MCP stdio sidecar | `native/mcpserver/` | Official Go MCP SDK adapter that keeps protocol traffic on stdout and forwards typed calls to Explore Better |
 | Local backend | `server.mjs` | Filesystem providers, operations, recovery, indexing, search, Analyzer, shell integration, and API security |
 | User interface | `public/` | Dual-pane workspace, dialogs, Disk Map, command system, and virtualized lists |
 | Public landing page | [`site/`](site/) | Static product website deployed through GitHub Pages |
@@ -226,7 +240,7 @@ The desktop app starts the backend on a private random loopback port and verifie
 
 - Node.js 20 or newer
 - npm
-- Go 1.23 or newer for the native Windows helper
+- Go 1.25.12 for the MCP sidecar; Go 1.23 or newer for the native Windows helper
 - Windows 10 or Windows 11 for the desktop package and Win32 verification
 
 ### Clone And Run The Desktop App
@@ -236,6 +250,7 @@ git clone https://github.com/terrorproforma/explore-better.git
 cd explore-better
 npm ci
 npm run build:native-helper
+npm run build:mcp-server
 npm run desktop
 ```
 
@@ -278,6 +293,11 @@ Useful focused checks include:
 npm run verify:security-boundary
 npm run verify:transactional-operations
 npm run verify:native-helper
+npm run verify:mcp-contract
+npm run verify:mcp-security
+npm run verify:mcp-context
+npm run verify:mcp-operations
+npm run verify:packaged-mcp
 npm run verify:layout
 npm run verify:speed-health
 npm run verify:release-readiness

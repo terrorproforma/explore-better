@@ -1837,7 +1837,7 @@ body.resizing-layout.resizing-rows {
 }
 
 .file-head {
-  grid-template-columns: var(--file-columns, minmax(160px, 1fr) 94px 86px 132px);
+  grid-template-columns: var(--file-columns, minmax(84px, 1.35fr) minmax(56px, 0.55fr) minmax(54px, 0.48fr) minmax(74px, 0.82fr));
   gap: 0;
   overflow: hidden;
   padding: 0 8px;
@@ -2781,7 +2781,7 @@ textarea:focus {
 
 .file-row {
   display: grid;
-  grid-template-columns: var(--file-columns, minmax(160px, 1fr) 94px 86px 132px);
+  grid-template-columns: var(--file-columns, minmax(84px, 1.35fr) minmax(56px, 0.55fr) minmax(54px, 0.48fr) minmax(74px, 0.82fr));
   align-items: center;
   min-height: 34px;
   gap: 0;
@@ -7117,6 +7117,165 @@ textarea:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.ai-bridge-preferences {
+  grid-column: 1 / -1;
+}
+
+.ai-bridge-preferences.unavailable {
+  opacity: 0.72;
+}
+
+.ai-bridge-profile-row,
+.ai-bridge-fields,
+.ai-bridge-actions,
+.ai-bridge-client-status {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+
+.ai-bridge-profile-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.ai-bridge-profile-row > label,
+.ai-bridge-fields > label {
+  min-width: 0;
+}
+
+#preference-ai-roots {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.ai-bridge-permissions {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.ai-bridge-permissions legend {
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+#preference-ai-tools {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px 12px;
+}
+
+#preference-ai-tools .check-row {
+  min-width: 0;
+}
+
+#preference-ai-tools .check-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-bridge-client-status {
+  grid-template-columns: minmax(0, 1fr) repeat(3, auto);
+  align-items: center;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.ai-bridge-client-status > span {
+  overflow-wrap: anywhere;
+}
+
+.ai-bridge-client-status button.installed {
+  border-color: var(--teal);
+  color: var(--teal-deep);
+}
+
+.ai-bridge-snippet {
+  min-height: 88px;
+  margin: 0;
+  border: 1px solid #293330;
+  border-radius: 6px;
+  background: #111514;
+  color: #edf5f1;
+  padding: 10px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ai-bridge-audit summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+#preference-ai-audit {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.ai-audit-row {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) 60px 70px;
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  padding: 6px 0;
+  font-size: 12px;
+}
+
+.ai-audit-row .ok {
+  color: var(--teal-deep);
+}
+
+.ai-audit-row .error {
+  color: var(--ember);
+}
+
+.ai-bridge-muted {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .ai-bridge-fields,
+  .ai-bridge-actions,
+  #preference-ai-tools {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .ai-bridge-client-status {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .ai-audit-row {
+    grid-template-columns: minmax(0, 1fr) 60px 60px;
+  }
+
+  .ai-audit-row time {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 560px) {
+  .ai-bridge-fields,
+  .ai-bridge-actions,
+  #preference-ai-tools {
+    grid-template-columns: 1fr;
+  }
 }
 
 .toolbar-customizer {

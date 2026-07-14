@@ -93,7 +93,8 @@ async function main() {
       HOST: "127.0.0.1",
       PORT: String(port),
       LOCALAPPDATA: appData,
-      EXPLORE_BETTER_DISABLE_STATE_WATCH: "1"
+      EXPLORE_BETTER_DISABLE_STATE_WATCH: "1",
+      EXPLORE_BETTER_REQUIRE_API_CAPABILITY: "1"
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
@@ -125,6 +126,9 @@ async function main() {
       body: JSON.stringify({ path: target, name: "missing-capability.txt" })
     });
     check("Browser request without launch capability is rejected", missingCapability.status === 403, { status: missingCapability.status });
+
+    const directMissingCapability = await httpRequest({ baseUrl, requestPath: "/api/roots" });
+    check("Production direct-loopback request without launch capability is rejected", directMissingCapability.status === 403, { status: directMissingCapability.status });
 
     const authorizedName = "authorized.txt";
     const authorized = await httpRequest({ baseUrl, requestPath: "/api/file/create",

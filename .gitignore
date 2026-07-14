@@ -2,6 +2,7 @@
 node_modules/
 dist/
 public/generated/
+native/mcpserver/contracts-v1.json
 
 # Electron download/build caches
 .electron-cache/

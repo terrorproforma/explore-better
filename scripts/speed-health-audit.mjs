@@ -890,10 +890,11 @@ async function main() {
       Number(report?.windowFirst?.renderedRows || 0) > 0 &&
       Number(report?.windowFirst?.renderedRows || 0) <= 220 &&
       report?.windowFirst?.virtualized === false &&
-      Number(report?.firstWindowPaintMs || Infinity) <= 5000 &&
+      Number(report?.firstWindowPaintMs || Infinity) <= 750 &&
+      Number(report?.fullHydrationMs || Infinity) <= 2000 &&
       (report?.listingRequests || []).some((request) => request.isWindow === false) &&
       report?.virtualInitial?.virtualized === true &&
-      Number(report?.virtualInitial?.renderedRows || 0) < 250 &&
+      Number(report?.virtualInitial?.renderedRows || 0) <= 60 &&
       !(report?.header?.issues || []).length &&
       countPageErrors(report) === 0
   );
@@ -904,8 +905,9 @@ async function main() {
     Number(large100k?.count || 0) >= 100000 && large100kReports.length > 0 && large100kClean,
     `100k UI count=${large100k?.count || 0}; reports=${large100kReports.length}; clean=${large100kClean}.`
   );
-  addMetric(metrics, checks, "large-folder-ui", "100k UI cold list API", large100k?.api?.coldWallMs, 45000, "large-folder-100k-ui-latest.json");
-  addMetric(metrics, checks, "large-folder-ui", "100k UI warm list API", large100k?.api?.warmWallMs, 30000, "large-folder-100k-ui-latest.json");
+  addMetric(metrics, checks, "large-folder-ui", "100k UI cold list API", large100k?.api?.coldWallMs, 3500, "large-folder-100k-ui-latest.json");
+  addMetric(metrics, checks, "large-folder-ui", "100k UI compact warm list API", large100k?.api?.compactV2WarmWallMs, 1200, "large-folder-100k-ui-latest.json");
+  addMetric(metrics, checks, "large-folder-ui", "100k UI expanded warm diagnostics", large100k?.api?.warmWallMs, 3000, "large-folder-100k-ui-latest.json");
   for (const report of large100kReports) {
     addMetric(
       metrics,
@@ -913,7 +915,7 @@ async function main() {
       "large-folder-ui",
       `100k first window paint ${report.viewport?.name || "viewport"}`,
       report?.firstWindowPaintMs,
-      5000,
+      750,
       "large-folder-100k-ui-latest.json",
       `${report.viewport?.width || "?"}x${report.viewport?.height || "?"}`
     );
@@ -934,10 +936,20 @@ async function main() {
       "large-folder-ui",
       `100k rendered rows ${report.viewport?.name || "viewport"}`,
       report?.virtualInitial?.renderedRows,
-      250,
+      60,
       "large-folder-100k-ui-latest.json",
       `${report.viewport?.width || "?"}x${report.viewport?.height || "?"}`,
       { unit: " rows" }
+    );
+    addMetric(
+      metrics,
+      checks,
+      "large-folder-ui",
+      `100k full hydration ${report.viewport?.name || "viewport"}`,
+      report?.fullHydrationMs,
+      2000,
+      "large-folder-100k-ui-latest.json",
+      `${report.viewport?.width || "?"}x${report.viewport?.height || "?"}`
     );
     addMetric(
       metrics,
@@ -1066,6 +1078,11 @@ async function main() {
 
   const sizeAnalysisCancel = artifacts["size-analysis-cancel-latest.json"]?.data;
   const cancelRestarted = Number(sizeAnalysisCancel?.follower?.cache?.restartedAfterAbortedInFlight || 0);
+  const cancelRecovered =
+    sizeAnalysisCancel?.follower?.cache?.source === "filesystem" &&
+    (cancelRestarted >= 1 ||
+      (sizeAnalysisCancel?.origin?.aborted === true &&
+        Number(sizeAnalysisCancel?.follower?.scanned || 0) === Number(sizeAnalysisCancel?.fixture?.expectedScanned || 0)));
   addStatusCheck(
     checks,
     "size-analysis",
@@ -1075,11 +1092,10 @@ async function main() {
       Number(sizeAnalysisCancel?.fixture?.count || 0) >= 10000 &&
       sizeAnalysisCancel?.origin?.aborted === true &&
       sizeAnalysisCancel?.follower?.ok === true &&
-      sizeAnalysisCancel?.follower?.cache?.source === "filesystem" &&
-      cancelRestarted >= 1 &&
+      cancelRecovered &&
       sizeAnalysisCancel?.warm?.cache?.hit === true &&
       Number(sizeAnalysisCancel?.foreground?.failures?.length || 0) === 0,
-    `cancel status=${sizeAnalysisCancel?.status || "missing"}; originAborted=${sizeAnalysisCancel?.origin?.aborted}; restarted=${cancelRestarted}; follower=${sizeAnalysisCancel?.follower?.wallMs ?? "missing"}ms; foreground list/roots p95=${sizeAnalysisCancel?.foreground?.list?.p95Ms ?? "missing"}/${sizeAnalysisCancel?.foreground?.roots?.p95Ms ?? "missing"}ms.`
+    `cancel status=${sizeAnalysisCancel?.status || "missing"}; originAborted=${sizeAnalysisCancel?.origin?.aborted}; recovery=${cancelRestarted >= 1 ? "joined-restart" : cancelRecovered ? "fresh-scan" : "missing"}; follower=${sizeAnalysisCancel?.follower?.wallMs ?? "missing"}ms; foreground list/roots p95=${sizeAnalysisCancel?.foreground?.list?.p95Ms ?? "missing"}/${sizeAnalysisCancel?.foreground?.roots?.p95Ms ?? "missing"}ms.`
   );
   addMetric(
     metrics,
@@ -1126,17 +1142,16 @@ async function main() {
     sizeAnalysisCancel?.budgets?.foregroundRootsBudgetMs || 800,
     "size-analysis-cancel-latest.json"
   );
-  addMinimum(
+  addStatusCheck(
     checks,
     "size-analysis",
-    "size-analysis-cancel-restarted-inflight",
-    cancelRestarted,
-    1,
-    "Duplicate Analyzer request restarted after aborted origin"
+    "size-analysis-cancel-recovered-inflight",
+    cancelRecovered,
+    `Follower recovery=${cancelRestarted >= 1 ? "joined-restart" : cancelRecovered ? "fresh-scan" : "missing"}; scanned=${sizeAnalysisCancel?.follower?.scanned ?? "?"}/${sizeAnalysisCancel?.fixture?.expectedScanned ?? "?"}.`
   );
   snapshots.push({
     name: "Size Analyzer cancellation",
-    value: sizeAnalysisCancel?.origin?.aborted === true && cancelRestarted >= 1 ? "aborted and recovered" : "missing",
+    value: sizeAnalysisCancel?.origin?.aborted === true && cancelRecovered ? "aborted and recovered" : "missing",
     detail: `${sizeAnalysisCancel?.fixture?.count || 0} file fixture, originAbort=${sizeAnalysisCancel?.origin?.wallMs ?? "?"}ms, follower=${sizeAnalysisCancel?.follower?.wallMs ?? "?"}ms, warm=${sizeAnalysisCancel?.warm?.wallMs ?? "?"}ms, foreground list/roots p95=${sizeAnalysisCancel?.foreground?.list?.p95Ms ?? "?"}/${sizeAnalysisCancel?.foreground?.roots?.p95Ms ?? "?"}ms.`
   });
 

@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 const terminalPorts = new Map();
 const terminalListeners = new Set();
+const mcpActionListeners = new Set();
 
 ipcRenderer.on("explore-better:terminal-port", (event, payload) => {
   const sessionId = String(payload?.sessionId || "");
@@ -20,6 +21,23 @@ ipcRenderer.on("explore-better:terminal-port", (event, payload) => {
     }
   };
   port.start();
+});
+
+ipcRenderer.on("explore-better:mcp-ui-action", (_event, payload) => {
+  const listeners = [...mcpActionListeners];
+  Promise.resolve()
+    .then(async () => {
+      if (!listeners.length) throw Object.assign(new Error("No renderer AI action handler is registered."), { code: "UI_UNAVAILABLE" });
+      let result = null;
+      for (const listener of listeners) result = await listener(payload.action);
+      ipcRenderer.send("explore-better:mcp-ui-action-result", { requestId: payload.requestId, result });
+    })
+    .catch((error) => {
+      ipcRenderer.send("explore-better:mcp-ui-action-result", {
+        requestId: payload.requestId,
+        error: { code: error?.code || "UI_ACTION_FAILED", message: error?.message || String(error) }
+      });
+    });
 });
 
 contextBridge.exposeInMainWorld("exploreBetterDesktop", {
@@ -57,6 +75,38 @@ contextBridge.exposeInMainWorld("exploreBetterDesktop", {
   },
   restartBackend() {
     return ipcRenderer.invoke("explore-better:restart-backend");
+  },
+  aiBridge: {
+    status() {
+      return ipcRenderer.invoke("explore-better:mcp-status");
+    },
+    configure(patch) {
+      return ipcRenderer.invoke("explore-better:mcp-configure", patch);
+    },
+    upsertProfile(profile) {
+      return ipcRenderer.invoke("explore-better:mcp-profile-upsert", profile);
+    },
+    revokeProfile(profileId) {
+      return ipcRenderer.invoke("explore-better:mcp-profile-revoke", profileId);
+    },
+    audit(limit) {
+      return ipcRenderer.invoke("explore-better:mcp-audit", limit);
+    },
+    installClient(client, profileId) {
+      return ipcRenderer.invoke("explore-better:mcp-client-install", client, profileId);
+    },
+    removeClient(client) {
+      return ipcRenderer.invoke("explore-better:mcp-client-remove", client);
+    },
+    publishContext(context) {
+      ipcRenderer.send("explore-better:mcp-context", context);
+      return true;
+    },
+    onAction(listener) {
+      if (typeof listener !== "function") return () => {};
+      mcpActionListeners.add(listener);
+      return () => mcpActionListeners.delete(listener);
+    }
   },
   terminal: {
     capabilities() {

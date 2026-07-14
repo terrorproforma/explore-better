@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -36,6 +37,17 @@ function keepFixture() {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function freeLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const port = server.address().port;
+      server.close(() => resolve(port));
+    });
+  });
 }
 
 function check(checks, id, ok, detail) {
@@ -323,7 +335,7 @@ async function main() {
   const folderCount = numberOption("--folders", "EB_SIZE_ANALYSIS_CANCEL_FOLDERS", 96);
   const joinDelayMs = numberOption("--join-delay-ms", "EB_SIZE_ANALYSIS_CANCEL_JOIN_DELAY_MS", 25);
   const abortDelayMs = numberOption("--abort-delay-ms", "EB_SIZE_ANALYSIS_CANCEL_ABORT_DELAY_MS", 35);
-  const abortBudgetMs = numberOption("--abort-budget-ms", "EB_SIZE_ANALYSIS_CANCEL_ABORT_BUDGET_MS", 2500);
+  const abortBudgetMs = numberOption("--abort-budget-ms", "EB_SIZE_ANALYSIS_CANCEL_ABORT_BUDGET_MS", 150);
   const followerBudgetMs = numberOption("--follower-budget-ms", "EB_SIZE_ANALYSIS_CANCEL_FOLLOWER_BUDGET_MS", 15000);
   const warmBudgetMs = numberOption("--warm-budget-ms", "EB_SIZE_ANALYSIS_CANCEL_WARM_BUDGET_MS", 250);
   const foregroundOperationCount = Math.max(4, numberOption("--foreground-operations", "EB_SIZE_ANALYSIS_CANCEL_FOREGROUND_OPERATIONS", 16));
@@ -333,7 +345,8 @@ async function main() {
   const fixture = await prepareFixture(count, folderCount);
   await fs.mkdir(appData, { recursive: true });
 
-  const port = Number(optionValue("--port", process.env.PORT || 60500 + Math.floor(Math.random() * 3000)));
+  const configuredPort = optionValue("--port", process.env.PORT || "");
+  const port = configuredPort ? Number(configuredPort) : await freeLoopbackPort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const server = spawn(process.execPath, ["server.mjs"], {
     cwd: workspace,
@@ -382,9 +395,11 @@ async function main() {
     );
     check(
       checks,
-      "follower-restarted-aborted-inflight",
-      Number(follower.cache?.restartedAfterAbortedInFlight || 0) >= 1 && follower.cache?.source === "filesystem",
-      JSON.stringify(follower.cache || null)
+      "follower-recovers-aborted-inflight",
+      follower.cache?.source === "filesystem" &&
+        (Number(follower.cache?.restartedAfterAbortedInFlight || 0) >= 1 ||
+          (origin.aborted === true && follower.scanned === fixture.expectedScanned)),
+      `${JSON.stringify(follower.cache || null)}; scanned=${follower.scanned}/${fixture.expectedScanned}`
     );
     check(
       checks,

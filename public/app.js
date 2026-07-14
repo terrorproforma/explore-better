@@ -99,6 +99,7 @@ const app = {
     visible: { left: false, right: false },
     unsubscribe: null
   },
+  aiBridge: { status: null, selectedProfileId: null, audit: [], loading: false, draftNew: false },
   operationDetails: { id: null, selectedRemaining: new Set(), selectedBackups: new Set() },
   fileBasket: { selected: new Set() },
   trashBrowser: {
@@ -912,6 +913,69 @@ function runtimeTabId() {
   return globalThis.crypto?.randomUUID?.() || `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+let mcpContextRevision = 0;
+let mcpContextPublishFrame = 0;
+
+function desktopAiBridge() {
+  return window.exploreBetterDesktop?.aiBridge || null;
+}
+
+function mcpContextSnapshot() {
+  const paneSnapshots = {};
+  for (const paneName of ["left", "right"]) {
+    const pane = panes[paneName];
+    const activeTab = tabOf(paneName);
+    paneSnapshots[paneName] = {
+      activeTabId: activeTab?.id || "",
+      path: activeTab?.path || "",
+      tabs: pane.tabs.map((tab) => ({
+        id: tab.id || "",
+        path: tab.path || "",
+        title: tab.title || labelForPath(tab.path)
+      }))
+    };
+  }
+  const activeTab = tabOf(app.activePane);
+  return {
+    live: true,
+    activePane: app.activePane,
+    paneLayout: app.paneLayout,
+    panes: paneSnapshots,
+    selection: [...(activeTab?.selected || [])].slice(0, 100),
+    focusedPath: activeTab?.focusedPath || "",
+    contextRevision: ++mcpContextRevision
+  };
+}
+
+function scheduleMcpContextPublish(immediate = false) {
+  const bridge = desktopAiBridge();
+  if (!bridge?.publishContext) return;
+  if (mcpContextPublishFrame) cancelAnimationFrame(mcpContextPublishFrame);
+  const publish = () => {
+    mcpContextPublishFrame = 0;
+    bridge.publishContext(mcpContextSnapshot());
+  };
+  if (immediate) publish();
+  else mcpContextPublishFrame = requestAnimationFrame(publish);
+}
+
+async function handleMcpUiAction(action = {}) {
+  if (action.type !== "show") throw Object.assign(new Error("Unsupported AI Bridge UI action."), { code: "INVALID_REQUEST" });
+  const paneName = action.pane === "left" || action.pane === "right" ? action.pane : app.activePane;
+  const targetPath = String(action.path || "");
+  if (!targetPath) throw Object.assign(new Error("AI Bridge navigation requires a path."), { code: "INVALID_PATH" });
+  if (action.mode === "newTab") await openFolderInNewTab(paneName, targetPath);
+  else await loadPane(paneName, targetPath, true, { allowLockedNavigation: true });
+  app.activePane = paneName;
+  const selectedPath = action.select ? String(action.select) : "";
+  if (selectedPath && entryForPath(paneName, selectedPath)) {
+    selectEntry(paneName, selectedPath, {}, { focusList: false });
+  }
+  renderAll();
+  scheduleMcpContextPublish(true);
+  return { shown: targetPath, pane: paneName, mode: action.mode || "replace", contextRevision: mcpContextRevision };
+}
+
 function otherPane(paneName) {
   return paneName === "left" ? "right" : "left";
 }
@@ -1356,15 +1420,22 @@ async function request(url, options = {}) {
   if (shouldWatchOperation && app.state) {
     scheduleOperationPoll(200);
   }
-  const initialListing = method === "GET" && window.__exploreBetterInitialListing?.route === url
-    ? window.__exploreBetterInitialListing
+  const initialListing = method === "GET"
+    ? window.__exploreBetterInitialListings?.[url] ||
+      (window.__exploreBetterInitialListing?.route === url ? window.__exploreBetterInitialListing : null)
     : null;
   let parsed;
   if (initialListing) {
-    delete window.__exploreBetterInitialListing;
     const result = await initialListing.promise;
     if (!result.ok) throw result.error;
     parsed = result.data;
+    initialListing.consumed = Number(initialListing.consumed || 0) + 1;
+    if (
+      window.__exploreBetterInitialListings?.[url] === initialListing &&
+      initialListing.consumed >= Math.max(1, Number(initialListing.panes?.size || 0))
+    ) {
+      delete window.__exploreBetterInitialListings[url];
+    }
   } else {
     const response = await fetch(url, {
       ...fetchOptions,
@@ -2388,6 +2459,10 @@ function cancelListingPrefetch(cacheKey = null) {
 function clearListingCache() {
   app.listingCacheGeneration += 1;
   app.listingCache.clear();
+  for (const route of Object.keys(window.__exploreBetterInitialListings || {})) {
+    delete window.__exploreBetterInitialListings[route];
+  }
+  delete window.__exploreBetterInitialListing;
   cancelListingPrefetch();
 }
 
@@ -4127,8 +4202,20 @@ function columnsForTab(tab) {
   return ids.map((id) => detailColumnDefs.find((column) => column.id === id)).filter(Boolean);
 }
 
-function columnGridFor(tab) {
-  return columnsForTab(tab).map((column) => columnGridTrack(column, tab)).join(" ");
+function columnGridFor(tab, paneName = "") {
+  const columns = columnsForTab(tab);
+  const tracks = columns.map((column) => columnGridTrack(column, tab));
+  const explicitWidths = normalizeColumnWidths(tab?.columnWidths);
+  if (!paneName || !Object.keys(explicitWidths).length) {
+    return tracks.join(" ");
+  }
+  const pane = document.querySelector(`.pane[data-pane="${paneName}"]`);
+  const availableWidth = Math.max(0, Number(pane?.clientWidth || 0) - 16);
+  const requestedWidths = columns.map((column) => explicitWidths[column.id] || columnDefaultPixelWidth(column.id));
+  if (!availableWidth || requestedWidths.reduce((total, width) => total + width, 0) <= availableWidth) {
+    return tracks.join(" ");
+  }
+  return requestedWidths.map((width) => `minmax(0, ${Math.max(1, width)}fr)`).join(" ");
 }
 
 function sortableValue(entry, sortKey) {
@@ -4729,7 +4816,7 @@ function renderTileEntry(entry, paneName, tab) {
 }
 
 function applyColumnGrid(paneName, tab = tabOf(paneName)) {
-  const grid = columnGridFor(tab);
+  const grid = columnGridFor(tab, paneName);
   const paneElement = document.querySelector(`.pane[data-pane="${paneName}"]`);
   paneElement?.querySelector(".file-head")?.style.setProperty("--file-columns", grid);
   paneElement?.querySelector("[data-list]")?.style.setProperty("--file-columns", grid);
@@ -5268,6 +5355,7 @@ function scheduleProgressiveFileRender(paneName, token, entries, renderer, start
 }
 
 function renderPane(paneName) {
+  scheduleMcpContextPublish();
   const pane = panes[paneName];
   const tab = tabOf(paneName);
   const paneElement = document.querySelector(`[data-pane="${paneName}"]`);
@@ -5326,7 +5414,7 @@ function renderPane(paneName) {
   disconnectThumbnailObserver(paneName);
   clearVirtualFileList(paneName, list);
   list.className = `file-list view-${tab.viewMode}`;
-  list.style.setProperty("--file-columns", columnGridFor(tab));
+  list.style.setProperty("--file-columns", columnGridFor(tab, paneName));
   list.setAttribute("role", "listbox");
   list.setAttribute("aria-multiselectable", "true");
   list.setAttribute("aria-label", `${paneName === "left" ? "Left" : "Right"} file list`);
@@ -5389,6 +5477,7 @@ function renderAll() {
   renderAutoRefreshToggle();
   renderShowHiddenToggle();
   renderLinkedNavigationToggle();
+  scheduleMcpContextPublish();
 }
 
 function renderLayoutChrome() {
@@ -5769,6 +5858,13 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
           `${listingWindowStatus(data)} / loading full list${listingTimingText(data)}`
         );
       }
+      if (document.readyState === "loading") {
+        await new Promise((resolve) => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
+      }
+      await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 150)));
+      if (!isCurrentPaneLoad(paneName, load)) {
+        return false;
+      }
       const hydrationQuery = new URLSearchParams(plan.query);
       hydrationQuery.set("format", "compact-v2");
       const fullData = await requestFullListingHydration(plan.cacheKey, hydrationQuery);
@@ -5784,6 +5880,14 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
         previousFocusedPath: tab.focusedPath,
         options: { ...options, preserveSelection: true }
       }));
+      window.__exploreBetterPaneHydratedAt ||= Object.create(null);
+      if (!Number.isFinite(window.__exploreBetterPaneHydratedAt[paneName])) {
+        requestAnimationFrame((timestamp) => {
+          if (!Number.isFinite(window.__exploreBetterPaneHydratedAt[paneName])) {
+            window.__exploreBetterPaneHydratedAt[paneName] = timestamp;
+          }
+        });
+      }
       appliedPath = fullData.path;
     } else {
       appliedPath = data.path;
@@ -8478,6 +8582,7 @@ function commitSelectionChange(paneName, options = {}) {
   if (options.prefetch !== false) {
     prefetchFocusedFolder(paneName, "focus");
   }
+  scheduleMcpContextPublish();
 }
 
 function clearSelection(paneName) {
@@ -10127,7 +10232,7 @@ function updateDockOverflow() {
   if (!overflows()) return;
   toggle.hidden = false;
   const overflowed = [];
-  for (let index = candidates.length - 1; index > 0 && overflows(); index -= 1) {
+  for (let index = candidates.length - 1; index >= 0 && overflows(); index -= 1) {
     const button = candidates[index];
     button.classList.add("dock-responsive-hidden");
     overflowed.unshift(button);
@@ -10300,7 +10405,139 @@ function renderPreferencesDialog() {
   document.getElementById("preference-terminal-cursor").value = settings.terminalCursor;
   document.getElementById("preference-terminal-scrollback").value = settings.terminalScrollback;
   document.getElementById("preference-terminal-follow").checked = settings.terminalFollowDirectory;
+  renderAiBridgePreferences();
   renderPreferencesSummary(settings);
+}
+
+function selectedAiBridgeProfile() {
+  if (app.aiBridge.draftNew) return null;
+  const profiles = app.aiBridge.status?.configuration?.profiles || [];
+  return profiles.find((profile) => profile.id === app.aiBridge.selectedProfileId) || profiles[0] || null;
+}
+
+function renderAiBridgePreferences() {
+  const section = document.querySelector(".ai-bridge-preferences");
+  if (!section) return;
+  const bridge = desktopAiBridge();
+  const status = app.aiBridge.status;
+  section.classList.toggle("unavailable", !bridge);
+  const enabled = document.getElementById("preference-ai-enabled");
+  enabled.disabled = !bridge;
+  enabled.checked = status?.configuration?.enabled === true;
+  const profiles = status?.configuration?.profiles || [];
+  const select = document.getElementById("preference-ai-profile");
+  if (!app.aiBridge.draftNew && (!app.aiBridge.selectedProfileId || !profiles.some((profile) => profile.id === app.aiBridge.selectedProfileId))) {
+    app.aiBridge.selectedProfileId = profiles[0]?.id || null;
+  }
+  select.innerHTML = profiles.length
+    ? `${app.aiBridge.draftNew ? '<option value="">New profile</option>' : ""}${profiles.map((profile) => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)}${profile.enabled ? "" : " (revoked)"}</option>`).join("")}`
+    : `<option value="">New profile</option>`;
+  select.value = app.aiBridge.draftNew ? "" : app.aiBridge.selectedProfileId || "";
+  select.disabled = !bridge || !profiles.length;
+  const profile = selectedAiBridgeProfile();
+  document.getElementById("preference-ai-name").value = profile?.name || "Explore Better AI";
+  document.getElementById("preference-ai-client").value = profile?.clientType || "generic";
+  document.getElementById("preference-ai-access").value = profile?.access || "read-only";
+  document.getElementById("preference-ai-roots").value = (profile?.roots || [tabOf(app.activePane)?.path].filter(Boolean)).join("\n");
+  document.getElementById("preference-ai-permanent-delete").checked = profile?.allowPermanentDelete === true;
+  document.getElementById("preference-ai-permanent-delete").disabled = (profile?.access || "read-only") !== "read-write";
+
+  const access = profile?.access || "read-only";
+  const tools = status?.contract?.tools || [];
+  const allowed = new Set(profile?.tools || tools.filter((tool) => tool.access !== "write").map((tool) => tool.name));
+  document.getElementById("preference-ai-tools").innerHTML = tools.length
+    ? tools.map((tool) => {
+        const disabled = access !== "read-write" && tool.access === "write";
+        const checked = allowed.has(tool.name) && !disabled;
+        return `<label class="check-row" title="${escapeHtml(tool.description)}"><input type="checkbox" data-ai-tool="${escapeHtml(tool.name)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} /><span>${escapeHtml(tool.title || tool.name)}</span></label>`;
+      }).join("")
+    : `<span class="ai-bridge-muted">${bridge ? "Loading tools" : "Desktop app required"}</span>`;
+
+  const deployment = status?.deployment;
+  const clients = deployment?.clients || [];
+  const deploymentText = deployment?.deployment?.error
+    ? deployment.deployment.error
+    : deployment?.deployment?.path || "AI Bridge sidecar not deployed";
+  document.getElementById("preference-ai-client-status").innerHTML = `<span>${escapeHtml(deploymentText)}</span>${clients.map((client) => `<button type="button" data-ai-bridge-remove="${escapeHtml(client.client)}" class="${client.installed ? "installed" : ""}" ${client.installed ? "" : "disabled"}>${escapeHtml(client.client)}${client.installed ? " connected" : ""}</button>`).join("")}`;
+  const generic = deployment?.generic;
+  const profileId = profile?.id || "PROFILE_ID";
+  document.getElementById("preference-ai-snippet").textContent = generic
+    ? JSON.stringify({ command: generic.command, args: generic.args.map((item) => item === "PROFILE_ID" ? profileId : item) }, null, 2)
+    : "";
+  renderAiBridgeAudit();
+}
+
+function renderAiBridgeAudit() {
+  const target = document.getElementById("preference-ai-audit");
+  if (!target) return;
+  target.innerHTML = app.aiBridge.audit.length
+    ? app.aiBridge.audit.slice(0, 100).map((item) => `<div class="ai-audit-row"><time>${escapeHtml(String(item.at || ""))}</time><strong>${escapeHtml(String(item.tool || ""))}</strong><span class="${item.outcome === "ok" ? "ok" : "error"}">${escapeHtml(String(item.outcome || ""))}</span><small>${escapeHtml(`${item.durationMs || 0} ms`)}</small></div>`).join("")
+    : `<span class="ai-bridge-muted">No recorded requests</span>`;
+}
+
+async function loadAiBridgeStatus() {
+  const bridge = desktopAiBridge();
+  if (!bridge?.status || app.aiBridge.loading) return null;
+  app.aiBridge.loading = true;
+  try {
+    app.aiBridge.status = await bridge.status();
+    return app.aiBridge.status;
+  } finally {
+    app.aiBridge.loading = false;
+  }
+}
+
+async function loadAiBridgeAudit() {
+  if (!desktopAiBridge()?.audit) return;
+  app.aiBridge.audit = await desktopAiBridge().audit(200);
+  renderAiBridgeAudit();
+}
+
+function aiBridgeProfileDraft() {
+  const access = document.getElementById("preference-ai-access").value;
+  return {
+    id: app.aiBridge.selectedProfileId || undefined,
+    name: document.getElementById("preference-ai-name").value,
+    clientType: document.getElementById("preference-ai-client").value,
+    access,
+    roots: document.getElementById("preference-ai-roots").value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+    tools: [...document.querySelectorAll("[data-ai-tool]:checked")].map((input) => input.dataset.aiTool),
+    allowPermanentDelete: access === "read-write" && document.getElementById("preference-ai-permanent-delete").checked
+  };
+}
+
+async function saveAiBridgeProfile() {
+  const profile = await desktopAiBridge().upsertProfile(aiBridgeProfileDraft());
+  app.aiBridge.selectedProfileId = profile.id;
+  app.aiBridge.draftNew = false;
+  await loadAiBridgeStatus();
+  renderAiBridgePreferences();
+  showToast("AI Bridge profile saved");
+}
+
+async function revokeAiBridgeProfile() {
+  const profile = selectedAiBridgeProfile();
+  if (!profile) return;
+  await desktopAiBridge().revokeProfile(profile.id);
+  await loadAiBridgeStatus();
+  renderAiBridgePreferences();
+  showToast("AI Bridge profile revoked");
+}
+
+async function installAiBridgeClient(client) {
+  const profile = selectedAiBridgeProfile();
+  if (!profile) throw new Error("Save an AI Bridge profile first.");
+  await desktopAiBridge().installClient(client, profile.id);
+  await loadAiBridgeStatus();
+  renderAiBridgePreferences();
+  showToast(`${client} MCP setup saved`);
+}
+
+async function removeAiBridgeClient(client) {
+  await desktopAiBridge().removeClient(client);
+  await loadAiBridgeStatus();
+  renderAiBridgePreferences();
+  showToast(`${client} MCP setup removed`);
 }
 
 function renderStartupLayoutPicker(settings = currentSettings()) {
@@ -10514,6 +10751,7 @@ async function resetPreferencesToDefaults() {
 
 async function openPreferencesDialog() {
   await loadState();
+  await loadAiBridgeStatus().catch((error) => console.warn(`Could not load AI Bridge: ${error.message}`));
   applyAppSettingsChrome();
   renderPreferencesDialog();
   document.getElementById("preferences-dialog").showModal();
@@ -21660,6 +21898,14 @@ function loadTerminalRenderer() {
   if (window.ExploreBetterTerminal?.createView) return Promise.resolve(window.ExploreBetterTerminal);
   if (app.terminals.rendererPromise) return app.terminals.rendererPromise;
   app.terminals.rendererPromise = new Promise((resolve, reject) => {
+    let stylesheet = document.querySelector('link[data-terminal-renderer-styles]');
+    if (!stylesheet) {
+      stylesheet = document.createElement("link");
+      stylesheet.rel = "stylesheet";
+      stylesheet.href = "/generated/terminal-renderer.css";
+      stylesheet.dataset.terminalRendererStyles = "true";
+      document.head.append(stylesheet);
+    }
     const script = document.createElement("script");
     script.src = "/generated/terminal-renderer.js";
     script.async = true;
@@ -24464,6 +24710,64 @@ function wireEvents() {
     }
   });
 
+  document.getElementById("preferences-dialog").addEventListener("click", async (event) => {
+    const actionButton = event.target.closest("[data-ai-bridge-action]");
+    const installButton = event.target.closest("[data-ai-bridge-install]");
+    const removeButton = event.target.closest("[data-ai-bridge-remove]");
+    if (!actionButton && !installButton && !removeButton) return;
+    event.preventDefault();
+    try {
+      if (actionButton?.dataset.aiBridgeAction === "new-profile") {
+        app.aiBridge.draftNew = true;
+        app.aiBridge.selectedProfileId = null;
+        renderAiBridgePreferences();
+        document.getElementById("preference-ai-name").focus();
+      }
+      if (actionButton?.dataset.aiBridgeAction === "save-profile") await saveAiBridgeProfile();
+      if (actionButton?.dataset.aiBridgeAction === "revoke-profile") await revokeAiBridgeProfile();
+      if (actionButton?.dataset.aiBridgeAction === "copy-snippet") {
+        await navigator.clipboard.writeText(document.getElementById("preference-ai-snippet").textContent);
+        showToast("Generic stdio configuration copied");
+      }
+      if (installButton) await installAiBridgeClient(installButton.dataset.aiBridgeInstall);
+      if (removeButton) await removeAiBridgeClient(removeButton.dataset.aiBridgeRemove);
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+
+  document.getElementById("preference-ai-enabled").addEventListener("change", async (event) => {
+    try {
+      await desktopAiBridge().configure({ enabled: event.target.checked });
+      await loadAiBridgeStatus();
+      renderAiBridgePreferences();
+      showToast(event.target.checked ? "AI Bridge enabled" : "AI Bridge disabled");
+    } catch (error) {
+      event.target.checked = !event.target.checked;
+      showToast(error.message);
+    }
+  });
+
+  document.getElementById("preference-ai-profile").addEventListener("change", (event) => {
+    app.aiBridge.draftNew = false;
+    app.aiBridge.selectedProfileId = event.target.value || null;
+    renderAiBridgePreferences();
+  });
+
+  document.getElementById("preference-ai-access").addEventListener("change", (event) => {
+    const writable = event.target.value === "read-write";
+    document.getElementById("preference-ai-permanent-delete").disabled = !writable;
+    const accessByTool = new Map((app.aiBridge.status?.contract?.tools || []).map((tool) => [tool.name, tool.access]));
+    document.querySelectorAll("[data-ai-tool]").forEach((input) => {
+      input.disabled = !writable && accessByTool.get(input.dataset.aiTool) === "write";
+      if (input.disabled) input.checked = false;
+    });
+  });
+
+  document.querySelector(".ai-bridge-audit").addEventListener("toggle", (event) => {
+    if (event.target.open) loadAiBridgeAudit().catch((error) => showToast(error.message));
+  });
+
   document.getElementById("toolbar-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -24910,6 +25214,7 @@ function wireEvents() {
 async function init() {
   const startupStartedAt = performance.now();
   wireEvents();
+  desktopAiBridge()?.onAction?.(handleMcpUiAction);
   setupDockOverflow();
   const urlParams = new URL(window.location.href).searchParams;
   const bootstrap = window.__exploreBetterBootstrap || Promise.all([
@@ -25006,6 +25311,7 @@ async function init() {
     readyMs: Math.round((performance.now() - startupStartedAt) * 10) / 10,
     completedAt: Date.now()
   };
+  scheduleMcpContextPublish(true);
   setTimeout(() => {
     requestIdle(() => {
       if (desktopTerminalBridge()) loadTerminalRenderer().catch(() => {});

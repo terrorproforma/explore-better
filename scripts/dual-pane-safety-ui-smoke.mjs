@@ -34,6 +34,14 @@ async function waitForServer(baseUrl, child) {
   throw new Error(`Server did not start at ${baseUrl}`);
 }
 
+async function requestJson(baseUrl, route) {
+  const response = await fetch(`${baseUrl}${route}`);
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!response.ok) throw new Error(data.error || `Request failed: ${response.status}`);
+  return data;
+}
+
 async function waitFor(page, fn, label, timeoutMs = 10000) {
   const started = Date.now();
   let last;
@@ -104,6 +112,8 @@ async function main() {
   const checks = [];
   const evidence = {};
   const pageErrors = [];
+  const apiFailures = [];
+  const listResponses = [];
   const server = spawn(process.execPath, ["server.mjs"], {
     cwd: workspace,
     env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), LOCALAPPDATA: appData, APPDATA: appData },
@@ -119,6 +129,24 @@ async function main() {
     });
     const page = await browser.newPage({ viewport: { width: 1366, height: 860 } });
     page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("response", async (response) => {
+      if (!response.url().includes("/api/")) return;
+      if (response.status() >= 400) {
+        apiFailures.push({
+          status: response.status(),
+          url: response.url(),
+          body: (await response.text().catch(() => "")).slice(0, 800)
+        });
+      } else if (response.url().includes("/api/list?")) {
+        const data = await response.json().catch(() => ({}));
+        listResponses.push({
+          url: response.url(),
+          path: data.path || "",
+          entries: Number(data.entries?.length || data.entryRows?.length || 0),
+          names: (data.entries || []).slice(0, 5).map((item) => item.name)
+        });
+      }
+    });
     await page.goto(`${baseUrl}/?left=${encodeURIComponent(leftFixture)}&right=${encodeURIComponent(rightFixture)}`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector(`[data-entry-path="${sourcePath.replaceAll("\\", "\\\\")}"]`, { timeout: 10000 }).catch(async () => {
       await page.waitForSelector('.pane[data-pane="left"] [data-entry-path]', { timeout: 10000 });
@@ -128,6 +156,11 @@ async function main() {
     await page.waitForFunction(() => document.querySelector(".workbench")?.classList.contains("layout-horizontal"));
 
     evidence.initial = await paneSafetyState(page);
+    evidence.initialListings = await page.evaluate(() => Object.entries(window.__exploreBetterInitialListings || {}).map(([route, record]) => ({
+      route,
+      consumed: Number(record?.consumed || 0),
+      panes: [...(record?.panes || [])]
+    })));
     const initialDisabled = ["rename", "copy-other", "move-other", "recycle", "bulk-rename", "label", "trash", "delete"].every(
       (action) => evidence.initial.panes.left.actions[action].disabled && evidence.initial.panes.right.actions[action].disabled
     );
@@ -160,13 +193,32 @@ async function main() {
     );
 
     await page.locator('.pane[data-pane="left"] [data-action="copy-other"]').click();
-    await waitFor(
-      page,
-      () => ({
-        ok: [...document.querySelectorAll('.pane[data-pane="right"] [data-entry-path]')].some((item) => item.textContent.includes("transfer-proof.txt"))
-      }),
-      "copy appeared in target pane"
-    );
+    try {
+      await waitFor(
+        page,
+        () => ({
+          ok: [...document.querySelectorAll('.pane[data-pane="right"] [data-entry-path]')].some((item) => item.textContent.includes("transfer-proof.txt"))
+        }),
+        "copy appeared in target pane"
+      );
+    } catch (error) {
+      const ui = await page.evaluate(() => ({
+        status: document.getElementById("status-pill")?.textContent || "",
+        toast: document.getElementById("toast")?.textContent || "",
+        transferOpen: document.getElementById("transfer-dialog")?.open === true,
+        transferSummary: document.getElementById("transfer-summary")?.textContent || "",
+        initialListings: Object.entries(window.__exploreBetterInitialListings || {}).map(([route, record]) => ({
+          route,
+          consumed: Number(record?.consumed || 0),
+          panes: Number(record?.panes?.size || 0)
+        }))
+      }));
+      const copiedOnDisk = await fs.access(copiedPath).then(() => true, () => false);
+      const cachedListing = await requestJson(baseUrl, `/api/list?path=${encodeURIComponent(rightFixture)}&showHidden=true`);
+      const freshListing = await requestJson(baseUrl, `/api/list?path=${encodeURIComponent(rightFixture)}&showHidden=true&bypassCache=true`);
+      const listingNames = (listing) => (listing.entries || []).map((item) => item.name);
+      throw new Error(`${error.message}; copiedOnDisk=${copiedOnDisk}; ui=${JSON.stringify(ui)}; cached=${JSON.stringify(listingNames(cachedListing))}; fresh=${JSON.stringify(listingNames(freshListing))}; listResponses=${JSON.stringify(listResponses)}; apiFailures=${JSON.stringify(apiFailures)}`);
+    }
     const copiedBytes = await fs.readFile(copiedPath, "utf8");
     check(checks, "copy-follows-target", copiedBytes === "dual pane transfer proof\n", `Copied bytes: ${JSON.stringify(copiedBytes)}.`);
 
@@ -242,7 +294,9 @@ async function main() {
     checks,
     evidence,
     screenshots: { horizontal: horizontalScreenshotPath, vertical: verticalScreenshotPath },
-    pageErrors
+    pageErrors,
+    apiFailures,
+    listResponses
   };
   await fs.writeFile(latestJsonPath, `${JSON.stringify(report, null, 2)}\n`);
   await fs.writeFile(latestMdPath, markdown(report));

@@ -20,7 +20,8 @@ const workspaceLabel = String(process.env.EXPLORE_BETTER_WORKSPACE_LABEL || "Wor
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 4627);
 const desktopInstanceToken = process.env.EXPLORE_BETTER_DESKTOP_INSTANCE_TOKEN || "";
-const apiCapability = crypto.randomBytes(32).toString("base64url");
+const apiCapability = process.env.EXPLORE_BETTER_API_CAPABILITY || crypto.randomBytes(32).toString("base64url");
+const requireDirectApiCapability = process.env.EXPLORE_BETTER_REQUIRE_API_CAPABILITY === "1";
 const apiCapabilityCookieName = "ExploreBetterCapability";
 const contentSecurityPolicy = [
   "default-src 'self'",
@@ -619,10 +620,8 @@ function validateRequestBoundary(req) {
     }
   }
 
-  // Browsers receive this HttpOnly capability with the UI. Tokenless access is
-  // limited to direct loopback clients such as the packaged main process and
-  // command-line verifiers, which do not carry browser fetch metadata.
-  if (isApiRequest && (originHeader || fetchSite) && cookieValue(req, apiCapabilityCookieName) !== apiCapability) {
+  const suppliedCapability = cookieValue(req, apiCapabilityCookieName) || String(req.headers["x-explore-better-capability"] || "");
+  if (isApiRequest && (requireDirectApiCapability || originHeader || fetchSite) && suppliedCapability !== apiCapability) {
     return { status: 403, message: "The launch capability is missing or invalid." };
   }
   return null;
@@ -911,6 +910,8 @@ function sanitizeStoredOperation(operation) {
     cancelRequestedAt: sanitizeOperationTimestamp(operation.cancelRequestedAt, null),
     retry: sanitizeOperationRetry(operation.retry),
     retryOf: sanitizeReferenceId(operation.retryOf),
+    mcpProfileId: sanitizeReferenceId(operation.mcpProfileId),
+    mcpSessionId: sanitizeReferenceId(operation.mcpSessionId),
     pausedAt: sanitizeOperationTimestamp(operation.pausedAt, null),
     resumedAt: sanitizeOperationTimestamp(operation.resumedAt, null)
   };
@@ -2791,7 +2792,9 @@ async function enqueueOperation(type, label, runner, options = {}) {
     progress: null,
     cancelRequestedAt: null,
     retry: sanitizeOperationRetry(options.retry),
-    retryOf: options.retryOf ? String(options.retryOf).slice(0, 120) : null
+    retryOf: options.retryOf ? String(options.retryOf).slice(0, 120) : null,
+    mcpProfileId: options.mcpProfileId ? String(options.mcpProfileId).slice(0, 120) : null,
+    mcpSessionId: options.mcpSessionId ? String(options.mcpSessionId).slice(0, 120) : null
   };
 
   await saveOperation(operation);
@@ -2889,7 +2892,83 @@ async function enqueueOperation(type, label, runner, options = {}) {
   };
 
   operationChain = operationChain.then(run, run);
+  if (options.returnQueued === true) {
+    operationChain.catch(() => {});
+    return operation;
+  }
   return operationChain;
+}
+
+async function writeTextTransaction(body, hooks = {}) {
+  const target = resolveUserPath(body.path);
+  const parent = path.dirname(target);
+  const parentStats = await fs.stat(parent);
+  if (!parentStats.isDirectory()) {
+    throw new Error("Text write target parent must be a folder.");
+  }
+  const current = await fs.stat(target).catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)));
+  if (current?.isDirectory()) {
+    throw new Error("Text cannot be written over a folder.");
+  }
+  if (
+    current &&
+    Number.isFinite(Number(body.expectedModified)) &&
+    Math.abs(current.mtimeMs - Number(body.expectedModified)) > 1 &&
+    body.force !== true
+  ) {
+    const error = new Error("The text file changed after preview. Refresh the operation plan.");
+    error.code = "PLAN_CHANGED";
+    throw error;
+  }
+
+  const content = String(body.content ?? "").slice(0, 1_000_000);
+  const transactionId = crypto.randomUUID();
+  const staging = path.join(parent, `.explore-better-staging-${transactionId}-${path.basename(target)}`);
+  const backup = current
+    ? path.join(parent, `.explore-better-backup-${transactionId}-${path.basename(target)}`)
+    : null;
+  await hooks.updateProgress?.({ unit: "bytes", total: Buffer.byteLength(content), completed: 0, phase: "Staging", currentPath: target });
+
+  let originalMoved = false;
+  try {
+    const handle = await fs.open(staging, "wx", 0o600);
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    hooks.throwIfCanceled?.();
+    if (backup) {
+      await fs.rename(target, backup);
+      originalMoved = true;
+      await hooks.updateRecovery?.({
+        transaction: { phase: "backup-created", stagingPath: staging, destinationPath: target, backupPath: backup },
+        undo: { type: "text-write-restore", path: target, backup }
+      });
+    }
+    await fs.rename(staging, target);
+    const stats = await fs.stat(target);
+    await hooks.updateProgress?.({ unit: "bytes", total: stats.size, completed: stats.size, phase: "Committed", currentPath: target });
+    return {
+      result: {
+        path: target,
+        bytes: stats.size,
+        modified: stats.mtimeMs,
+        transaction: { phase: "complete", stagingPath: null, destinationPath: target, backupPath: backup }
+      },
+      undo: backup
+        ? { type: "text-write-restore", path: target, backup }
+        : { type: "trash-created", items: [{ path: target }] }
+    };
+  } catch (error) {
+    await fs.rm(staging, { force: true }).catch(() => {});
+    if (originalMoved && backup && (await pathExists(backup))) {
+      await fs.rm(target, { recursive: true, force: true }).catch(() => {});
+      await fs.rename(backup, target).catch(() => {});
+    }
+    throw error;
+  }
 }
 
 async function enqueueRetryableOperation(type, body, runner, options = {}) {
@@ -3026,6 +3105,9 @@ async function runRetryableOperation(type, body, options = {}) {
       };
     }, options);
   }
+  if (type === "text-write") {
+    return enqueueRetryableOperation(type, body, (hooks) => writeTextTransaction(body, hooks), options);
+  }
   if (type === "rename") {
     const src = resolveUserPath(body.path);
     const dest = path.join(path.dirname(src), cleanEntryName(body.name));
@@ -3070,7 +3152,7 @@ async function runRetryableOperation(type, body, options = {}) {
   throw new Error("This operation cannot be retried.");
 }
 
-async function retryRecordedOperation(operationId) {
+async function retryRecordedOperation(operationId, options = {}) {
   const id = String(operationId || "");
   if (!id) {
     throw new Error("Operation id is required.");
@@ -3087,7 +3169,7 @@ async function retryRecordedOperation(operationId) {
   if (!retry) {
     throw new Error("This operation does not have retry metadata.");
   }
-  const operation = await runRetryableOperation(retry.type, retry.body, { retryOf: original.id });
+  const operation = await runRetryableOperation(retry.type, retry.body, { ...options, retryOf: original.id });
   const retriedAt = new Date().toISOString();
   await mutateState((nextState) => {
     const index = nextState.operations.findIndex((item) => item.id === original.id);
@@ -12646,6 +12728,19 @@ async function undoRecordedOperation(operation) {
     return { result: { undone: operation.id, trashed: trashed.result }, undo: null };
   }
 
+  if (undo.type === "text-write-restore") {
+    const target = resolveUserPath(undo.path);
+    const backup = resolveUserPath(undo.backup);
+    if (!(await pathExists(backup))) {
+      throw new Error("The transactional text backup is no longer available.");
+    }
+    await fs.rm(target, { recursive: true, force: true });
+    await fs.rename(backup, target);
+    operation.undo.appliedAt = new Date().toISOString();
+    operation.undo.result = { restored: target };
+    return { result: { undone: operation.id, restored: target }, undo: null };
+  }
+
   if (undo.type === "move-back" || undo.type === "restore-trash") {
     for (const item of undo.items) {
       const dest = await moveToExactOrUnique(item.from, item.to);
@@ -19949,6 +20044,165 @@ export function stopServer() {
       resolve();
     });
   });
+}
+
+let mcpAutomationServicePromise = null;
+
+function persistedMcpContextFromState(state) {
+  const layout = state?.layout || defaultState().layout;
+  const panes = {};
+  for (const paneId of ["left", "right"]) {
+    const pane = layout.panes?.[paneId] || { activeTab: 0, tabs: [] };
+    const tabs = (pane.tabs || []).map((tab, index) => ({
+      id: `persisted-${paneId}-${crypto.createHash("sha1").update(`${index}:${tab.path}`).digest("hex").slice(0, 16)}`,
+      path: tab.path,
+      title: tab.title || labelFromPath(tab.path)
+    }));
+    const activeTab = tabs[Math.max(0, Math.min(Number(pane.activeTab || 0), tabs.length - 1))] || null;
+    panes[paneId] = {
+      activeTabId: activeTab?.id || "",
+      path: activeTab?.path || "",
+      tabs
+    };
+  }
+  return {
+    live: false,
+    activePane: layout.activePane === "right" ? "right" : "left",
+    paneLayout: layout.paneLayout || "vertical",
+    panes,
+    selection: [],
+    focusedPath: "",
+    contextRevision: 0
+  };
+}
+
+async function startMcpUndoOperation(operationId, principal) {
+  const body = { operationId };
+  return enqueueOperation("undo", operationLabel("undo", body), async (hooks) => {
+    const state = await readState();
+    const original = state.operations.find((item) => item.id === operationId);
+    if (!original) {
+      throw new Error("Operation not found.");
+    }
+    await hooks.updateProgress?.({
+      unit: "items",
+      total: 1,
+      completed: 0,
+      phase: "Undoing",
+      current: original.label,
+      currentPath: original?.undo?.items?.[0]?.path || original?.undo?.items?.[0]?.from || original?.undo?.from || ""
+    });
+    const result = await undoRecordedOperation(original);
+    await mutateState((nextState) => {
+      const index = nextState.operations.findIndex((item) => item.id === original.id);
+      if (index !== -1) nextState.operations[index] = original;
+    });
+    await hooks.updateProgress?.({ unit: "items", total: 1, completed: 1, phase: "Completed", current: original.label });
+    return result;
+  }, {
+    returnQueued: true,
+    mcpProfileId: principal.profileId,
+    mcpSessionId: principal.sessionId
+  });
+}
+
+async function getMcpAutomationService() {
+  if (!mcpAutomationServicePromise) {
+    mcpAutomationServicePromise = (async () => {
+      const { createMcpAutomationService } = await import("./mcp/automation-service.mjs");
+      return createMcpAutomationService({
+        appDataRoot,
+        internalRoots: [appDataRoot],
+        workspaceRoot,
+        resolveUserPath,
+        readState,
+        listDirectory: async (targetPath, options = {}) =>
+          windowDirectoryListing(await listDirectory(targetPath, options), options.windowOptions),
+        advancedSearch,
+        propertiesReport,
+        checksumReport,
+        getRoots,
+        getShellLocations,
+        indexStatus: (targetPath) => folderIndexStatus(targetPath || "", ""),
+        sizeAnalysisReport,
+        duplicateFiles,
+        compareDirectories,
+        buildOperationPreview,
+        persistedContext: async () => persistedMcpContextFromState(await readState()),
+        upsertCollection,
+        addToCollection,
+        removeFromCollection,
+        deleteCollection,
+        applyPathLabels,
+        clearPathLabels,
+        startOperation: (type, body, principal) => runRetryableOperation(type, body, {
+          returnQueued: true,
+          mcpProfileId: principal.profileId,
+          mcpSessionId: principal.sessionId
+        }),
+        getOperation: async (operationId) => {
+          const state = await readState();
+          return state.operations.find((operation) => operation.id === operationId) || null;
+        },
+        controlOperation: async (operationId, action, principal = {}) => {
+          if (action === "cancel") return cancelOperation(operationId);
+          if (action === "pause") return pauseOperation(operationId);
+          if (action === "resume") return resumeOperation(operationId);
+          if (action === "retry") return retryRecordedOperation(operationId, {
+            returnQueued: true,
+            mcpProfileId: principal.profileId,
+            mcpSessionId: principal.sessionId
+          });
+          throw new Error("Unsupported operation control action.");
+        },
+        undoOperation: startMcpUndoOperation
+      });
+    })().catch((error) => {
+      mcpAutomationServicePromise = null;
+      throw error;
+    });
+  }
+  return mcpAutomationServicePromise;
+}
+
+export async function getMcpContract() {
+  return cloneState((await getMcpAutomationService()).contract);
+}
+
+export async function getMcpProfileContract(profileId) {
+  return (await getMcpAutomationService()).getProfileContract(profileId);
+}
+
+export async function getMcpBridgeConfiguration() {
+  return (await getMcpAutomationService()).getConfiguration();
+}
+
+export async function configureMcpBridge(patch) {
+  return (await getMcpAutomationService()).configure(patch);
+}
+
+export async function upsertMcpProfile(profile) {
+  return (await getMcpAutomationService()).upsertProfile(profile);
+}
+
+export async function revokeMcpProfile(profileId) {
+  return (await getMcpAutomationService()).revokeProfile(profileId);
+}
+
+export async function listMcpAudit(limit) {
+  return (await getMcpAutomationService()).listAudit(limit);
+}
+
+export async function invokeMcpAutomation(request) {
+  return (await getMcpAutomationService()).invoke(request);
+}
+
+export async function readMcpAutomationResource(request) {
+  return (await getMcpAutomationService()).readResource(request);
+}
+
+export async function setMcpUiDispatcher(dispatcher) {
+  (await getMcpAutomationService()).setUiDispatcher(dispatcher);
 }
 
 export { host, port };

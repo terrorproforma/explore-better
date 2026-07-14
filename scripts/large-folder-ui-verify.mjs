@@ -266,6 +266,8 @@ async function inspectVirtualList(page, expectedCount) {
       status: document.querySelector("#status-pill")?.textContent || "",
       startupTimings: {
         domContentLoadedMs: Math.round(Number(navigation?.domContentLoadedEventEnd || 0) * 10) / 10,
+        firstVisibleWindowMs: Math.round(Number(window.__exploreBetterPaneFirstVisibleAt?.left || 0) * 10) / 10,
+        fullHydrationMs: Math.round(Number(window.__exploreBetterPaneHydratedAt?.left || 0) * 10) / 10,
         resources
       }
     };
@@ -332,18 +334,17 @@ async function runViewport(page, baseUrl, fixture, viewport, count, options = {}
     firstWindowPaint = await timed(`${viewport.name}-first-window-paint`, async () => {
       await page.goto(
         `${baseUrl}/?left=${encodeURIComponent(fixture)}&right=${encodeURIComponent(fixture)}`,
-        { waitUntil: "domcontentloaded", timeout: 30000 }
+        { waitUntil: "commit", timeout: 30000 }
       );
       await page.waitForFunction(
         () => {
           const list = document.querySelector('[data-list="left"]');
           const rows = [...document.querySelectorAll('[data-list="left"] [data-entry-path]')];
-          const status = document.querySelector("#status-pill")?.textContent || "";
           return (
             Boolean(list && !list.classList.contains("virtualized")) &&
             rows.length > 0 &&
             rows.length <= 220 &&
-            /loading full list/i.test(status)
+            Number.isFinite(window.__exploreBetterPaneFirstVisibleAt?.left)
           );
         },
         { timeout: 30000 }
@@ -356,12 +357,23 @@ async function runViewport(page, baseUrl, fixture, viewport, count, options = {}
       await page.waitForFunction(
         () => {
           const list = document.querySelector('[data-list="left"]');
-          return Boolean(list?.classList.contains("virtualized") && list.querySelector("[data-entry-path]"));
+          return Boolean(
+            list?.classList.contains("virtualized") &&
+            list.querySelector("[data-entry-path]") &&
+            Number.isFinite(window.__exploreBetterPaneHydratedAt?.left)
+          );
         },
         { timeout: 30000 }
       );
+      return inspectVirtualList(page, count);
     });
   });
+
+  const measuredFirstWindowPaintMs = Number(windowFirst?.startupTimings?.firstVisibleWindowMs || firstWindowPaint?.wallMs);
+  const measuredFullHydrationMs = Math.max(
+    0,
+    Number(fullHydration?.result?.startupTimings?.fullHydrationMs || 0) - measuredFirstWindowPaintMs
+  ) || Number(fullHydration?.wallMs || 0);
 
   const firstFixtureRequest = windowProbe.requests[0];
   assert(firstFixtureRequest?.isWindow, `${viewport.name}: first browser /api/list request should be windowed.`);
@@ -383,12 +395,12 @@ async function runViewport(page, baseUrl, fixture, viewport, count, options = {}
       `${viewport.name}: cold streaming window should expose an unknown-total progress state, got ${windowFirst?.status}.`
     );
     assert(
-      Number(firstWindowPaint?.wallMs || Infinity) <= 750,
-      `${viewport.name}: cold first visible window must paint within 750ms, got ${firstWindowPaint?.wallMs}ms.`
+      measuredFirstWindowPaintMs <= 750,
+      `${viewport.name}: cold first visible window must paint within 750ms, got ${measuredFirstWindowPaintMs}ms.`
     );
     assert(
-      Number(fullHydration?.wallMs || Infinity) <= 2000,
-      `${viewport.name}: full hydration must finish within 2000ms after first paint, got ${fullHydration?.wallMs}ms.`
+      measuredFullHydrationMs <= 2000,
+      `${viewport.name}: full hydration must finish within 2000ms after first paint, got ${measuredFullHydrationMs}ms.`
     );
   }
 
@@ -455,8 +467,12 @@ async function runViewport(page, baseUrl, fixture, viewport, count, options = {}
     viewport,
     screenshot,
     navigateMs: navigate.wallMs,
-    firstWindowPaintMs: firstWindowPaint?.wallMs ?? null,
-    fullHydrationMs: fullHydration?.wallMs ?? null,
+    firstWindowPaintMs: measuredFirstWindowPaintMs,
+    fullHydrationMs: measuredFullHydrationMs,
+    controllerObservationMs: {
+      firstWindowPaint: firstWindowPaint?.wallMs ?? null,
+      fullHydration: fullHydration?.wallMs ?? null
+    },
     windowFirst,
     listingRequests: windowProbe.requests.map((request) => ({
       isWindow: request.isWindow,
@@ -550,7 +566,7 @@ async function main() {
       if (count >= 100000) {
         assert(
           Number(report.firstWindowPaintMs || Infinity) <= 750,
-          `${viewport.name}: median cold first visible window must paint within 750ms, got ${report.firstWindowPaintMs}ms; timings=${JSON.stringify(report.windowFirst?.startupTimings || {})}.`
+          `${viewport.name}: median cold first visible window must paint within 750ms, got ${report.firstWindowPaintMs}ms; repetitions=${JSON.stringify(report.repetitions)}; timings=${JSON.stringify(report.windowFirst?.startupTimings || {})}.`
         );
         assert(
           Number(report.fullHydrationMs || Infinity) <= 2000,

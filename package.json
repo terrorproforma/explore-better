@@ -29,6 +29,7 @@
     "desktop:smoke-terminal-security": "electron . --smoke --smoke-window --smoke-terminal-security",
     "build:icon": "node scripts/generate-icon.mjs",
     "build:native-helper": "node scripts/build-native-helper.mjs",
+    "build:mcp-server": "node scripts/build-mcp-server.mjs",
     "build:app": "node scripts/build-app.mjs",
     "build:terminal": "node scripts/build-terminal.mjs",
     "build:renderer": "npm run build:app && npm run build:terminal",
@@ -43,6 +44,7 @@
     "verify:all:full": "node scripts/verify-all.mjs --full",
     "verify:all:refresh": "node scripts/verify-all.mjs --refresh-stale",
     "verify:action-inventory": "node scripts/action-inventory.mjs",
+    "verify:landing-page": "node scripts/landing-page-smoke.mjs",
     "verify:perf-100k": "node scripts/perf-100k-verify.mjs",
     "verify:windows-baseline": "node scripts/windows-baseline-smoke.mjs",
     "verify:mixed-load": "node scripts/mixed-load-smoke.mjs",
@@ -142,11 +144,20 @@
     "verify:command-center-ui": "node scripts/command-center-ui-smoke.mjs",
     "verify:accessibility": "node scripts/accessibility-verify.mjs",
     "verify:terminal": "node scripts/terminal-verify.mjs",
-    "prepackage:dir": "npm run build:renderer && npm run build:native-helper",
+    "verify:mcp-contract": "node scripts/mcp-contract-smoke.mjs",
+    "verify:mcp-security": "node scripts/mcp-security-smoke.mjs",
+    "verify:mcp-context": "node scripts/mcp-context-smoke.mjs",
+    "verify:mcp-analysis": "node scripts/mcp-analysis-smoke.mjs",
+    "verify:mcp-operations": "node scripts/mcp-operations-smoke.mjs",
+    "verify:mcp-clients": "node scripts/mcp-clients-smoke.mjs",
+    "verify:mcp-performance": "node scripts/mcp-performance-smoke.mjs",
+    "verify:packaged-mcp": "node scripts/packaged-mcp-smoke.mjs",
+    "acceptance:mcp-inspector": "node scripts/mcp-inspector-smoke.mjs",
+    "prepackage:dir": "npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
     "package:dir": "electron-builder --dir",
-    "prepackage:win": "npm run build:renderer && npm run build:native-helper",
+    "prepackage:win": "npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
     "package:win": "electron-builder --win portable",
-    "prepackage:installer": "npm run build:renderer && npm run build:native-helper",
+    "prepackage:installer": "npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
     "package:installer": "electron-builder --win nsis"
   },
   "engines": {
@@ -175,6 +186,9 @@
     "files": [
       "electron-main.mjs",
       "electron-preload.cjs",
+      "mcp-bridge-service.mjs",
+      "mcp-client-config.mjs",
+      "mcp/**/*",
       "terminal-service.mjs",
       "server.mjs",
       "native/bin/**/*",
@@ -188,6 +202,10 @@
       {
         "from": "native/bin/explore-better-fs.exe",
         "to": "native/explore-better-fs.exe"
+      },
+      {
+        "from": "native/bin/ExploreBetterMcp.exe",
+        "to": "native/ExploreBetterMcp.exe"
       }
     ],
     "asarUnpack": [
@@ -218,11 +236,13 @@
     }
   },
   "dependencies": {
+    "@iarna/toml": "2.2.5",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/addon-search": "0.16.0",
     "@xterm/addon-webgl": "0.19.0",
     "@xterm/xterm": "6.0.0",
     "electron-updater": "^6.8.9",
+    "jsonc-parser": "3.3.1",
     "node-pty": "1.1.0",
     "yauzl": "^3.4.0"
   }

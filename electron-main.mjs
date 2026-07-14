@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, MessageChannelMain, nativeImage, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, MessageChannelMain, nativeImage, shell, Tray } from "electron";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -10,6 +10,8 @@ import {
   runTerminalBroker,
   terminalBrokerManifestFromArgv
 } from "./terminal-service.mjs";
+import { createMcpBridgeService } from "./mcp-bridge-service.mjs";
+import { createMcpClientConfigurator } from "./mcp-client-config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const terminalBrokerManifest = terminalBrokerManifestFromArgv();
@@ -18,9 +20,23 @@ const host = process.env.HOST || "127.0.0.1";
 let port = Number(process.env.PORT || 0);
 const desktopInstanceToken =
   process.env.EXPLORE_BETTER_DESKTOP_INSTANCE_TOKEN || randomBytes(24).toString("base64url");
+const backendApiCapability =
+  process.env.EXPLORE_BETTER_API_CAPABILITY || randomBytes(32).toString("base64url");
 process.env.HOST = host;
 if (port > 0) process.env.PORT = String(port);
 process.env.EXPLORE_BETTER_DESKTOP_INSTANCE_TOKEN = desktopInstanceToken;
+process.env.EXPLORE_BETTER_API_CAPABILITY = backendApiCapability;
+process.env.EXPLORE_BETTER_REQUIRE_API_CAPABILITY = "1";
+if (app.isPackaged && !process.env.EXPLORE_BETTER_FS_HELPER) {
+  const packagedFilesystemHelper = path.join(
+    process.resourcesPath,
+    "native",
+    process.platform === "win32" ? "explore-better-fs.exe" : "explore-better-fs"
+  );
+  if (existsSync(packagedFilesystemHelper)) {
+    process.env.EXPLORE_BETTER_FS_HELPER = packagedFilesystemHelper;
+  }
+}
 if (app.isPackaged && !process.env.EXPLORE_BETTER_WORKSPACE_ROOT) {
   process.env.EXPLORE_BETTER_WORKSPACE_ROOT = app.getPath("desktop");
   process.env.EXPLORE_BETTER_WORKSPACE_LABEL = "Desktop";
@@ -41,6 +57,7 @@ if (userDataDir) {
 let mainWindow = null;
 let serverProcess = null;
 let embeddedServer = null;
+let embeddedServerModule = null;
 let autoUpdater = null;
 let autoUpdatesConfigured = false;
 let autoUpdateChecking = false;
@@ -57,6 +74,20 @@ const smokeNativeHelperMode = process.argv.includes("--smoke-native-helper");
 const smokeTerminalMode = process.argv.includes("--smoke-terminal");
 const smokeTerminalSecurityMode = process.argv.includes("--smoke-terminal-security");
 const noUpdatesMode = process.argv.includes("--no-updates");
+const aiHostMode = process.argv.includes("--ai-host");
+let mcpBridgeService = null;
+let mcpTray = null;
+let mcpHeadlessExitTimer = null;
+let mcpRendererContext = {
+  live: false,
+  activePane: "left",
+  paneLayout: "vertical",
+  panes: { left: { activeTabId: "", path: "", tabs: [] }, right: { activeTabId: "", path: "", tabs: [] } },
+  selection: [],
+  focusedPath: "",
+  contextRevision: 0
+};
+const mcpUiRequests = new Map();
 const disableGpuMode =
   smokeMode ||
   terminalBrokerMode ||
@@ -110,6 +141,14 @@ const terminalService = terminalBrokerMode
         userDataPath: app.getPath("userData"),
         debug: false
       }
+    });
+const mcpClientConfigurator = terminalBrokerMode
+  ? null
+  : createMcpClientConfigurator({
+      packaged: app.isPackaged,
+      executablePath: process.execPath,
+      appPath: app.getAppPath(),
+      resourcesPath: process.resourcesPath
     });
 
 async function ensureDesktopPort() {
@@ -336,7 +375,9 @@ function startNativeFileDrag(sender, paths) {
 
 function serverIsReady(timeoutMs = backendHealthTimeoutMs) {
   return new Promise((resolve) => {
-    const request = http.get(`${baseUrl}/api/desktop/health`, (response) => {
+    const request = http.get(`${baseUrl}/api/desktop/health`, {
+      headers: { "x-explore-better-capability": backendApiCapability }
+    }, (response) => {
       let body = "";
       response.on("data", (chunk) => {
         body = `${body}${chunk.toString()}`.slice(0, 8192);
@@ -374,6 +415,170 @@ async function backendStatus() {
     lastEvent: backendLastEvent
   };
 }
+
+function rendererIsTrusted(event) {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents);
+}
+
+function normalizeMcpRendererContext(input = {}) {
+  const panes = {};
+  for (const paneId of ["left", "right"]) {
+    const pane = input.panes?.[paneId] || {};
+    panes[paneId] = {
+      activeTabId: String(pane.activeTabId || "").slice(0, 100),
+      path: String(pane.path || "").slice(0, 32768),
+      tabs: (Array.isArray(pane.tabs) ? pane.tabs : []).slice(0, 100).map((tab) => ({
+        id: String(tab?.id || "").slice(0, 100),
+        path: String(tab?.path || "").slice(0, 32768),
+        title: String(tab?.title || "").slice(0, 260)
+      }))
+    };
+  }
+  return {
+    live: true,
+    activePane: input.activePane === "right" ? "right" : "left",
+    paneLayout: ["vertical", "horizontal", "single", "single-left", "single-right"].includes(input.paneLayout)
+      ? input.paneLayout
+      : "vertical",
+    panes,
+    selection: (Array.isArray(input.selection) ? input.selection : []).slice(0, 100).map((item) => String(item).slice(0, 32768)),
+    focusedPath: String(input.focusedPath || "").slice(0, 32768),
+    contextRevision: Math.max(mcpRendererContext.contextRevision + 1, Number(input.contextRevision || 0))
+  };
+}
+
+function dispatchMcpUiAction(action) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      if (!mainWindow || mainWindow.isDestroyed()) await showLister();
+      if (!mainWindow || mainWindow.isDestroyed()) throw new Error("Explore Better window could not be opened.");
+      const requestId = randomBytes(16).toString("hex");
+      const timeout = setTimeout(() => {
+        mcpUiRequests.delete(requestId);
+        const error = new Error("The Explore Better renderer did not acknowledge the AI action.");
+        error.code = "UI_UNAVAILABLE";
+        reject(error);
+      }, 10_000);
+      mcpUiRequests.set(requestId, { resolve, reject, timeout });
+      mainWindow.webContents.send("explore-better:mcp-ui-action", { requestId, action });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function scheduleMcpHeadlessExit(clientCount = mcpBridgeService?.status().clients || 0) {
+  clearTimeout(mcpHeadlessExitTimer);
+  mcpHeadlessExitTimer = null;
+  if (!aiHostMode || clientCount > 0 || mainWindow) return;
+  mcpHeadlessExitTimer = setTimeout(() => app.quit(), 30_000);
+  mcpHeadlessExitTimer.unref?.();
+}
+
+function ensureMcpTray() {
+  const clients = mcpBridgeService?.status().clients || 0;
+  if (mcpTray || !(aiHostMode || (clients > 0 && !mainWindow))) return;
+  const iconPath = existsSync(path.join(__dirname, "build", "icon.ico"))
+    ? path.join(__dirname, "build", "icon.ico")
+    : dragIconPath;
+  mcpTray = new Tray(nativeImage.createFromPath(iconPath));
+  mcpTray.setToolTip("Explore Better AI Bridge");
+  mcpTray.setContextMenu(Menu.buildFromTemplate([
+    { label: "Open Explore Better", click: () => showLister().catch(console.error) },
+    { type: "separator" },
+    { label: "Quit AI Bridge", click: () => app.quit() }
+  ]));
+  mcpTray.on("double-click", () => showLister().catch(console.error));
+}
+
+function handleMcpConnectionCount(count = 0) {
+  if (count > 0 && !mainWindow) ensureMcpTray();
+  if (!aiHostMode && count === 0 && !mainWindow) {
+    app.quit();
+    return;
+  }
+  scheduleMcpHeadlessExit(count);
+}
+
+async function ensureMcpBackendModule() {
+  if (!embeddedServerModule) embeddedServerModule = await import("./server.mjs");
+  return embeddedServerModule;
+}
+
+async function ensureMcpBridge() {
+  if (mcpBridgeService?.status().running) return mcpBridgeService.status();
+  const backend = await ensureMcpBackendModule();
+  mcpBridgeService = createMcpBridgeService({
+    backend,
+    appVersion: app.getVersion(),
+    executablePath: process.execPath,
+    appPath: app.getAppPath(),
+    getContext: () => mcpRendererContext,
+    dispatchUiAction: dispatchMcpUiAction,
+    onConnectionCountChanged: handleMcpConnectionCount
+  });
+  const bridgeStatus = await mcpBridgeService.start();
+  ensureMcpTray();
+  scheduleMcpHeadlessExit(bridgeStatus.clients);
+  return bridgeStatus;
+}
+
+ipcMain.on("explore-better:mcp-context", (event, context) => {
+  if (!rendererIsTrusted(event)) return;
+  mcpRendererContext = normalizeMcpRendererContext(context);
+});
+
+ipcMain.on("explore-better:mcp-ui-action-result", (event, response) => {
+  if (!rendererIsTrusted(event)) return;
+  const pending = mcpUiRequests.get(String(response?.requestId || ""));
+  if (!pending) return;
+  mcpUiRequests.delete(response.requestId);
+  clearTimeout(pending.timeout);
+  if (response.error) pending.reject(Object.assign(new Error(String(response.error.message || response.error)), { code: response.error.code }));
+  else pending.resolve(response.result || { contextRevision: mcpRendererContext.contextRevision });
+});
+
+ipcMain.handle("explore-better:mcp-status", async (event) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted AI Bridge status request.");
+  const backend = await ensureMcpBackendModule();
+  return {
+    bridge: await ensureMcpBridge(),
+    context: mcpRendererContext,
+    configuration: await backend.getMcpBridgeConfiguration(),
+    contract: await backend.getMcpContract(),
+    deployment: await mcpClientConfigurator.status()
+  };
+});
+
+ipcMain.handle("explore-better:mcp-configure", async (event, patch) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted AI Bridge configuration request.");
+  return (await ensureMcpBackendModule()).configureMcpBridge(patch || {});
+});
+
+ipcMain.handle("explore-better:mcp-profile-upsert", async (event, profile) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted AI Bridge profile request.");
+  return (await ensureMcpBackendModule()).upsertMcpProfile(profile || {});
+});
+
+ipcMain.handle("explore-better:mcp-profile-revoke", async (event, profileId) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted AI Bridge revocation request.");
+  return (await ensureMcpBackendModule()).revokeMcpProfile(String(profileId || ""));
+});
+
+ipcMain.handle("explore-better:mcp-audit", async (event, limit) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted AI Bridge audit request.");
+  return (await ensureMcpBackendModule()).listMcpAudit(Number(limit || 200));
+});
+
+ipcMain.handle("explore-better:mcp-client-install", async (event, client, profileId) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted AI Bridge client setup request.");
+  return mcpClientConfigurator.install(String(client || ""), String(profileId || ""));
+});
+
+ipcMain.handle("explore-better:mcp-client-remove", async (event, client) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted AI Bridge client removal request.");
+  return mcpClientConfigurator.remove(String(client || ""));
+});
 
 ipcMain.on("explore-better:start-file-drag", (event, paths) => {
   try {
@@ -468,6 +673,7 @@ async function ensureServer() {
   rememberBackendEvent("starting", "Starting embedded backend server.", { kind: "embedded" });
   try {
     const serverModule = await import("./server.mjs");
+    embeddedServerModule = serverModule;
     embeddedServer = await serverModule.startServer();
     if (await waitForServer()) {
       rememberBackendEvent("ready", "Embedded backend server is ready.", { kind: "embedded" });
@@ -631,7 +837,10 @@ async function runNativeHelperSmoke() {
   const targetPath = process.env.EXPLORE_BETTER_NATIVE_SMOKE_PATH || __dirname;
   const response = await fetch(`${baseUrl}/api/size-analysis`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-explore-better-capability": backendApiCapability
+    },
     body: JSON.stringify({ path: targetPath, maxEntries: 10000, followLinks: false })
   });
   const report = await response.json();
@@ -706,6 +915,7 @@ async function exitSmoke(code) {
 
 async function showLister(targetPath = null, shellMode = null) {
   await ensureServer();
+  await ensureMcpBridge();
   startBackendMonitor();
   const targetUrl = listerUrl(targetPath, shellMode);
   if (mainWindow) {
@@ -778,6 +988,8 @@ async function showLister(targetPath = null, shellMode = null) {
   mainWindow.on("closed", () => {
     terminalService?.disposeWebContents(rendererWebContentsId);
     mainWindow = null;
+    mcpRendererContext = { ...mcpRendererContext, live: false, selection: [], focusedPath: "" };
+    handleMcpConnectionCount(mcpBridgeService?.status().clients || 0);
   });
   await mainWindow.loadURL(targetUrl);
 }
@@ -977,6 +1189,10 @@ if (terminalBrokerMode) {
 } else {
   app.setAppUserModelId("ExploreBetter.LocalFileManager");
   app.on("second-instance", (_event, argv) => {
+    if (argv.includes("--ai-host")) {
+      ensureMcpBridge().catch(console.error);
+      return;
+    }
     showLister(shellTargetFromArgv(argv), shellModeFromArgv(argv)).catch((error) => {
       console.error(error);
     });
@@ -990,7 +1206,7 @@ if (terminalBrokerMode) {
           if (smokeWindowMode) {
             await showLister(smokeShellTarget, smokeShellMode);
             const hasDesktopBridge = await mainWindow.webContents.executeJavaScript(
-              "Boolean(window.exploreBetterDesktop && window.exploreBetterDesktop.getPathForFile && window.exploreBetterDesktop.startFileDrag && window.exploreBetterDesktop.updateStatus && window.exploreBetterDesktop.checkForUpdates && window.exploreBetterDesktop.backendStatus && window.exploreBetterDesktop.appInfo && window.exploreBetterDesktop.restartBackend && window.exploreBetterDesktop.terminal?.capabilities && window.exploreBetterDesktop.terminal?.create && window.exploreBetterDesktop.terminal?.write && window.exploreBetterDesktop.terminal?.resize && window.exploreBetterDesktop.terminal?.restart && window.exploreBetterDesktop.terminal?.dispose)"
+              "Boolean(window.exploreBetterDesktop && window.exploreBetterDesktop.getPathForFile && window.exploreBetterDesktop.startFileDrag && window.exploreBetterDesktop.updateStatus && window.exploreBetterDesktop.checkForUpdates && window.exploreBetterDesktop.backendStatus && window.exploreBetterDesktop.appInfo && window.exploreBetterDesktop.restartBackend && window.exploreBetterDesktop.terminal?.capabilities && window.exploreBetterDesktop.terminal?.create && window.exploreBetterDesktop.terminal?.write && window.exploreBetterDesktop.terminal?.resize && window.exploreBetterDesktop.terminal?.restart && window.exploreBetterDesktop.terminal?.dispose && window.exploreBetterDesktop.aiBridge?.status && window.exploreBetterDesktop.aiBridge?.configure && window.exploreBetterDesktop.aiBridge?.upsertProfile && window.exploreBetterDesktop.aiBridge?.revokeProfile && window.exploreBetterDesktop.aiBridge?.installClient && window.exploreBetterDesktop.aiBridge?.removeClient)"
             );
             const updateStatus = await mainWindow.webContents.executeJavaScript("window.exploreBetterDesktop.updateStatus()");
             const backendStatus = await mainWindow.webContents.executeJavaScript("window.exploreBetterDesktop.backendStatus()");
@@ -1046,10 +1262,19 @@ if (terminalBrokerMode) {
         });
       return;
     }
-    showLister(shellTargetFromArgv(), shellModeFromArgv()).catch((error) => {
-      console.error(error);
-      app.quit();
-    });
+    if (aiHostMode) {
+      ensureServer()
+        .then(() => ensureMcpBridge())
+        .catch((error) => {
+          console.error(error);
+          app.quit();
+        });
+    } else {
+      showLister(shellTargetFromArgv(), shellModeFromArgv()).catch((error) => {
+        console.error(error);
+        app.quit();
+      });
+    }
   });
   app.on("activate", () => {
     if (!mainWindow) {
@@ -1057,11 +1282,22 @@ if (terminalBrokerMode) {
     }
   });
   app.on("window-all-closed", () => {
-    if (process.platform !== "darwin") {
+    if (process.platform !== "darwin" && !aiHostMode && !(mcpBridgeService?.status().clients > 0)) {
       app.quit();
+    } else {
+      scheduleMcpHeadlessExit();
     }
   });
   app.on("will-quit", () => {
+    clearTimeout(mcpHeadlessExitTimer);
+    for (const pending of mcpUiRequests.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Explore Better is closing."));
+    }
+    mcpUiRequests.clear();
+    mcpTray?.destroy();
+    mcpTray = null;
+    mcpBridgeService?.stop().catch((error) => console.error(error));
     terminalService?.disposeAll();
     stopBackendMonitor();
     stopServer().catch((error) => console.error(error));
