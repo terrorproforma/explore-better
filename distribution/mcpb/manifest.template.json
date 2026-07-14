@@ -1,0 +1,80 @@
+{
+  "manifest_version": "0.3",
+  "name": "explore-better",
+  "display_name": "Explore Better",
+  "version": "0.0.0",
+  "description": "A visual, folder-scoped Windows file manager bridge for safe AI discovery, analysis, and recoverable operations.",
+  "long_description": "Explore Better gives compatible local AI clients structured access to the same Windows folders, tabs, selections, indexes, disk analysis, comparisons, and recoverable operation system visible in the desktop app. Access is local, read-only by default, and limited by a separately revocable Explore Better profile.",
+  "author": {
+    "name": "Explore Better",
+    "url": "https://terrorproforma.github.io/explore-better/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/terrorproforma/explore-better.git"
+  },
+  "homepage": "https://terrorproforma.github.io/explore-better/",
+  "documentation": "https://terrorproforma.github.io/explore-better/integrations/claude/",
+  "support": "https://github.com/terrorproforma/explore-better/issues",
+  "icon": "assets/icon.png",
+  "screenshots": [
+    "assets/ai-bridge.png",
+    "assets/disk-map.png"
+  ],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/ExploreBetterMcp.exe",
+    "mcp_config": {
+      "command": "${__dirname}/server/ExploreBetterMcp",
+      "args": [
+        "--profile",
+        "${user_config.profile_id}",
+        "--app",
+        "${user_config.app_path}"
+      ],
+      "env": {},
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/server/ExploreBetterMcp.exe"
+        }
+      }
+    }
+  },
+  "tools": [],
+  "tools_generated": true,
+  "prompts": [],
+  "keywords": [
+    "windows",
+    "file-manager",
+    "filesystem",
+    "disk-analysis",
+    "duplicates",
+    "safe-operations",
+    "local-first",
+    "mcp"
+  ],
+  "license": "MIT",
+  "privacy_policies": [
+    "https://terrorproforma.github.io/explore-better/privacy/"
+  ],
+  "compatibility": {
+    "platforms": [
+      "win32"
+    ]
+  },
+  "user_config": {
+    "profile_id": {
+      "type": "string",
+      "title": "Explore Better profile ID",
+      "description": "Create a revocable profile in Explore Better Preferences > AI Bridge, then copy the value after --profile from the generic configuration snippet.",
+      "required": true
+    },
+    "app_path": {
+      "type": "string",
+      "title": "Explore Better application path",
+      "description": "Optional path to Explore Better.exe. Leave blank for the standard per-user installation.",
+      "required": false,
+      "default": ""
+    }
+  }
+}

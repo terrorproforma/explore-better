@@ -163,9 +163,46 @@ func readManifest(file string) (bridgeManifest, error) {
 	return manifest, nil
 }
 
+func existingExecutable(candidate string) string {
+	if candidate == "" {
+		return ""
+	}
+	info, err := os.Stat(candidate)
+	if err == nil && !info.IsDir() {
+		return candidate
+	}
+	return ""
+}
+
+func discoverInstalledApp() string {
+	if candidate := existingExecutable(os.Getenv("EXPLORE_BETTER_APP")); candidate != "" {
+		return candidate
+	}
+	local := os.Getenv("LOCALAPPDATA")
+	programFiles := os.Getenv("ProgramFiles")
+	programFilesX86 := os.Getenv("ProgramFiles(x86)")
+	candidates := []string{}
+	appendCandidate := func(root string, parts ...string) {
+		if root != "" {
+			candidates = append(candidates, filepath.Join(append([]string{root}, parts...)...))
+		}
+	}
+	appendCandidate(local, "Programs", "Explore Better", "Explore Better.exe")
+	appendCandidate(local, "Programs", "explore-better", "Explore Better.exe")
+	appendCandidate(local, "Explore Better", "Explore Better.exe")
+	appendCandidate(programFiles, "Explore Better", "Explore Better.exe")
+	appendCandidate(programFilesX86, "Explore Better", "Explore Better.exe")
+	for _, candidate := range candidates {
+		if resolved := existingExecutable(candidate); resolved != "" {
+			return resolved
+		}
+	}
+	return ""
+}
+
 func launchHost(appPath, appDir string) error {
 	if appPath == "" {
-		return errors.New("Explore Better is closed and no application path was supplied; reinstall this MCP profile from AI Bridge preferences")
+		return errors.New("Explore Better is closed and its installed application could not be found; install Explore Better or set the optional application path in this MCP connection")
 	}
 	args := []string{"--ai-host"}
 	if appDir != "" {
@@ -191,6 +228,9 @@ func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, cl
 
 	manifest, err := readManifest(b.manifest)
 	if err != nil {
+		if b.appPath == "" {
+			b.appPath = discoverInstalledApp()
+		}
 		if launchErr := launchHost(b.appPath, b.appDir); launchErr != nil {
 			return launchErr
 		}
@@ -207,7 +247,10 @@ func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, cl
 		return fmt.Errorf("read AI Bridge manifest: %w", err)
 	}
 	if b.appPath == "" {
-		b.appPath = manifest.ExecutablePath
+		b.appPath = existingExecutable(manifest.ExecutablePath)
+		if b.appPath == "" {
+			b.appPath = discoverInstalledApp()
+		}
 	}
 
 	dial := func(current bridgeManifest) (net.Conn, error) {
@@ -503,6 +546,7 @@ func main() {
 	appDir := flag.String("app-dir", "", "Development Electron application directory")
 	manifestPath := flag.String("manifest", defaultManifestPath(), "AI Bridge manifest path")
 	selfTest := flag.Bool("self-test-contract", false, "validate the embedded MCP contract")
+	discoverApp := flag.Bool("discover-app", false, "print the discovered Explore Better executable path")
 	flag.Parse()
 
 	activeContract, contractData, err := loadContract()
@@ -513,6 +557,10 @@ func main() {
 		hash := sha256.Sum256(contractData)
 		fmt.Printf("{\"ok\":true,\"bridgeProtocolVersion\":%d,\"mcpProtocolVersion\":%q,\"tools\":%d,\"resources\":%d,\"prompts\":%d,\"sha256\":%q}\n",
 			activeContract.BridgeProtocolVersion, activeContract.MCPProtocolVersion, len(activeContract.Tools), len(activeContract.Resources), len(activeContract.Prompts), hex.EncodeToString(hash[:]))
+		return
+	}
+	if *discoverApp {
+		fmt.Println(discoverInstalledApp())
 		return
 	}
 	if *profile == "" {

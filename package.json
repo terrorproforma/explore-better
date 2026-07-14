@@ -2,7 +2,7 @@
   "name": "explore-better",
   "version": "0.2.0",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "main": "electron-main.mjs",
   "author": "Explore Better",
@@ -30,6 +30,8 @@
     "build:icon": "node scripts/generate-icon.mjs",
     "build:native-helper": "node scripts/build-native-helper.mjs",
     "build:mcp-server": "node scripts/build-mcp-server.mjs",
+    "build:mcpb": "npm run build:mcp-server && node scripts/build-mcpb.mjs",
+    "build:site-pages": "node scripts/build-site-discovery-pages.mjs",
     "build:app": "node scripts/build-app.mjs",
     "build:terminal": "node scripts/build-terminal.mjs",
     "build:renderer": "npm run build:app && npm run build:terminal",
@@ -152,6 +154,7 @@
     "verify:mcp-analysis": "node scripts/mcp-analysis-smoke.mjs",
     "verify:mcp-operations": "node scripts/mcp-operations-smoke.mjs",
     "verify:mcp-clients": "node scripts/mcp-clients-smoke.mjs",
+    "verify:mcpb": "node scripts/mcpb-smoke.mjs",
     "verify:mcp-performance": "node scripts/mcp-performance-smoke.mjs",
     "verify:mcp-value": "node scripts/mcp-value-benchmark.mjs",
     "verify:packaged-mcp": "node scripts/packaged-mcp-smoke.mjs",
@@ -171,7 +174,8 @@
     "electron-builder": "^26.15.3",
     "esbuild": "0.28.1",
     "lucide-static": "^1.24.0",
-    "playwright-core": "^1.61.1"
+    "playwright-core": "^1.61.1",
+    "yazl": "3.3.1"
   },
   "build": {
     "appId": "io.github.terrorproforma.explorebetter",
@@ -199,6 +203,7 @@
       "README.md",
       "USER_MANUAL.md",
       "RELEASE_NOTES.md",
+      "LICENSE",
       "package.json"
     ],
     "extraResources": [

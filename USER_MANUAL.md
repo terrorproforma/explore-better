@@ -266,12 +266,14 @@ The AI Bridge is disabled until you configure it. It uses local stdio between th
 4. Add one authorized folder per line. A profile with no folders cannot read anything.
 5. Keep **Read only** unless that client genuinely needs to prepare and apply file operations.
 6. Select only the tools that client should receive, then choose **Save Profile**.
-7. Choose **Set up Codex**, **Set up Claude**, or **Set up VS Code**. For another client, use **Copy generic config**.
+7. Choose **Set up Codex**, **Set up Claude**, **Set up Cursor**, or **Set up VS Code**. For another client, use **Copy generic config**.
 8. Restart or reload the AI client so it discovers the new stdio server.
 
 Client setup deploys the bundled sidecar to `%LOCALAPPDATA%\ExploreBetter\MCP\bin\ExploreBetterMcp.exe`. Before changing a client configuration, Explore Better saves its exact original bytes under `%LOCALAPPDATA%\ExploreBetter\MCP\backups`. The setup action modifies only the `explore-better` MCP entry and preserves unrelated servers. The current public preview executables are not yet Authenticode-signed with a publicly trusted certificate.
 
-Codex, the ChatGPT desktop app, and the Codex IDE extension share `~/.codex/config.toml`. Claude Desktop uses `%APPDATA%\Claude\claude_desktop_config.json`. VS Code uses the current profile's user `mcp.json`. The deployment status in Preferences shows the sidecar path, SHA-256 value, and whether each client entry is installed.
+Codex and compatible OpenAI local clients use `~/.codex/config.toml`. Claude Desktop uses `%APPDATA%\Claude\claude_desktop_config.json`. Cursor uses `~/.cursor/mcp.json`. VS Code uses the current profile's user `mcp.json`. The deployment status in Preferences shows the sidecar path, SHA-256 value, and whether each client entry is installed.
+
+The GitHub release also contains a standalone Windows `.mcpb` bundle for compatible hosts. It includes the native sidecar, tool and prompt manifest, documentation, screenshots, license, and SHA-256 metadata. The official MCP Registry name is `io.github.terrorproforma/explore-better`. An explicit AI Bridge profile ID is still required, and the sidecar automatically discovers a normal per-user Explore Better installation.
 
 ### Profiles And Effective Access
 

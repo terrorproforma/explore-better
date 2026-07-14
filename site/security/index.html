@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="How Explore Better protects local file access, MCP profiles, previewed writes, Electron IPC, terminal elevation, and recovery data on Windows." />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1" />
+    <meta name="theme-color" content="#111715" />
+    <meta property="og:title" content="Explore Better security model - Explore Better" />
+    <meta property="og:description" content="How Explore Better protects local file access, MCP profiles, previewed writes, Electron IPC, terminal elevation, and recovery data on Windows." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://terrorproforma.github.io/explore-better/security/" />
+    <meta property="og:image" content="https://terrorproforma.github.io/explore-better/assets/workspace.png" />
+    <title>Explore Better security model - Explore Better</title>
+    <link rel="canonical" href="https://terrorproforma.github.io/explore-better/security/" />
+    <link rel="alternate" type="text/plain" href="https://terrorproforma.github.io/explore-better/llms.txt" title="Explore Better LLM index" />
+    <link rel="icon" type="image/png" href="../assets/app-icon.png" />
+    <link rel="stylesheet" href="../styles.css" />
+    <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://terrorproforma.github.io/explore-better/#software","name":"Explore Better","operatingSystem":"Windows 11 x64","applicationCategory":"UtilitiesApplication"},{"@type":"WebPage","name":"Explore Better security model","description":"How Explore Better protects local file access, MCP profiles, previewed writes, Electron IPC, terminal elevation, and recovery data on Windows.","url":"https://terrorproforma.github.io/explore-better/security/","isPartOf":{"@type":"WebSite","name":"Explore Better","url":"https://terrorproforma.github.io/explore-better/"},"about":{"@id":"https://terrorproforma.github.io/explore-better/#software"}}]}</script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header detail-header">
+      <a class="brand" href="../" aria-label="Explore Better home"><img src="../assets/app-icon.png" alt="" width="34" height="34" /><span>Explore Better</span></a>
+      <nav class="site-nav" aria-label="Primary navigation"><a href="../ai-file-manager-windows/">Human + AI</a><a href="../mcp-file-manager/">MCP server</a><a href="../integrations/">Integrations</a><a href="../mcp/">Proof</a></nav>
+      <a class="header-download" href="../#download"><img src="../assets/icons/download.svg" alt="" width="18" height="18" /><span>Download</span></a>
+    </header>
+    <main class="detail-main" id="main">
+      <section class="detail-hero"><div class="page-shell"><p class="eyebrow light">Security / local-first boundaries</p><h1>Explore Better security model</h1><p class="detail-hero__lede">Powerful local tools should expose less authority than the user who launched them, not more.</p><div class="hero__actions"><a class="button button--primary" href="../#download">Download for Windows</a><a class="button button--ghost" href="../mcp/">See measured proof</a></div></div></section>
+      <section class="detail-section"><div class="page-shell"><p class="eyebrow">Explore Better</p><h2>Separate boundaries for separate jobs</h2><p class="detail-prose">The renderer, local backend, filesystem helper, terminal service, elevated terminal broker, and MCP sidecar each receive only the interface needed for their role.</p><div class="detail-grid"><article><h3>Desktop boundary</h3><p>The Electron renderer uses a narrow preload bridge; navigation and external links are restricted, and the HTTP backend is loopback-only with a launch capability.</p></article><article><h3>MCP boundary</h3><p>Local stdio forwards typed requests over an authenticated, same-user named pipe keyed to a revocable profile.</p></article><article><h3>Elevation boundary</h3><p>The main app stays non-elevated. A UAC-approved headless broker owns exactly one administrator ConPTY session when explicitly requested.</p></article></div></div></section><section class="detail-section detail-section--dark"><div class="page-shell"><p class="eyebrow light">Explore Better</p><h2>Writes are transactions</h2><p class="detail-prose">Copies, moves, overwrites, and AI-planned mutations use staging, backups, durable journal phases, source-removal tracking, cancellation, recovery, and undo.</p><div class="detail-grid"><article><h3>Plan binding</h3><p>Apply tokens bind the profile, session, operation, normalized paths, conflict policy, plan digest, and filesystem signatures.</p></article><article><h3>Path controls</h3><p>Canonicalization and reparse-point resolution block root escape, device paths, alternate streams, app state, journals, and drive-root deletion.</p></article><article><h3>Local audit</h3><p>Thirty-day rotating records capture policy and operation metadata without storing file contents or capability tokens.</p></article></div></div></section>
+    </main>
+    <footer class="site-footer"><div class="page-shell footer-layout"><a class="brand brand--footer" href="../"><img src="../assets/app-icon.png" alt="" width="32" height="32" /><span>Explore Better</span></a><p>The Windows file manager built for humans and AI.</p><div class="footer-links"><a href="../security/">Security</a><a href="../privacy/">Privacy</a><a href="../terms/">Terms</a><a href="https://github.com/terrorproforma/explore-better">Source</a></div><small>MIT licensed</small></div></footer>
+  </body>
+</html>

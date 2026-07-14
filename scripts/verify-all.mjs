@@ -51,6 +51,7 @@ const coreSuites = [
   ["mcp-analysis", "scripts/mcp-analysis-smoke.mjs", 180000],
   ["mcp-operations", "scripts/mcp-operations-smoke.mjs", 180000],
   ["mcp-clients", "scripts/mcp-clients-smoke.mjs", 120000],
+  ["mcpb", "scripts/mcpb-smoke.mjs", 120000],
   ["mcp-performance", "scripts/mcp-performance-smoke.mjs", 180000],
   ["mcp-value", "scripts/mcp-value-benchmark.mjs", 180000],
   ["packaged-mcp", "scripts/packaged-mcp-smoke.mjs", 60000],

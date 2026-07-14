@@ -904,7 +904,7 @@
           </div>
           <div class="ai-bridge-fields">
             <label><span class="field-label">Client Name</span><input id="preference-ai-name" maxlength="80" /></label>
-            <label><span class="field-label">Client</span><select id="preference-ai-client"><option value="codex">Codex / ChatGPT</option><option value="claude">Claude Desktop</option><option value="vscode">VS Code</option><option value="generic">Generic stdio</option></select></label>
+            <label><span class="field-label">Client</span><select id="preference-ai-client"><option value="codex">Codex / ChatGPT</option><option value="claude">Claude Desktop</option><option value="cursor">Cursor</option><option value="vscode">VS Code</option><option value="generic">Generic stdio</option></select></label>
             <label><span class="field-label">Access</span><select id="preference-ai-access"><option value="read-only">Read only</option><option value="read-write">Preview + apply writes</option></select></label>
           </div>
           <label><span class="field-label">Authorized Folders</span><textarea id="preference-ai-roots" rows="3" spellcheck="false"></textarea></label>
@@ -918,6 +918,7 @@
             <button type="button" data-ai-bridge-action="revoke-profile">Revoke</button>
             <button type="button" data-ai-bridge-install="codex">Set up Codex</button>
             <button type="button" data-ai-bridge-install="claude">Set up Claude</button>
+            <button type="button" data-ai-bridge-install="cursor">Set up Cursor</button>
             <button type="button" data-ai-bridge-install="vscode">Set up VS Code</button>
           </div>
           <div class="ai-bridge-client-status" id="preference-ai-client-status"></div>

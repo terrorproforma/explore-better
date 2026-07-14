@@ -12,6 +12,10 @@
 - Added automated crawler, structured-data, benchmark-sync, responsive-layout, and AI-discovery verification to Windows CI.
 - Canonicalized authorized, client, and internal roots before policy comparison so Windows path aliases remain usable without weakening junction-escape protection.
 - Strengthened pagination evidence to verify two bounded, non-overlapping pages and stabilized the warm bridge p95 gate with explicit warm-up and 100 measured calls.
+- Repositioned the website around the human-and-AI file workspace, with focused category, MCP, client integration, security, privacy, terms, and practical workflow pages.
+- Published the measured comparison ratios transparently: 54.7x lower median filename-search latency, 6.2x disk-analysis latency, and 4.5x duplicate-search latency versus equivalent fresh PowerShell processes on the deterministic fixture.
+- Added a standalone Windows MCPB distribution, MIT license, SHA-256 metadata, installed-app discovery, and an official MCP Registry publishing workflow for `io.github.terrorproforma/explore-better`.
+- Added reversible Cursor configuration alongside Codex, Claude Desktop, and VS Code.
 
 ## v0.2.0 - 2026-07-14
 

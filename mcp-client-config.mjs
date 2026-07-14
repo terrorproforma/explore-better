@@ -57,6 +57,7 @@ export function createMcpClientConfigurator(runtime) {
   const paths = {
     codex: path.join(homeDir, ".codex", "config.toml"),
     claude: path.join(roamingRoot, "Claude", "claude_desktop_config.json"),
+    cursor: path.join(homeDir, ".cursor", "mcp.json"),
     vscode: path.join(roamingRoot, "Code", "User", "mcp.json")
   };
 
@@ -126,7 +127,7 @@ export function createMcpClientConfigurator(runtime) {
     const existing = await readOptional(file);
     const text = existing?.toString("utf8") || "{}\n";
     parseJsonc(text, client);
-    const container = client === "claude" ? "mcpServers" : "servers";
+    const container = ["claude", "cursor"].includes(client) ? "mcpServers" : "servers";
     const value = remove ? undefined : stdioDefinition(client, profileId);
     const edits = modify(text, [container, serverName], value, {
       formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" }
@@ -157,7 +158,7 @@ export function createMcpClientConfigurator(runtime) {
   }
 
   async function install(client, profileId) {
-    if (!["codex", "claude", "vscode"].includes(client)) throw new Error("Unknown MCP client adapter.");
+    if (!["codex", "claude", "cursor", "vscode"].includes(client)) throw new Error("Unknown MCP client adapter.");
     if (!profileId) throw new Error("Select an AI Bridge profile first.");
     const deployment = await deploy();
     const configuration = client === "codex" ? await editCodex(profileId) : await editJsonc(client, profileId);
@@ -165,7 +166,7 @@ export function createMcpClientConfigurator(runtime) {
   }
 
   async function remove(client) {
-    if (!["codex", "claude", "vscode"].includes(client)) throw new Error("Unknown MCP client adapter.");
+    if (!["codex", "claude", "cursor", "vscode"].includes(client)) throw new Error("Unknown MCP client adapter.");
     return client === "codex" ? editCodex("", true) : editJsonc(client, "", true);
   }
 
@@ -178,7 +179,7 @@ export function createMcpClientConfigurator(runtime) {
         return { client, file: paths[client], installed: Boolean(document.mcp_servers?.[serverName]) };
       }
       const document = parseJsonc(existing.toString("utf8"), client);
-      const container = client === "claude" ? "mcpServers" : "servers";
+      const container = ["claude", "cursor"].includes(client) ? "mcpServers" : "servers";
       return { client, file: paths[client], installed: Boolean(document[container]?.[serverName]) };
     } catch (error) {
       return { client, file: paths[client], installed: false, error: error.message };
@@ -190,7 +191,7 @@ export function createMcpClientConfigurator(runtime) {
     const deployment = await deploy().catch((error) => ({ path: stableSidecar, error: error.message, pending: false }));
     return {
       deployment,
-      clients: await Promise.all(["codex", "claude", "vscode"].map(installedStatus)),
+      clients: await Promise.all(["codex", "claude", "cursor", "vscode"].map(installedStatus)),
       generic: { command: stableSidecar, args: ["--profile", "PROFILE_ID", "--app", runtime.executablePath, ...(runtime.packaged ? [] : ["--app-dir", runtime.appPath])] }
     };
   }

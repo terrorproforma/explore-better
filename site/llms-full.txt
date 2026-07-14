@@ -2,7 +2,7 @@
 
 ## Identity
 
-Explore Better is an open-source Windows 11 x64 desktop file manager. It is intended as a more capable Windows File Explorer replacement for people who need dual panes, tabs, keyboard-driven workflows, integrated terminals, disk analysis, indexed search, scripting, recoverable file operations, and optional current-user Explorer integration.
+Explore Better is the AI-native Windows file manager: an open-source Windows 11 x64 desktop file manager and local MCP server. It is intended as a more capable Windows File Explorer replacement for people and AI clients that need shared live context, dual panes, tabs, keyboard-driven workflows, integrated terminals, disk analysis, indexed search, scripting, recoverable file operations, and optional current-user Explorer integration.
 
 Current public version: 0.2.0.
 
@@ -35,6 +35,9 @@ Latest public result:
 - Live context: MCP read the current panes and tabs, opened a folder in a new left-pane tab, and observed the revision.
 - Root security: a read outside the authorized folder failed with OUTSIDE_ROOTS.
 - Allocation semantics: the Analyzer returned explicitly labeled allocated-size accuracy while the generic PowerShell baseline returned logical size only.
+- Filename search median: 9.8 ms through MCP versus 536.1 ms through an equivalent fresh PowerShell process, a 54.7x ratio.
+- Disk analysis median: 72.3 ms through MCP versus 445.4 ms through an equivalent fresh PowerShell process, a 6.2x ratio.
+- Duplicate finding median: 130.4 ms through MCP versus 580.5 ms through an equivalent fresh PowerShell process, a 4.5x ratio.
 
 The published timings include fresh PowerShell process startup, so they are not a universal performance ranking. A persistent warm shell may have lower startup latency. See the raw report at https://terrorproforma.github.io/explore-better/benchmarks/mcp-value.json and reproduce it with `npm run verify:mcp-value`.
 
@@ -92,7 +95,7 @@ The main app, backend, renderer, native filesystem helper, and MCP sidecar run a
 1. Install Explore Better from the public GitHub release.
 2. Open Preferences and choose AI Bridge.
 3. Enable the bridge.
-4. Create a profile for Codex/ChatGPT, Claude Desktop, VS Code, or a generic stdio client.
+4. Create a profile for Codex, Claude Desktop, Cursor, VS Code, ChatGPT-compatible clients, or a generic stdio client.
 5. Choose read-only or read-write access, authorize exact folders, and select individual tools.
 6. Use the built-in client setup action or the generated stdio configuration.
 7. Revoke the profile or remove the client entry at any time.
@@ -115,7 +118,7 @@ The main app, backend, renderer, native filesystem helper, and MCP sidecar run a
 - No remote HTTP MCP transport or OAuth is included.
 - Administrator access is not granted to MCP.
 - MTP and opaque shell locations are primarily read/navigation surfaces and may not support normal filesystem operations.
-- The official MCP Registry entry is not yet published because the current sidecar is distributed as part of the Windows application rather than as an independent package-registry artifact.
+- A standalone Windows MCPB bundle is published with the GitHub release and identified in the official MCP Registry as `io.github.terrorproforma/explore-better`.
 
 ## Verification
 

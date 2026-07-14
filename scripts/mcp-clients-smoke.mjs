@@ -21,19 +21,24 @@ try {
   await fs.writeFile(configurator.paths.claude, JSON.stringify({ mcpServers: { existing: { command: "existing.exe" } } }, null, 2));
   await fs.mkdir(path.dirname(configurator.paths.vscode), { recursive: true });
   await fs.writeFile(configurator.paths.vscode, "{\n  // retained comment\n  \"servers\": { \"existing\": { \"command\": \"existing.exe\" } }\n}\n");
+  await fs.mkdir(path.dirname(configurator.paths.cursor), { recursive: true });
+  await fs.writeFile(configurator.paths.cursor, "{\n  // retained Cursor comment\n  \"mcpServers\": { \"existing\": { \"command\": \"existing.exe\" } }\n}\n");
 
-  for (const client of ["codex", "claude", "vscode"]) await configurator.install(client, "profile-123");
+  for (const client of ["codex", "claude", "cursor", "vscode"]) await configurator.install(client, "profile-123");
   const status = await configurator.status();
   assert(status.clients.every((client) => client.installed), "Not all client adapters were installed.");
   await configurator.remove("vscode");
   const vscode = await fs.readFile(configurator.paths.vscode, "utf8");
   assert(vscode.includes("retained comment") && vscode.includes("existing") && !vscode.includes("explore-better"), "VS Code removal changed unrelated configuration.");
+  await configurator.remove("cursor");
+  const cursor = await fs.readFile(configurator.paths.cursor, "utf8");
+  assert(cursor.includes("retained Cursor comment") && cursor.includes("existing") && !cursor.includes("explore-better"), "Cursor removal changed unrelated configuration.");
   const codex = await fs.readFile(configurator.paths.codex, "utf8");
   const claude = await fs.readFile(configurator.paths.claude, "utf8");
   assert(codex.includes("existing.exe") && codex.includes("explore-better"), "Codex merge lost unrelated configuration.");
   assert(claude.includes("existing.exe") && claude.includes("explore-better"), "Claude merge lost unrelated configuration.");
   assert((await fs.stat(configurator.stableSidecar)).size > 1_000_000, "Stable sidecar deployment is missing.");
-  console.log("MCP client setup smoke passed: Codex, Claude, VS Code, atomic sidecar deployment, and non-destructive removal.");
+  console.log("MCP client setup smoke passed: Codex, Claude, Cursor, VS Code, atomic sidecar deployment, and non-destructive removal.");
 } finally {
   await removeTreeEventually(temp);
 }

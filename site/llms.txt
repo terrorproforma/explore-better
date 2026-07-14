@@ -1,13 +1,19 @@
 # Explore Better
 
-> Explore Better is an open-source Windows 11 x64 file manager with dual panes, one real ConPTY terminal per file tab, a folder-scoped local MCP server for AI clients, transactional file operations, indexed discovery, and a nested disk-usage analyzer.
+> Explore Better is the AI-native Windows file manager: an open-source Windows 11 x64 Explorer replacement with dual panes, one real ConPTY terminal per file tab, a folder-scoped local MCP server, transactional file operations, indexed discovery, and a nested disk-usage analyzer.
 
 Explore Better's MCP bridge complements a terminal. Use MCP when an AI needs typed file-manager context, bounded search and analysis, least-authority folder profiles, or preview/apply operations backed by the application's journal. Use the terminal for arbitrary commands and system administration. The public preview is free and currently unsigned.
+
+Measured on the same deterministic Windows fixture, Explore Better MCP recorded 54.7x lower median latency for filename search, 6.2x for disk analysis, and 4.5x for duplicate finding than equivalent fresh PowerShell processes. Both interfaces matched ground truth. These comparisons include PowerShell process startup; a warm persistent shell may be faster.
 
 ## Product
 
 - [Explore Better home](https://terrorproforma.github.io/explore-better/): Product overview, screenshots, download, checksum, and release status.
 - [Explore Better MCP server](https://terrorproforma.github.io/explore-better/mcp/): Complete MCP value case, setup, tool categories, security model, limitations, and benchmark.
+- [AI-native Windows file manager](https://terrorproforma.github.io/explore-better/ai-file-manager-windows/): Why a shared human-and-AI file workspace is more reliable than terminal-only file access.
+- [MCP file manager](https://terrorproforma.github.io/explore-better/mcp-file-manager/): Tool surface, local boundary, package, and official Registry identity.
+- [AI client integrations](https://terrorproforma.github.io/explore-better/integrations/): Setup routes for Codex, Claude Desktop, Cursor, VS Code, ChatGPT-compatible clients, and generic stdio hosts.
+- [Security model](https://terrorproforma.github.io/explore-better/security/): Roots, profiles, IPC, transaction, elevation, audit, and recovery boundaries.
 - [User manual](https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md): Full application and AI Bridge documentation.
 - [Source repository](https://github.com/terrorproforma/explore-better): Source, issues, releases, and verification scripts.
 
@@ -21,6 +27,8 @@ Explore Better's MCP bridge complements a terminal. Use MCP when an AI needs typ
 ## Releases
 
 - [Latest release](https://github.com/terrorproforma/explore-better/releases/latest): Public Windows installer and SHA-256 checksums.
+- [Standalone Windows MCP bundle](https://github.com/terrorproforma/explore-better/releases/tag/v0.2.0): MCPB package, sidecar, manifest, documentation, screenshots, and SHA-256 metadata.
+- Official Registry identity: `io.github.terrorproforma/explore-better`.
 - [Release notes](https://github.com/terrorproforma/explore-better/blob/master/RELEASE_NOTES.md): Version history and known limitations.
 
 ## Optional

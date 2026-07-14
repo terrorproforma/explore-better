@@ -1,0 +1,73 @@
+name: Publish MCP distribution
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: native/mcpserver/go.mod
+          cache-dependency-path: native/mcpserver/go.mod
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run build:mcpb
+      - run: npm run verify:mcpb
+      - uses: actions/upload-artifact@v7
+        with:
+          name: explore-better-mcp-distribution
+          if-no-files-found: error
+          path: dist/mcp/**
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: explore-better-mcp-distribution
+          path: dist/mcp
+      - name: Upload MCP bundle to the matching GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="$(jq -r .version dist/mcp/server.json)"
+          gh release upload "v${version}" --clobber \
+            dist/mcp/ExploreBetter-MCP-*-windows-x64.mcpb \
+            dist/mcp/SHA256SUMS-mcp.txt \
+            dist/mcp/manifest.json
+      - name: Install the official MCP Registry publisher
+        run: |
+          curl -L --fail --retry 3 \
+            https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz \
+            | tar xz mcp-publisher
+          chmod +x mcp-publisher
+      - name: Publish to the official MCP Registry with GitHub OIDC
+        working-directory: dist/mcp
+        run: |
+          ../../mcp-publisher validate
+          ../../mcp-publisher login github-oidc
+          ../../mcp-publisher publish
+      - name: Verify the Registry record
+        run: |
+          version="$(jq -r .version dist/mcp/server.json)"
+          response="$(curl -L --fail --retry 5 --retry-delay 3 \
+            "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.terrorproforma%2Fexplore-better")"
+          echo "$response" | jq -e --arg version "$version" \
+            '.servers[] | select(.server.name == "io.github.terrorproforma/explore-better" and .server.version == $version)'

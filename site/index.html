@@ -5,16 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Explore Better is a fast dual-pane Windows file manager with per-tab terminals, a local MCP AI bridge, transactional operations, a nested disk map, and reversible Explorer integration."
+      content="Explore Better is the AI-native Windows file manager: a fast dual-pane Explorer replacement with a local MCP server, per-tab terminals, safe file operations, and visual disk analysis."
     />
     <meta name="application-name" content="Explore Better" />
     <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
     <meta name="googlebot" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
     <meta name="theme-color" content="#111715" />
-    <meta property="og:title" content="Explore Better - A serious Windows file manager" />
+    <meta property="og:title" content="Explore Better - The Windows file manager for humans and AI" />
     <meta
       property="og:description"
-      content="Dual panes, real per-tab terminals, a secure local MCP AI bridge, nested disk maps, transactional file operations, and reversible Explorer integration."
+      content="Browse, search, analyze, and change files yourself or through a folder-scoped local MCP server with previewed, recoverable operations."
     />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Explore Better" />
@@ -24,10 +24,10 @@
     <meta property="og:image:height" content="920" />
     <meta property="og:image:alt" content="Explore Better dual-pane Windows file manager" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Explore Better - Windows file manager with a local MCP server" />
-    <meta name="twitter:description" content="Dual panes, per-tab terminals, typed local AI tools, disk analysis, and recoverable file operations." />
+    <meta name="twitter:title" content="Explore Better - The Windows file manager for humans and AI" />
+    <meta name="twitter:description" content="A fast Explorer replacement and local MCP server with shared live context, typed file tools, disk analysis, and recoverable operations." />
     <meta name="twitter:image" content="https://terrorproforma.github.io/explore-better/assets/workspace.png" />
-    <title>Explore Better - A serious Windows file manager</title>
+    <title>Explore Better - AI-native Windows file manager and Explorer replacement</title>
     <link rel="canonical" href="https://terrorproforma.github.io/explore-better/" />
     <link rel="alternate" type="text/plain" href="https://terrorproforma.github.io/explore-better/llms.txt" title="Explore Better LLM index" />
     <link rel="icon" type="image/png" href="assets/app-icon.png" />
@@ -42,7 +42,7 @@
             "@id": "https://terrorproforma.github.io/explore-better/#website",
             "url": "https://terrorproforma.github.io/explore-better/",
             "name": "Explore Better",
-            "description": "A fast dual-pane Windows file manager with per-tab terminals and a folder-scoped local MCP AI bridge.",
+            "description": "The AI-native Windows file manager: a fast dual-pane Explorer replacement with per-tab terminals and a folder-scoped local MCP server.",
             "inLanguage": "en"
           },
           {
@@ -87,7 +87,7 @@
             "@type": "WebPage",
             "@id": "https://terrorproforma.github.io/explore-better/#webpage",
             "url": "https://terrorproforma.github.io/explore-better/",
-            "name": "Explore Better - A serious Windows file manager",
+            "name": "Explore Better - The Windows file manager for humans and AI",
             "isPartOf": { "@id": "https://terrorproforma.github.io/explore-better/#website" },
             "about": { "@id": "https://terrorproforma.github.io/explore-better/#software" },
             "primaryImageOfPage": {
@@ -116,8 +116,9 @@
       </button>
 
       <nav class="site-nav" id="site-nav" data-nav aria-label="Primary navigation">
+        <a href="#ai-bridge">AI Bridge</a>
         <a href="#terminal">Terminal</a>
-        <a href="mcp/">MCP Proof</a>
+        <a href="mcp/">Proof</a>
         <a href="#analyzer">Disk Map</a>
         <a href="#integration">Explorer Integration</a>
         <a href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md">Manual</a>
@@ -141,28 +142,53 @@
         />
         <div class="hero__veil" aria-hidden="true"></div>
         <div class="hero__content page-shell">
-          <p class="eyebrow light">Windows 11 / x64 / Public preview</p>
-          <h1 id="hero-title">Explore Better</h1>
-          <p class="hero__lede">A serious file manager for people who have outgrown File Explorer.</p>
+          <p class="eyebrow light">Windows 11 / Local-first / Human + AI</p>
+          <h1 id="hero-title">The Windows file manager built for humans and AI.</h1>
+          <p class="hero__lede">A serious Explorer replacement for people who have outgrown File Explorer.</p>
           <p class="hero__copy">
-            Two independent panes, a real terminal for every tab, structured MCP tools for local AI clients, transactional operations, and a nested view of every byte on disk.
+            Browse, search, analyze, and move files at speed. Give your AI the same live folders you see, with read-first permissions and previewed, journaled, recoverable changes.
           </p>
           <div class="hero__actions">
             <a class="button button--primary" href="#download">
               <img src="assets/icons/download.svg" alt="" width="20" height="20" />
               Download for Windows
             </a>
-            <a class="button button--ghost" href="https://github.com/terrorproforma/explore-better">
+            <a class="button button--ghost" href="mcp/">
               <img src="assets/icons/code-2.svg" alt="" width="20" height="20" />
-              View source
+              See the AI proof
             </a>
           </div>
           <p class="hero__meta">v0.2.0 / Windows x64 / Per-user install / No admin required for normal use</p>
         </div>
         <div class="hero__proof" aria-label="Product highlights">
-          <div><strong>1 per tab</strong><span>live ConPTY terminal</span></div>
-          <div><strong>17 tools</strong><span>scoped MCP profile</span></div>
-          <div><strong>Reversible</strong><span>Explorer integration</span></div>
+          <div><strong>54.7x</strong><span>lower median search latency*</span></div>
+          <div><strong>28 tools</strong><span>typed local MCP surface</span></div>
+          <div><strong>Preview + undo</strong><span>recoverable file changes</span></div>
+        </div>
+      </section>
+
+      <section class="human-ai-section" aria-labelledby="human-ai-title">
+        <div class="page-shell human-ai-layout reveal">
+          <div>
+            <p class="eyebrow">One workspace / two operators</p>
+            <h2 id="human-ai-title">You stay in control. Your AI stops guessing.</h2>
+          </div>
+          <ol class="human-ai-flow">
+            <li><span>01</span><strong>See</strong><small>Your AI receives the active pane, tabs, selection, and authorized roots as structured context.</small></li>
+            <li><span>02</span><strong>Understand</strong><small>It can use indexed search, checksums, duplicates, comparisons, and disk analysis instead of parsing shell text.</small></li>
+            <li><span>03</span><strong>Act safely</strong><small>Writes require a current plan and one-use token, then run through Explore Better's journal, recovery, and undo.</small></li>
+          </ol>
+          <div class="human-ai-links">
+            <a href="ai-file-manager-windows/">Why an AI-native file manager?</a>
+            <a href="integrations/">Connect your AI client</a>
+            <a href="mcp-file-manager/">Explore the MCP tool surface</a>
+          </div>
+          <div class="benchmark-strip" aria-label="Measured MCP versus PowerShell benchmark">
+            <div><strong>54.7x</strong><span>filename search<br />9.8 ms vs 536.1 ms</span></div>
+            <div><strong>6.2x</strong><span>disk analysis<br />72.3 ms vs 445.4 ms</span></div>
+            <div><strong>4.5x</strong><span>duplicate search<br />130.4 ms vs 580.5 ms</span></div>
+            <p>* Median of three runs on the same deterministic Windows fixture. MCP uses the running Explore Better host; the PowerShell baseline includes fresh process startup. A warm persistent shell may be faster. <a href="mcp/#evidence">Method and raw evidence</a>.</p>
+          </div>
         </div>
       </section>
 
@@ -199,7 +225,7 @@
             <p class="eyebrow">02 / Local MCP AI Bridge</p>
             <h2 id="ai-bridge-title">Give AI file tools, not a pile of terminal text.</h2>
             <p class="major-feature-lede">
-              Explore Better exposes its live panes, indexes, Analyzer, comparisons, and recoverable operation system as typed local MCP tools for Codex, Claude, VS Code, and other stdio clients.
+              Explore Better exposes its live panes, indexes, Analyzer, comparisons, and recoverable operation system as typed local MCP tools for Codex, Claude, Cursor, VS Code, and other stdio clients.
             </p>
             <ul class="major-feature-list major-feature-list--dark">
               <li><strong>Read-first profiles</strong><span>Authorize exact folders and tools per client; revoke a profile without changing the rest.</span></li>
@@ -208,7 +234,7 @@
               <li><strong>Local security boundary</strong><span>Stdio sidecar, authenticated same-user named pipe, bounded messages, and no shell or terminal control.</span></li>
             </ul>
             <div class="major-feature-stats" aria-label="AI Bridge release facts">
-              <div><strong>17</strong><span>tools in the shown read-only profile</span></div>
+              <div><strong>28</strong><span>typed tools in the complete contract</span></div>
               <div><strong>5.3 ms</strong><span>measured bridge p95</span></div>
               <div><strong>14.1 MB</strong><span>measured sidecar RSS</span></div>
             </div>
@@ -489,6 +515,7 @@
 
             <div class="release-links" aria-label="Release verification links">
               <a href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.0">Full release details</a>
+              <a href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.0">Download the MCP bundle</a>
               <a href="https://github.com/terrorproforma/explore-better/tree/v0.2.0">Source at v0.2.0</a>
             </div>
           </div>
@@ -506,6 +533,10 @@
           <a href="https://github.com/terrorproforma/explore-better/issues">Issues</a>
           <a href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md">Manual</a>
           <a href="mcp/">MCP evidence</a>
+          <a href="integrations/">AI integrations</a>
+          <a href="security/">Security</a>
+          <a href="privacy/">Privacy</a>
+          <a href="terms/">Terms</a>
         </div>
         <small>&copy; <span data-year></span> Explore Better</small>
       </div>

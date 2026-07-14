@@ -9,8 +9,23 @@ const artifactsDir = path.join(root, "artifacts");
 const reportPath = path.join(artifactsDir, "seo-discovery-latest.json");
 const canonicalRoot = "https://terrorproforma.github.io/explore-better/";
 const pages = [
-  { name: "home", route: "/", file: "index.html", canonical: canonicalRoot, h1: "Explore Better" },
-  { name: "mcp", route: "/mcp/", file: "mcp/index.html", canonical: `${canonicalRoot}mcp/`, h1: "Explore Better MCP Server" }
+  { name: "home", route: "/", file: "index.html", canonical: canonicalRoot, h1: "The Windows file manager built for humans and AI." },
+  { name: "mcp", route: "/mcp/", file: "mcp/index.html", canonical: `${canonicalRoot}mcp/`, h1: "Explore Better MCP Server" },
+  ...[
+    ["ai-file-manager-windows", "AI-native Windows file manager and Explorer replacement"],
+    ["mcp-file-manager", "A local MCP file manager for Windows"],
+    ["integrations", "Connect Explore Better to your AI client"],
+    ["integrations/claude", "Use Explore Better with Claude Desktop"],
+    ["integrations/cursor", "Use Explore Better with Cursor"],
+    ["integrations/codex", "Use Explore Better with Codex"],
+    ["integrations/chatgpt", "Use Explore Better with ChatGPT and OpenAI clients"],
+    ["integrations/vscode", "Use Explore Better with VS Code"],
+    ["use-cases/organize-downloads-safely", "Organize Downloads safely with AI on Windows"],
+    ["use-cases/find-disk-space", "Find what is using disk space with AI"],
+    ["security", "Explore Better security model"],
+    ["privacy", "Explore Better privacy policy"],
+    ["terms", "Explore Better terms of use"]
+  ].map(([route, h1]) => ({ name: route.replaceAll("/", "-"), route: `/${route}/`, file: `${route}/index.html`, canonical: `${canonicalRoot}${route}/`, h1 }))
 ];
 const viewports = [
   { name: "desktop", width: 1440, height: 1000 },
@@ -141,7 +156,7 @@ async function main() {
   add(checks, "llms-format", normalizedLlms.startsWith("# Explore Better\n\n>") && normalizedLlms.includes("## MCP Evidence") && normalizedLlms.includes("## Optional"), "H1, summary, evidence, and optional sections present");
   add(checks, "llms-canonical-links", ["mcp/", "mcp-value.json", "llms-full.txt", "contracts-v1.json"].every((value) => llms.includes(value)), "Product, evidence, context, and contract linked");
   add(checks, "llms-full-substance", llmsFull.length >= 7_000 && llmsFull.includes("## Security Model") && llmsFull.includes("## Deliberate Limitations"), `${llmsFull.length} characters with security and limitations`);
-  add(checks, "llms-no-overclaim", llmsFull.includes("MCP does not replace the integrated terminal") && llmsFull.includes("official MCP Registry entry is not yet published"), "Terminal and registry limitations disclosed");
+  add(checks, "llms-no-overclaim", llmsFull.includes("MCP does not replace the integrated terminal") && llmsFull.includes("io.github.terrorproforma/explore-better"), "Terminal boundary and Registry identity disclosed");
 
   const benchmark = JSON.parse(await fs.readFile(path.join(siteRoot, "benchmarks", "mcp-value.json"), "utf8"));
   add(checks, "benchmark-schema", benchmark.schema === "explore-better.mcp-value.v1", benchmark.schema || "missing");
@@ -149,6 +164,7 @@ async function main() {
   add(checks, "benchmark-mcp-proofs", benchmark.summary?.mcpSpecificProofsPassed === 6 && benchmark.summary?.mcpSpecificProofsTotal === 6, `${benchmark.summary?.mcpSpecificProofsPassed}/${benchmark.summary?.mcpSpecificProofsTotal}`);
   add(checks, "benchmark-repetitions", benchmark.methodology?.repetitions >= 3 && benchmark.methodology?.limitation?.includes("warm shell"), `${benchmark.methodology?.repetitions} repetitions with comparison caveat`);
   add(checks, "benchmark-page-sync", benchmark.workflows.every((workflow) => htmlByPage.get("mcp").includes(`${workflow.mcp.medianMs} ms`) && htmlByPage.get("mcp").includes(`${workflow.powershell.medianMs} ms`)), "Published medians match machine-readable evidence");
+  add(checks, "benchmark-ratio-sync", htmlByPage.get("home").includes("54.7x") && htmlByPage.get("home").includes("6.2x") && htmlByPage.get("home").includes("4.5x") && htmlByPage.get("home").includes("warm persistent shell may be faster"), "Measured ratios and comparison caveat are visible");
 
   const { server, baseUrl } = await startServer();
   let browser;

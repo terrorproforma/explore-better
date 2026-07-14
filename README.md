@@ -4,7 +4,7 @@
 [![Windows CI](https://github.com/terrorproforma/explore-better/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/terrorproforma/explore-better/actions/workflows/windows-ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)
 
-**A fast, dual-pane Windows file manager with per-tab terminals, a local MCP AI bridge, transactional file operations, reversible Explorer integration, and a visual disk-space analyzer.**
+**The Windows file manager built for humans and AI: fast dual panes, per-tab terminals, a local MCP server, transactional file operations, reversible Explorer integration, and a visual disk-space analyzer.**
 
 [Visit the Explore Better website](https://terrorproforma.github.io/explore-better/) | [See the MCP proof](https://terrorproforma.github.io/explore-better/mcp/) | [Download the latest Windows release](https://github.com/terrorproforma/explore-better/releases/latest) | [Read the user manual](USER_MANUAL.md) | [Report an issue](https://github.com/terrorproforma/explore-better/issues)
 
@@ -165,14 +165,15 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 
 ### AI Bridge And MCP Automation
 
-- A bundled `ExploreBetterMcp.exe` stdio server for Codex/ChatGPT desktop, Claude Desktop, VS Code, and generic MCP clients.
+- A bundled `ExploreBetterMcp.exe` stdio server for Codex, Claude Desktop, Cursor, VS Code, ChatGPT-compatible clients, and generic MCP hosts.
 - Live structured context for active panes, stable tab IDs, visible selection, focused item, layout, and a monotonic context revision.
 - Typed tools for bounded listing, indexed search, path inspection, text reading, checksums, disk analysis, duplicates, folder comparison, collections, labels, and operation recovery.
 - Durable background jobs with progress, cancellation, paginated results, and bounded output for very large folders.
 - Read-only profiles by default, separately revocable per client, with explicit authorized folders and individual tool permissions.
 - Every write uses a planner and a one-use 120-second apply token bound to the client session, paths, plan digest, conflict policy, and filesystem signatures.
 - Local stdio and a same-user random named pipe only: no remote listener, arbitrary shell execution, terminal control, registry changes, or AI-driven elevation.
-- One-click reversible setup for Codex, Claude Desktop, and VS Code with byte-for-byte configuration backups and preservation of unrelated MCP servers.
+- One-click reversible setup for Codex, Claude Desktop, Cursor, and VS Code with byte-for-byte configuration backups and preservation of unrelated MCP servers.
+- A standalone Windows MCPB release with the official Registry identity `io.github.terrorproforma/explore-better`.
 
 #### Is MCP Actually Useful Here?
 
@@ -182,6 +183,7 @@ The current evidence proves:
 
 - 3 of 3 shared search, duplicate, and disk-analysis workflows return the correct known result through both interfaces;
 - 6 of 6 MCP-specific controls pass, including schema discovery, bounded pagination, live pane navigation, authorized-root denial, read-only capability reduction, and labeled allocated-size data;
+- on the measured fixture, MCP recorded 54.7x lower median latency for filename search, 6.2x for disk analysis, and 4.5x for duplicate finding than equivalent fresh PowerShell processes;
 - the comparison discloses that PowerShell timings include fresh process startup and does not claim MCP is universally faster than a persistent warm shell.
 
 MCP complements the terminal. Use the terminal for arbitrary commands and system administration. Use MCP when an AI needs Explore Better's live panes, selections, indexes, Analyzer, client-specific folder authority, or preview/apply operations backed by the transaction journal.
@@ -338,4 +340,4 @@ These limitations are disclosed in each release. They do not require normal brow
 
 ## License
 
-The repository is currently published as `UNLICENSED`. The source is visible for inspection, but no open-source redistribution or modification license has been granted yet.
+Explore Better is open-source software distributed under the [MIT License](LICENSE). The standalone MCPB bundle includes the same license and may be used, modified, and redistributed subject to its notice requirements.

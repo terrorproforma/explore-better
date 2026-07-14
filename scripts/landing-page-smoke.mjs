@@ -201,7 +201,7 @@ async function main() {
 
       const snapshot = await pageSnapshot(page, release.installerName);
       addCheck(checks, `${viewport.name}-title`, snapshot.title.includes("Explore Better"), snapshot.title);
-      addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === "Explore Better", snapshot.h1 || "Missing H1");
+      addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === "The Windows file manager built for humans and AI.", snapshot.h1 || "Missing H1");
       addCheck(checks, `${viewport.name}-sections`, snapshot.sectionCount >= 8, `${snapshot.sectionCount} main sections`);
       addCheck(
         checks,

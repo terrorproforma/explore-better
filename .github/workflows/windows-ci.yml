@@ -30,10 +30,12 @@ jobs:
       - run: npm run build:native-helper
       - run: npm run build:renderer
       - run: npm run build:mcp-server
+      - run: npm run build:mcpb
       - run: npm run verify:security-boundary
       - run: npm run verify:transactional-operations
       - run: npm run verify:native-helper
       - run: npm run verify:terminal
       - run: npm run verify:mcp-value
+      - run: npm run verify:mcpb
       - run: npm run verify:seo-discovery
       - run: npm run verify:layout
