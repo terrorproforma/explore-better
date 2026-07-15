@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const terminalPorts = new Map();
 const terminalListeners = new Set();
 const mcpActionListeners = new Set();
+const updateListeners = new Set();
 
 ipcRenderer.on("explore-better:terminal-port", (event, payload) => {
   const sessionId = String(payload?.sessionId || "");
@@ -40,6 +41,16 @@ ipcRenderer.on("explore-better:mcp-ui-action", (_event, payload) => {
     });
 });
 
+ipcRenderer.on("explore-better:update-event", (_event, payload) => {
+  for (const listener of updateListeners) {
+    try {
+      listener(payload);
+    } catch {
+      // Renderer listeners are isolated from the updater transport.
+    }
+  }
+});
+
 contextBridge.exposeInMainWorld("exploreBetterDesktop", {
   getPathForFile(file) {
     if (!file) {
@@ -66,6 +77,17 @@ contextBridge.exposeInMainWorld("exploreBetterDesktop", {
   },
   checkForUpdates() {
     return ipcRenderer.invoke("explore-better:check-for-updates");
+  },
+  downloadUpdate() {
+    return ipcRenderer.invoke("explore-better:download-update");
+  },
+  installUpdate() {
+    return ipcRenderer.invoke("explore-better:install-update");
+  },
+  onUpdate(listener) {
+    if (typeof listener !== "function") return () => {};
+    updateListeners.add(listener);
+    return () => updateListeners.delete(listener);
   },
   backendStatus() {
     return ipcRenderer.invoke("explore-better:backend-status");

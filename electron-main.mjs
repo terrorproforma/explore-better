@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, MessageChannelMain, nativeImage, shell, Tray } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, MessageChannelMain, nativeImage, Notification, shell, Tray } from "electron";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -44,8 +44,10 @@ if (app.isPackaged && !process.env.EXPLORE_BETTER_WORKSPACE_ROOT) {
 let baseUrl = port > 0 ? `http://${host}:${port}` : "";
 const dragIconPath = path.join(__dirname, "public", "drag-file.png");
 const publicUpdateFeedUrl = "https://github.com/terrorproforma/explore-better/releases/latest/download";
+const publicUpdateReleaseUrl = "https://github.com/terrorproforma/explore-better/releases/latest";
 const updateFeedUrl =
   process.env.EXPLORE_BETTER_UPDATE_URL || process.env.EB_UPDATE_URL || (app.isPackaged ? publicUpdateFeedUrl : "");
+const updateConfigPath = process.env.EXPLORE_BETTER_UPDATE_CONFIG_PATH || process.env.EB_UPDATE_CONFIG_PATH || "";
 const userDataDir = process.env.EXPLORE_BETTER_USER_DATA_DIR || process.env.EB_USER_DATA_DIR || "";
 
 if (userDataDir) {
@@ -61,6 +63,10 @@ let embeddedServerModule = null;
 let autoUpdater = null;
 let autoUpdatesConfigured = false;
 let autoUpdateChecking = false;
+let autoUpdateDownloading = false;
+let autoUpdateDownloaded = false;
+let autoUpdateVersion = "";
+const autoUpdateNotifiedVersions = new Set();
 let autoUpdateLastEvent = {
   type: updateFeedUrl ? "not-configured" : "disabled",
   message: updateFeedUrl ? "Update feed is not initialized yet." : "Set EXPLORE_BETTER_UPDATE_URL to enable update checks.",
@@ -291,9 +297,22 @@ function updateStatus() {
     configured: autoUpdatesConfigured,
     feedConfigured: Boolean(updateFeedUrl),
     feedUrl: redactedUpdateFeedUrl(),
+    releaseUrl: publicUpdateReleaseUrl,
+    currentVersion: app.getVersion(),
     checking: autoUpdateChecking,
+    downloading: autoUpdateDownloading,
+    downloaded: autoUpdateDownloaded,
+    updateAvailable: ["available", "downloading", "downloaded"].includes(autoUpdateLastEvent.type),
+    version: autoUpdateVersion || autoUpdateLastEvent.version || "",
     lastEvent: autoUpdateLastEvent
   };
+}
+
+function broadcastUpdateStatus() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send("explore-better:update-event", updateStatus());
 }
 
 function rememberUpdateEvent(type, message = "", data = {}) {
@@ -303,6 +322,32 @@ function rememberUpdateEvent(type, message = "", data = {}) {
     at: new Date().toISOString(),
     ...data
   };
+  broadcastUpdateStatus();
+}
+
+function notifyUpdateAvailable(version) {
+  if (
+    smokeMode ||
+    !version ||
+    autoUpdateNotifiedVersions.has(version) ||
+    mainWindow?.isFocused() ||
+    !Notification.isSupported()
+  ) {
+    return;
+  }
+  autoUpdateNotifiedVersions.add(version);
+  const notification = new Notification({
+    title: `Explore Better ${version} is available`,
+    body: "Open Explore Better to download the update when you're ready.",
+    silent: false
+  });
+  notification.on("click", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+  notification.show();
 }
 
 function rememberBackendEvent(type, message = "", data = {}) {
@@ -330,9 +375,11 @@ async function configureAutoUpdates() {
     return updateStatus();
   }
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.disableDifferentialDownload = smokeUpdateFeedMode;
   if (forceDevUpdateConfig) {
     autoUpdater.forceDevUpdateConfig = true;
+    if (updateConfigPath) autoUpdater.updateConfigPath = path.resolve(updateConfigPath);
   }
   autoUpdater.setFeedURL({ provider: "generic", url: updateFeedUrl });
   autoUpdater.on("checking-for-update", () => {
@@ -341,18 +388,53 @@ async function configureAutoUpdates() {
   });
   autoUpdater.on("update-available", (info) => {
     autoUpdateChecking = false;
+    autoUpdateDownloaded = false;
+    autoUpdateVersion = info?.version || "";
     rememberUpdateEvent("available", "Update available.", {
-      version: info?.version || ""
+      version: autoUpdateVersion
     });
+    notifyUpdateAvailable(autoUpdateVersion);
   });
   autoUpdater.on("update-not-available", (info) => {
     autoUpdateChecking = false;
+    autoUpdateDownloading = false;
+    autoUpdateDownloaded = false;
+    autoUpdateVersion = "";
     rememberUpdateEvent("not-available", "No update available.", {
       version: info?.version || ""
     });
   });
+  autoUpdater.on("download-progress", (progress) => {
+    autoUpdateDownloading = true;
+    rememberUpdateEvent("downloading", "Downloading update.", {
+      version: autoUpdateVersion,
+      percent: Math.max(0, Math.min(100, Number(progress?.percent || 0))),
+      transferred: Number(progress?.transferred || 0),
+      total: Number(progress?.total || 0),
+      bytesPerSecond: Number(progress?.bytesPerSecond || 0)
+    });
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    autoUpdateChecking = false;
+    autoUpdateDownloading = false;
+    autoUpdateDownloaded = true;
+    autoUpdateVersion = info?.version || autoUpdateVersion;
+    rememberUpdateEvent("downloaded", "Update ready to install.", {
+      version: autoUpdateVersion,
+      percent: 100
+    });
+  });
+  autoUpdater.on("update-cancelled", (info) => {
+    autoUpdateDownloading = false;
+    autoUpdateDownloaded = false;
+    autoUpdateVersion = info?.version || autoUpdateVersion;
+    rememberUpdateEvent("available", "Update download cancelled.", {
+      version: autoUpdateVersion
+    });
+  });
   autoUpdater.on("error", (error) => {
     autoUpdateChecking = false;
+    autoUpdateDownloading = false;
     rememberUpdateEvent("error", error?.message || String(error || "Update check failed."));
   });
   autoUpdatesConfigured = true;
@@ -588,11 +670,13 @@ ipcMain.on("explore-better:start-file-drag", (event, paths) => {
   }
 });
 
-ipcMain.handle("explore-better:update-status", () => {
+ipcMain.handle("explore-better:update-status", (event) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted update status request.");
   return configureAutoUpdates();
 });
 
-ipcMain.handle("explore-better:check-for-updates", async () => {
+ipcMain.handle("explore-better:check-for-updates", async (event) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted update check request.");
   await configureAutoUpdates();
   if (!autoUpdatesConfigured || !autoUpdater) {
     return updateStatus();
@@ -612,6 +696,41 @@ ipcMain.handle("explore-better:check-for-updates", async () => {
     autoUpdateChecking = false;
   }
   return { ...updateStatus(), checkResult };
+});
+
+ipcMain.handle("explore-better:download-update", async (event) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted update download request.");
+  await configureAutoUpdates();
+  if (!autoUpdatesConfigured || !autoUpdater || autoUpdateDownloaded) {
+    return updateStatus();
+  }
+  if (autoUpdateDownloading) {
+    return updateStatus();
+  }
+  autoUpdateDownloading = true;
+  rememberUpdateEvent("downloading", "Starting update download.", {
+    version: autoUpdateVersion,
+    percent: 0
+  });
+  try {
+    await autoUpdater.downloadUpdate();
+  } catch (error) {
+    autoUpdateDownloading = false;
+    rememberUpdateEvent("error", error?.message || String(error || "Update download failed."), {
+      version: autoUpdateVersion
+    });
+  }
+  return updateStatus();
+});
+
+ipcMain.handle("explore-better:install-update", async (event) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted update install request.");
+  await configureAutoUpdates();
+  const accepted = Boolean(autoUpdater && autoUpdateDownloaded);
+  if (accepted) {
+    setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  }
+  return { ...updateStatus(), accepted };
 });
 
 ipcMain.handle("explore-better:backend-status", () => {
@@ -1206,7 +1325,7 @@ if (terminalBrokerMode) {
           if (smokeWindowMode) {
             await showLister(smokeShellTarget, smokeShellMode);
             const hasDesktopBridge = await mainWindow.webContents.executeJavaScript(
-              "Boolean(window.exploreBetterDesktop && window.exploreBetterDesktop.getPathForFile && window.exploreBetterDesktop.startFileDrag && window.exploreBetterDesktop.updateStatus && window.exploreBetterDesktop.checkForUpdates && window.exploreBetterDesktop.backendStatus && window.exploreBetterDesktop.appInfo && window.exploreBetterDesktop.restartBackend && window.exploreBetterDesktop.terminal?.capabilities && window.exploreBetterDesktop.terminal?.create && window.exploreBetterDesktop.terminal?.write && window.exploreBetterDesktop.terminal?.resize && window.exploreBetterDesktop.terminal?.restart && window.exploreBetterDesktop.terminal?.dispose && window.exploreBetterDesktop.aiBridge?.status && window.exploreBetterDesktop.aiBridge?.configure && window.exploreBetterDesktop.aiBridge?.upsertProfile && window.exploreBetterDesktop.aiBridge?.revokeProfile && window.exploreBetterDesktop.aiBridge?.installClient && window.exploreBetterDesktop.aiBridge?.removeClient)"
+              "Boolean(window.exploreBetterDesktop && window.exploreBetterDesktop.getPathForFile && window.exploreBetterDesktop.startFileDrag && window.exploreBetterDesktop.updateStatus && window.exploreBetterDesktop.checkForUpdates && window.exploreBetterDesktop.downloadUpdate && window.exploreBetterDesktop.installUpdate && window.exploreBetterDesktop.onUpdate && window.exploreBetterDesktop.backendStatus && window.exploreBetterDesktop.appInfo && window.exploreBetterDesktop.restartBackend && window.exploreBetterDesktop.terminal?.capabilities && window.exploreBetterDesktop.terminal?.create && window.exploreBetterDesktop.terminal?.write && window.exploreBetterDesktop.terminal?.resize && window.exploreBetterDesktop.terminal?.restart && window.exploreBetterDesktop.terminal?.dispose && window.exploreBetterDesktop.aiBridge?.status && window.exploreBetterDesktop.aiBridge?.configure && window.exploreBetterDesktop.aiBridge?.upsertProfile && window.exploreBetterDesktop.aiBridge?.revokeProfile && window.exploreBetterDesktop.aiBridge?.installClient && window.exploreBetterDesktop.aiBridge?.removeClient)"
             );
             const updateStatus = await mainWindow.webContents.executeJavaScript("window.exploreBetterDesktop.updateStatus()");
             const backendStatus = await mainWindow.webContents.executeJavaScript("window.exploreBetterDesktop.backendStatus()");
@@ -1242,14 +1361,77 @@ if (terminalBrokerMode) {
               return exitSmoke(1);
             }
             if (smokeUpdateFeedMode) {
-              const updateCheck = await mainWindow.webContents.executeJavaScript("window.exploreBetterDesktop.checkForUpdates()");
+              const updateUiReady = await waitForRendererValue(
+                "Boolean(window.__exploreBetterStartup)",
+                (value) => value === true,
+                10000
+              );
+              if (!updateUiReady) {
+                console.log("Explore Better update banner: renderer startup did not complete");
+                return exitSmoke(1);
+              }
+              const updateSmoke = await mainWindow.webContents.executeJavaScript(`(async () => {
+                const check = await window.exploreBetterDesktop.checkForUpdates();
+                await new Promise((resolve) => requestAnimationFrame(resolve));
+                const banner = document.getElementById('update-banner');
+                return {
+                  check,
+                  banner: {
+                    visible: Boolean(banner && !banner.hidden),
+                    state: banner?.dataset.state || '',
+                    version: banner?.dataset.version || '',
+                    downloadVisible: Boolean(banner?.querySelector('[data-update-action="download"]') && !banner.querySelector('[data-update-action="download"]').hidden),
+                    releaseUrl: document.getElementById('update-release-link')?.href || ''
+                  }
+                };
+              })()`);
+              const updateCheck = updateSmoke?.check;
               console.log(
                 `Explore Better update check: event=${updateCheck?.lastEvent?.type || "missing"} version=${
                   updateCheck?.lastEvent?.version || updateCheck?.checkResult?.version || ""
                 } available=${updateCheck?.checkResult?.isUpdateAvailable === true}`
               );
+              console.log(
+                `Explore Better update banner: visible=${updateSmoke?.banner?.visible === true} state=${
+                  updateSmoke?.banner?.state || "missing"
+                } version=${updateSmoke?.banner?.version || ""} download=${updateSmoke?.banner?.downloadVisible === true}`
+              );
               if (updateCheck?.feedConfigured !== true || updateCheck?.lastEvent?.type !== expectedSmokeUpdateEvent) {
                 return exitSmoke(1);
+              }
+              if (
+                expectedSmokeUpdateEvent === "available" &&
+                (updateSmoke?.banner?.visible !== true ||
+                  updateSmoke?.banner?.state !== "available" ||
+                  updateSmoke?.banner?.downloadVisible !== true ||
+                  !updateSmoke?.banner?.releaseUrl?.startsWith("https://github.com/terrorproforma/explore-better/releases/"))
+              ) {
+                return exitSmoke(1);
+              }
+              if (expectedSmokeUpdateEvent === "available") {
+                const downloadSmoke = await mainWindow.webContents.executeJavaScript(`(async () => {
+                  const status = await window.exploreBetterDesktop.downloadUpdate();
+                  await new Promise((resolve) => requestAnimationFrame(resolve));
+                  const banner = document.getElementById('update-banner');
+                  return {
+                    downloaded: status?.downloaded === true,
+                    state: banner?.dataset.state || '',
+                    version: banner?.dataset.version || '',
+                    installVisible: Boolean(banner?.querySelector('[data-update-action="install"]') && !banner.querySelector('[data-update-action="install"]').hidden)
+                  };
+                })()`);
+                console.log(
+                  `Explore Better update download: downloaded=${downloadSmoke?.downloaded === true} state=${
+                    downloadSmoke?.state || "missing"
+                  } version=${downloadSmoke?.version || ""} install=${downloadSmoke?.installVisible === true}`
+                );
+                if (
+                  downloadSmoke?.downloaded !== true ||
+                  downloadSmoke?.state !== "downloaded" ||
+                  downloadSmoke?.installVisible !== true
+                ) {
+                  return exitSmoke(1);
+                }
               }
             }
           }

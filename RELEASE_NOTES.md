@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.2.2 - 2026-07-16
+
+### In-App Updates
+
+- Added a quiet update check shortly after desktop launch and every six hours while Explore Better remains open.
+- Added a branded, dismissible update card with the available version, release notes, background download progress, and an explicit **Restart to update** action.
+- Kept downloads user-controlled and allowed verified downloads to install on either the explicit restart action or the next normal app exit.
+- Added a **Check for updates** Command Palette action and a Windows notification when a new version is detected while the app is minimized.
+- Restricted update status, download, and install requests to the trusted Explore Better renderer.
+- Documented the one-time bootstrap upgrade required for builds that predate the in-app updater experience.
+
+### Verification
+
+- Extended the desktop update-feed smoke through real release detection, installer download and hash verification, visible notification state, and restart-ready state.
+- Verified the public release feed, desktop bridge, responsive layouts, Command Palette, and accessibility with no failures.
+
 ## v0.2.1 - 2026-07-15
 
 ### Brand System

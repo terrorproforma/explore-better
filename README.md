@@ -297,6 +297,14 @@ npm run package:installer
 
 Generated packages are written to `dist/`.
 
+## Desktop Updates
+
+The installed desktop app checks the public GitHub release channel shortly after launch and every six hours while it remains open. When a newer build is available, Explore Better shows a dismissible in-app card with the version, release notes link, and a user-controlled download action. The download runs in the background; once it is verified, the card changes to **Restart to update**. A downloaded update also installs on the next normal app exit.
+
+Run **Check for updates** from the Command Palette (`Ctrl+P`) at any time. When Explore Better is minimized, Windows may also show a native notification for a newly detected version.
+
+Builds released before this update UI was added require one final manual installer upgrade from [GitHub Releases](https://github.com/terrorproforma/explore-better/releases/latest). Releases after that bootstrap upgrade can notify and update users inside the app.
+
 ## Verification
 
 Run the release-critical checks sequentially:

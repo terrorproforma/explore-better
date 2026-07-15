@@ -100,6 +100,7 @@ const app = {
     unsubscribe: null
   },
   aiBridge: { status: null, selectedProfileId: null, audit: [], loading: false, draftNew: false },
+  update: { status: null, manualCheck: false, unsubscribe: null, checkTimer: null, repeatTimer: null },
   operationDetails: { id: null, selectedRemaining: new Set(), selectedBackups: new Set() },
   fileBasket: { selected: new Set() },
   trashBrowser: {
@@ -303,8 +304,14 @@ const kindFilterOptions = [
 const kindFilterValues = new Set(kindFilterOptions.map((option) => option.value));
 const favoriteColorValues = new Set(["teal", "gold", "ember", "violet", "green", "black"]);
 const commandCenterStorageKey = "explore-better-command-center-v1";
+const dismissedUpdateVersionStorageKey = "explore-better-dismissed-update-version-v1";
 
 const commands = [
+  {
+    name: "Check for updates",
+    detail: "Checks the Explore Better release channel for a newer desktop build.",
+    run: () => checkForAppUpdates({ manual: true })
+  },
   {
     name: "Copy selected to other pane",
     detail: "Copies the active selection into the opposite pane path.",
@@ -918,6 +925,194 @@ let mcpContextPublishFrame = 0;
 
 function desktopAiBridge() {
   return window.exploreBetterDesktop?.aiBridge || null;
+}
+
+function desktopUpdateBridge() {
+  const bridge = window.exploreBetterDesktop;
+  return bridge?.updateStatus && bridge?.checkForUpdates ? bridge : null;
+}
+
+function appUpdateVersion(status) {
+  return String(status?.version || status?.lastEvent?.version || status?.checkResult?.version || "").trim();
+}
+
+function dismissedAppUpdateVersion() {
+  try {
+    return localStorage.getItem(dismissedUpdateVersionStorageKey) || "";
+  } catch {
+    return "";
+  }
+}
+
+function hideAppUpdateBanner() {
+  const banner = document.getElementById("update-banner");
+  if (banner) banner.hidden = true;
+}
+
+function dismissAppUpdateBanner() {
+  const version = appUpdateVersion(app.update.status);
+  if (version) {
+    try {
+      localStorage.setItem(dismissedUpdateVersionStorageKey, version);
+    } catch {
+      // A blocked storage write should not prevent dismissing the current banner.
+    }
+  }
+  hideAppUpdateBanner();
+}
+
+function renderAppUpdateStatus(status, { manual = false, force = false } = {}) {
+  if (!status) return;
+  app.update.status = status;
+  const banner = document.getElementById("update-banner");
+  if (!banner) return;
+
+  const type = String(status.lastEvent?.type || "");
+  const version = appUpdateVersion(status);
+  const isUpdateState = ["available", "downloading", "downloaded"].includes(type);
+  const isManualState = manual && ["checking", "error"].includes(type);
+  const dismissed = version && dismissedAppUpdateVersion() === version;
+  if ((!isUpdateState && !isManualState) || (dismissed && !force && type === "available")) {
+    hideAppUpdateBanner();
+    return;
+  }
+
+  const kicker = document.getElementById("update-kicker");
+  const title = document.getElementById("update-title");
+  const message = document.getElementById("update-message");
+  const progressWrap = document.getElementById("update-progress-wrap");
+  const progress = document.getElementById("update-progress");
+  const progressLabel = document.getElementById("update-progress-label");
+  const downloadButton = banner.querySelector('[data-update-action="download"]');
+  const installButton = banner.querySelector('[data-update-action="install"]');
+  const releaseLink = document.getElementById("update-release-link");
+  const percent = Math.max(0, Math.min(100, Number(status.lastEvent?.percent || 0)));
+
+  banner.dataset.state = type;
+  banner.dataset.version = version;
+  if (status.releaseUrl && releaseLink) releaseLink.href = status.releaseUrl;
+  progressWrap.hidden = type !== "downloading";
+  progress.value = percent;
+  progressLabel.textContent = `${Math.round(percent)}%`;
+  downloadButton.hidden = type !== "available";
+  downloadButton.disabled = false;
+  installButton.hidden = type !== "downloaded";
+  installButton.disabled = false;
+
+  if (type === "checking") {
+    kicker.textContent = "Release channel";
+    title.textContent = "Checking for updates...";
+    message.textContent = "Looking for a newer Explore Better desktop build.";
+  } else if (type === "downloading") {
+    kicker.textContent = "Downloading in background";
+    title.textContent = version ? `Explore Better ${version}` : "Downloading the update";
+    message.textContent = "Keep working. We will let you know when it is ready to restart.";
+  } else if (type === "downloaded") {
+    kicker.textContent = "Ready to install";
+    title.textContent = version ? `Explore Better ${version} is ready.` : "Your update is ready.";
+    message.textContent = "Restart when it suits you to finish the update.";
+  } else if (type === "error") {
+    kicker.textContent = "Update check interrupted";
+    title.textContent = "Could not reach the release channel.";
+    message.textContent = "Try the check again, or open the latest release directly.";
+  } else {
+    kicker.textContent = "Update available";
+    title.textContent = version ? `Explore Better ${version} is available.` : "A new Explore Better build is available.";
+    message.textContent = "Download it in the background, keep working, then restart when you are ready.";
+  }
+
+  banner.hidden = false;
+}
+
+async function checkForAppUpdates({ manual = false } = {}) {
+  const bridge = desktopUpdateBridge();
+  if (!bridge) {
+    if (manual) showToast("Update checks are available in the desktop app.");
+    return null;
+  }
+  if (app.update.manualCheck && manual) return app.update.status;
+  if (["downloading", "downloaded"].includes(app.update.status?.lastEvent?.type)) {
+    renderAppUpdateStatus(app.update.status, { force: true });
+    return app.update.status;
+  }
+  app.update.manualCheck = manual;
+  if (manual) {
+    renderAppUpdateStatus(
+      {
+        ...(app.update.status || {}),
+        lastEvent: { type: "checking", message: "Checking for updates." }
+      },
+      { manual: true, force: true }
+    );
+  }
+  try {
+    const status = await bridge.checkForUpdates();
+    renderAppUpdateStatus(status, { manual, force: manual });
+    if (manual && status?.lastEvent?.type === "not-available") {
+      showToast(`Explore Better ${status.currentVersion || ""} is up to date.`.replace("  ", " "));
+    }
+    return status;
+  } catch (error) {
+    const status = {
+      ...(app.update.status || {}),
+      lastEvent: { type: "error", message: error?.message || "Update check failed." }
+    };
+    renderAppUpdateStatus(status, { manual, force: manual });
+    return status;
+  } finally {
+    app.update.manualCheck = false;
+  }
+}
+
+async function runAppUpdateAction(action) {
+  const bridge = desktopUpdateBridge();
+  if (action === "dismiss") {
+    dismissAppUpdateBanner();
+    return;
+  }
+  if (!bridge) {
+    showToast("Update controls are available in the desktop app.");
+    return;
+  }
+  if (action === "download") {
+    const button = document.querySelector('[data-update-action="download"]');
+    if (button) button.disabled = true;
+    try {
+      const status = await bridge.downloadUpdate();
+      renderAppUpdateStatus(status, { manual: status?.lastEvent?.type === "error", force: true });
+    } catch (error) {
+      renderAppUpdateStatus(
+        { ...(app.update.status || {}), lastEvent: { type: "error", message: error.message } },
+        { manual: true, force: true }
+      );
+    }
+    return;
+  }
+  if (action === "install") {
+    const button = document.querySelector('[data-update-action="install"]');
+    if (button) button.disabled = true;
+    const status = await bridge.installUpdate();
+    if (!status?.accepted) {
+      if (button) button.disabled = false;
+      showToast("The update is not ready to install yet.");
+    }
+  }
+}
+
+async function initializeAppUpdates() {
+  const bridge = desktopUpdateBridge();
+  if (!bridge) return;
+  app.update.unsubscribe?.();
+  app.update.unsubscribe = bridge.onUpdate?.((status) => {
+    renderAppUpdateStatus(status, { manual: app.update.manualCheck });
+  });
+  const status = await bridge.updateStatus();
+  renderAppUpdateStatus(status);
+  if (!status?.feedConfigured) return;
+  clearTimeout(app.update.checkTimer);
+  clearInterval(app.update.repeatTimer);
+  app.update.checkTimer = setTimeout(() => checkForAppUpdates(), 6000);
+  app.update.repeatTimer = setInterval(() => checkForAppUpdates(), 6 * 60 * 60 * 1000);
 }
 
 function mcpContextSnapshot() {
@@ -22525,6 +22720,11 @@ function wireEvents() {
   });
 
   document.body.addEventListener("click", async (event) => {
+    const updateActionButton = event.target.closest("[data-update-action]");
+    if (updateActionButton) {
+      await runAppUpdateAction(updateActionButton.dataset.updateAction);
+      return;
+    }
     const paneMoreAction = event.target.closest(".pane-more-menu [data-action]");
     if (paneMoreAction) {
       const menu = paneMoreAction.closest("details");
@@ -25312,6 +25512,7 @@ async function init() {
     completedAt: Date.now()
   };
   scheduleMcpContextPublish(true);
+  initializeAppUpdates().catch((error) => console.warn(`Could not initialize app updates: ${error.message}`));
   setTimeout(() => {
     requestIdle(() => {
       if (desktopTerminalBridge()) loadTerminalRenderer().catch(() => {});

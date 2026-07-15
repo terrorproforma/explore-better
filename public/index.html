@@ -33,6 +33,29 @@
         <div class="status-pill" id="status-pill">Ready</div>
       </header>
 
+      <aside class="update-banner" id="update-banner" role="status" aria-live="polite" aria-atomic="true" hidden>
+        <div class="update-banner-rail" aria-hidden="true">EB // UPDATE</div>
+        <div class="update-banner-body">
+          <div class="update-banner-heading">
+            <div>
+              <span class="update-banner-kicker" id="update-kicker">Update available</span>
+              <strong id="update-title">A new Explore Better build is ready.</strong>
+            </div>
+            <button class="update-banner-dismiss" type="button" data-update-action="dismiss" aria-label="Dismiss update" title="Dismiss">&times;</button>
+          </div>
+          <p id="update-message">Download it in the background and restart when you are ready.</p>
+          <div class="update-banner-progress" id="update-progress-wrap" hidden>
+            <progress id="update-progress" max="100" value="0" aria-label="Update download progress"></progress>
+            <span id="update-progress-label">0%</span>
+          </div>
+          <div class="update-banner-actions">
+            <button type="button" class="update-banner-primary" data-update-action="download">Download update</button>
+            <button type="button" class="update-banner-primary" data-update-action="install" hidden>Restart to update</button>
+            <a id="update-release-link" href="https://github.com/terrorproforma/explore-better/releases/latest" target="_blank" rel="noreferrer">What&rsquo;s new <span aria-hidden="true">&#8599;</span></a>
+          </div>
+        </div>
+      </aside>
+
       <main class="workbench">
         <nav class="nav-rail" aria-label="Navigation">
           <div class="nav-rail-head">

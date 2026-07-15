@@ -9,6 +9,7 @@
   --line-strong: #9ca9a2;
   --teal: #08776f;
   --teal-soft: #d8efea;
+  --acid: #c7ff4a;
   --ember: #bf462c;
   --violet: #6957a8;
   --gold: #b87913;
@@ -10851,6 +10852,224 @@ textarea:focus {
   padding: 10px 12px;
   pointer-events: none;
   transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.update-banner {
+  position: fixed;
+  top: calc(var(--topbar-height, 56px) + 12px);
+  right: 18px;
+  z-index: 150;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  width: min(440px, calc(100vw - 36px));
+  overflow: hidden;
+  border: 1px solid #050706;
+  border-radius: 5px;
+  background: #111715;
+  color: #f4f7f5;
+  box-shadow: 7px 7px 0 rgba(199, 255, 74, 0.78), 0 18px 46px rgba(5, 12, 9, 0.3);
+  animation: update-banner-enter 220ms cubic-bezier(0.2, 0.85, 0.25, 1);
+}
+
+.update-banner[hidden] {
+  display: none;
+}
+
+.update-banner-rail {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--acid);
+  color: #111715;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  user-select: none;
+}
+
+.update-banner-body {
+  display: grid;
+  gap: 11px;
+  min-width: 0;
+  padding: 15px 16px 14px;
+}
+
+.update-banner-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+}
+
+.update-banner-heading > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.update-banner-kicker {
+  color: var(--acid);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.update-banner-heading strong {
+  color: #ffffff;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.update-banner-dismiss {
+  width: 27px;
+  min-height: 27px;
+  padding: 0;
+  border-color: rgba(244, 247, 245, 0.24);
+  background: transparent;
+  color: #f4f7f5;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.update-banner-dismiss:hover,
+.update-banner-dismiss:focus-visible {
+  border-color: var(--acid);
+  color: var(--acid);
+}
+
+.update-banner p {
+  margin: 0;
+  color: #bfc9c4;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.update-banner-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  gap: 10px;
+  align-items: center;
+}
+
+.update-banner-progress[hidden] {
+  display: none;
+}
+
+.update-banner progress {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: #34413c;
+  accent-color: var(--acid);
+}
+
+.update-banner progress::-webkit-progress-bar {
+  background: #34413c;
+}
+
+.update-banner progress::-webkit-progress-value {
+  background: linear-gradient(90deg, #20b8a5, var(--acid));
+}
+
+#update-progress-label {
+  color: #dce5e1;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  text-align: right;
+}
+
+.update-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.update-banner-actions button {
+  min-height: 30px;
+  border-color: rgba(244, 247, 245, 0.32);
+  background: transparent;
+  color: #f4f7f5;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.update-banner-actions .update-banner-primary {
+  border-color: var(--acid);
+  background: var(--acid);
+  color: #111715;
+}
+
+.update-banner-actions button:hover,
+.update-banner-actions button:focus-visible {
+  border-color: #ffffff;
+  background: #ffffff;
+  color: #111715;
+}
+
+.update-banner-actions a {
+  margin-left: auto;
+  color: #cbd5d0;
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.update-banner-actions a:hover,
+.update-banner-actions a:focus-visible {
+  color: var(--acid);
+  text-decoration: underline;
+  outline: none;
+}
+
+.update-banner[data-state="error"] {
+  box-shadow: 7px 7px 0 rgba(191, 70, 44, 0.8), 0 18px 46px rgba(5, 12, 9, 0.3);
+}
+
+.update-banner[data-state="error"] .update-banner-rail {
+  background: var(--ember);
+  color: #ffffff;
+}
+
+.update-banner[data-state="error"] .update-banner-kicker {
+  color: #ff9e88;
+}
+
+@keyframes update-banner-enter {
+  from {
+    transform: translateY(-10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@media (max-width: 560px) {
+  .update-banner {
+    top: calc(var(--topbar-height, 56px) + 8px);
+    right: 8px;
+    width: calc(100vw - 16px);
+    box-shadow: 4px 4px 0 rgba(199, 255, 74, 0.78), 0 14px 34px rgba(5, 12, 9, 0.28);
+  }
+
+  .update-banner-actions a {
+    margin-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-banner {
+    animation: none;
+  }
 }
 
 .toast.show {

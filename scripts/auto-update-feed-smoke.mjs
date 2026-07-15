@@ -181,6 +181,44 @@ function parseUpdateCheck(stdout) {
   };
 }
 
+function parseUpdateBanner(stdout) {
+  const line = stdout
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .find((item) => item.startsWith("Explore Better update banner:"));
+  if (!line) return null;
+  const data = {};
+  for (const match of line.matchAll(/([A-Za-z]+)=([^ ]*)/g)) {
+    data[match[1]] = match[2];
+  }
+  return {
+    line,
+    visible: data.visible === "true",
+    state: data.state || "",
+    version: data.version || "",
+    downloadVisible: data.download === "true"
+  };
+}
+
+function parseUpdateDownload(stdout) {
+  const line = stdout
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .find((item) => item.startsWith("Explore Better update download:"));
+  if (!line) return null;
+  const data = {};
+  for (const match of line.matchAll(/([A-Za-z]+)=([^ ]*)/g)) {
+    data[match[1]] = match[2];
+  }
+  return {
+    line,
+    downloaded: data.downloaded === "true",
+    state: data.state || "",
+    version: data.version || "",
+    installVisible: data.install === "true"
+  };
+}
+
 function check(status, id, label, detail, data = {}) {
   return { status, id, label, detail, ...data };
 }
@@ -205,6 +243,14 @@ ${rows}
 
 \`${report.updateCheck?.line || "missing"}\`
 
+## Update Notification
+
+\`${report.updateBanner?.line || "missing"}\`
+
+## Update Download
+
+\`${report.updateDownload?.line || "missing"}\`
+
 ## Feed Requests
 
 ${report.feed.requests.map((request) => `- ${request.method} ${request.path}`).join("\n") || "- none"}
@@ -221,6 +267,12 @@ async function main() {
   const appPort = configuredAppPort ? Number(configuredAppPort) : await freeLoopbackPort();
   const feedInfo = await prepareFeed(version);
   const feed = await startFeedServer(feedPort);
+  const updateConfigPath = path.join(runRoot, "dev-app-update.yml");
+  await fs.writeFile(
+    updateConfigPath,
+    [`provider: generic`, `url: ${feed.url}`, `updaterCacheDirName: ExploreBetterAutoUpdateSmoke`, ""].join("\n"),
+    "utf8"
+  );
   const command = process.platform === "win32" ? "cmd.exe" : "npm";
   const args =
     process.platform === "win32" ? ["/d", "/s", "/c", "npm run desktop:smoke-update-feed"] : ["run", "desktop:smoke-update-feed"];
@@ -235,6 +287,7 @@ async function main() {
         APPDATA: appData,
         EXPLORE_BETTER_USER_DATA_DIR: path.join(appData, "ElectronUserData"),
         EXPLORE_BETTER_UPDATE_URL: feed.url,
+        EXPLORE_BETTER_UPDATE_CONFIG_PATH: updateConfigPath,
         EXPLORE_BETTER_FORCE_DEV_UPDATE_CONFIG: "1"
       }
     });
@@ -242,6 +295,8 @@ async function main() {
     await feed.close();
   }
   const updateCheck = parseUpdateCheck(result.stdout);
+  const updateBanner = parseUpdateBanner(result.stdout);
+  const updateDownload = parseUpdateDownload(result.stdout);
   const checks = [];
   checks.push(
     check(
@@ -265,6 +320,40 @@ async function main() {
       "update-check-available",
       "Update check reports available version",
       updateCheck ? `event=${updateCheck.event}, version=${updateCheck.version}, available=${updateCheck.available}` : "Missing update check line."
+    )
+  );
+  checks.push(
+    check(
+      Boolean(
+        updateBanner?.visible &&
+          updateBanner?.state === "available" &&
+          updateBanner?.version === version &&
+          updateBanner?.downloadVisible
+      )
+        ? "pass"
+        : "fail",
+      "update-banner-visible",
+      "Available update is surfaced in the desktop UI",
+      updateBanner
+        ? `visible=${updateBanner.visible}, state=${updateBanner.state}, version=${updateBanner.version}, download=${updateBanner.downloadVisible}`
+        : "Missing update banner line."
+    )
+  );
+  checks.push(
+    check(
+      Boolean(
+        updateDownload?.downloaded &&
+          updateDownload?.state === "downloaded" &&
+          updateDownload?.version === version &&
+          updateDownload?.installVisible
+      )
+        ? "pass"
+        : "fail",
+      "update-download-ready",
+      "Downloaded update offers an explicit restart action",
+      updateDownload
+        ? `downloaded=${updateDownload.downloaded}, state=${updateDownload.state}, version=${updateDownload.version}, install=${updateDownload.installVisible}`
+        : "Missing update download line."
     )
   );
   checks.push(
@@ -293,6 +382,8 @@ async function main() {
     },
     checks,
     updateCheck,
+    updateBanner,
+    updateDownload,
     result: {
       code: result.code,
       timedOut: Boolean(result.timedOut),
