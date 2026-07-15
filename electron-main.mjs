@@ -43,6 +43,9 @@ if (app.isPackaged && !process.env.EXPLORE_BETTER_WORKSPACE_ROOT) {
 }
 let baseUrl = port > 0 ? `http://${host}:${port}` : "";
 const dragIconPath = path.join(__dirname, "public", "drag-file.png");
+const appIconPath = app.isPackaged
+  ? path.join(process.resourcesPath, "app-icon.png")
+  : path.join(__dirname, "public", "assets", "app-icon.png");
 const publicUpdateFeedUrl = "https://github.com/terrorproforma/explore-better/releases/latest/download";
 const publicUpdateReleaseUrl = "https://github.com/terrorproforma/explore-better/releases/latest";
 const updateFeedUrl =
@@ -560,10 +563,8 @@ function scheduleMcpHeadlessExit(clientCount = mcpBridgeService?.status().client
 function ensureMcpTray() {
   const clients = mcpBridgeService?.status().clients || 0;
   if (mcpTray || !(aiHostMode || (clients > 0 && !mainWindow))) return;
-  const iconPath = existsSync(path.join(__dirname, "build", "icon.ico"))
-    ? path.join(__dirname, "build", "icon.ico")
-    : dragIconPath;
-  mcpTray = new Tray(nativeImage.createFromPath(iconPath));
+  const brandIcon = nativeImage.createFromPath(appIconPath);
+  mcpTray = new Tray(brandIcon.isEmpty() ? dragIconImage() : brandIcon);
   mcpTray.setToolTip("Explore Better AI Bridge");
   mcpTray.setContextMenu(Menu.buildFromTemplate([
     { label: "Open Explore Better", click: () => showLister().catch(console.error) },
@@ -1052,6 +1053,7 @@ async function showLister(targetPath = null, shellMode = null) {
     minWidth: 980,
     minHeight: 660,
     title: "Explore Better",
+    icon: appIconPath,
     backgroundColor: "#f1f3ee",
     show: false,
     webPreferences: {

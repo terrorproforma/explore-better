@@ -1,74 +1,74 @@
 {
-  "capturedAt": "2026-07-15T08:43:56.144Z",
-  "durationSeconds": 136.978,
-  "sourceFrames": 2043,
-  "sourceRate": 14.915,
+  "capturedAt": "2026-07-15T15:13:27.162Z",
+  "durationSeconds": 84.426,
+  "sourceFrames": 1205,
+  "sourceRate": 14.273,
   "outputFrameRate": 30,
   "resolution": "1600x900",
   "markers": [
     {
       "id": "workspace",
-      "seconds": 0.002
+      "seconds": 0.003
     },
     {
       "id": "live-filter",
-      "seconds": 2.316
+      "seconds": 2.336
     },
     {
       "id": "command-center",
-      "seconds": 7.097
+      "seconds": 7.232
     },
     {
       "id": "disk-map",
-      "seconds": 11.294
+      "seconds": 11.233
     },
     {
       "id": "operation-preview",
-      "seconds": 19.205
+      "seconds": 19.285
     },
     {
       "id": "terminal",
-      "seconds": 28.795
+      "seconds": 28.909
     },
     {
       "id": "codex-handoff",
-      "seconds": 40.595
+      "seconds": 41.536
     },
     {
       "id": "codex-get-context-start",
-      "seconds": 103.471
+      "seconds": 60.208
     },
     {
       "id": "codex-get-context-complete",
-      "seconds": 103.48
+      "seconds": 60.223
     },
     {
       "id": "codex-search-files-start",
-      "seconds": 108.598
+      "seconds": 62.65
     },
     {
       "id": "codex-search-files-complete",
-      "seconds": 108.649
+      "seconds": 62.71
     },
     {
       "id": "codex-show-in-explore-better-start",
-      "seconds": 114.254
+      "seconds": 65.808
     },
     {
       "id": "codex-show-in-explore-better-complete",
-      "seconds": 114.29
+      "seconds": 65.837
     },
     {
       "id": "ai-bridge",
-      "seconds": 124.071
+      "seconds": 73.107
     },
     {
       "id": "proof-hold",
-      "seconds": 132.46
+      "seconds": 79.909
     },
     {
       "id": "end",
-      "seconds": 136.972
+      "seconds": 84.421
     }
   ],
   "output": "demo-video-v2\\capture\\explore-better-live-walkthrough.mp4",

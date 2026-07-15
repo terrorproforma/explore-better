@@ -1,6 +1,6 @@
 {
   "name": "explore-better",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -30,8 +30,8 @@
     "build:icon": "node scripts/generate-icon.mjs",
     "build:native-helper": "node scripts/build-native-helper.mjs",
     "build:mcp-server": "node scripts/build-mcp-server.mjs",
-    "build:mcpb": "npm run build:mcp-server && node scripts/build-mcpb.mjs",
-    "build:site-pages": "node scripts/build-site-discovery-pages.mjs",
+    "build:mcpb": "npm run build:icon && npm run build:mcp-server && node scripts/build-mcpb.mjs",
+    "build:site-pages": "npm run build:icon && node scripts/build-site-discovery-pages.mjs",
     "build:app": "node scripts/build-app.mjs",
     "build:terminal": "node scripts/build-terminal.mjs",
     "build:renderer": "npm run build:app && npm run build:terminal",
@@ -50,6 +50,7 @@
     "verify:landing-page": "node scripts/landing-page-smoke.mjs",
     "verify:seo-discovery": "node scripts/seo-discovery-smoke.mjs",
     "verify:privacy": "node scripts/privacy-audit.mjs",
+    "verify:brand": "node scripts/brand-asset-smoke.mjs",
     "verify:perf-100k": "node scripts/perf-100k-verify.mjs",
     "verify:windows-baseline": "node scripts/windows-baseline-smoke.mjs",
     "verify:mixed-load": "node scripts/mixed-load-smoke.mjs",
@@ -160,11 +161,11 @@
     "verify:mcp-value": "node scripts/mcp-value-benchmark.mjs",
     "verify:packaged-mcp": "node scripts/packaged-mcp-smoke.mjs",
     "acceptance:mcp-inspector": "node scripts/mcp-inspector-smoke.mjs",
-    "prepackage:dir": "npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
+    "prepackage:dir": "npm run build:icon && npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
     "package:dir": "electron-builder --dir",
-    "prepackage:win": "npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
+    "prepackage:win": "npm run build:icon && npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
     "package:win": "electron-builder --win portable",
-    "prepackage:installer": "npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
+    "prepackage:installer": "npm run build:icon && npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
     "package:installer": "electron-builder --win nsis"
   },
   "engines": {
@@ -208,6 +209,10 @@
       "package.json"
     ],
     "extraResources": [
+      {
+        "from": "public/assets/app-icon.png",
+        "to": "app-icon.png"
+      },
       {
         "from": "native/bin/explore-better-fs.exe",
         "to": "native/explore-better-fs.exe"

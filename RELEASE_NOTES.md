@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.2.3 - 2026-07-16
+
+### Complete Brand Replacement
+
+- Replaced the previous geometric monogram with the supplied Racing Sans One `EB` artwork as the single canonical brand source.
+- Regenerated the website and in-app SVG, every PNG density, favicon, Windows multi-image ICO, executable and installer resources, AI Bridge tray icon, and standalone MCPB icon from that source.
+- Added explicit branded window and tray assets for both packaged and development runs, and made generated Desktop, Start Menu, shell, and Win+E shortcuts prefer the same ICO.
+- Wired brand generation into every packaging, site-discovery, and MCPB build so later installers cannot silently fall back to stale artwork.
+- Re-recorded the real product walkthrough and Codex handoff, retimed the edit to the new capture, rebuilt the website video and poster, and recaptured every public product screenshot with the new in-app mark.
+- Updated the deprecated homepage's active favicon and header/footer references while preserving its archived copy and layout.
+
+### Verification
+
+- Added an exhaustive brand-asset smoke covering the canonical SVG copies, seven PNG sizes, embedded ICO images, runtime window/tray wiring, shortcut generation, site references, packaging scripts, and demo composition.
+- Visually inspected the generated 256 px icon, live app screenshots, video opening, Codex handoff, and final CTA.
+
 ## v0.2.2 - 2026-07-16
 
 ### In-App Updates

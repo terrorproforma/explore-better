@@ -11,6 +11,8 @@ const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
 const chrome = String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`;
 const fps = 30;
 const transitionDuration = 0.24;
+const brandSvg = await fs.readFile(path.join(root, "brand", "eb-icon.svg"), "utf8");
+const brandMarkDataUrl = `data:image/svg+xml;base64,${Buffer.from(brandSvg).toString("base64")}`;
 
 const assets = (name) => path.join(root, "site", "assets", name);
 const artifact = (name) => path.join(root, "artifacts", name);
@@ -216,7 +218,7 @@ function sceneMarkup(scene, index) {
   if (scene.layout === "final") {
     return `
       <main class="final-layout">
-        <div class="brand-mark large"><span>EB</span></div>
+        <div class="brand-mark large"><img src="${brandMarkDataUrl}" alt=""></div>
         <p class="eyebrow">${escapeHtml(scene.eyebrow)}</p>
         <h1>${headlineHtml(scene.headline)}</h1>
         <p class="final-body">${escapeHtml(scene.body)}</p>
@@ -252,8 +254,9 @@ function renderHtml(scene, index) {
       linear-gradient(90deg, rgba(255,255,255,.055) 1px, transparent 1px); background-size:72px 72px; }
     body::after { content:""; position:absolute; inset:0; pointer-events:none; box-shadow:inset 0 0 180px rgba(0,0,0,.72); }
     .top-brand { position:absolute; z-index:5; top:42px; left:56px; display:flex; align-items:center; gap:18px; font-weight:760; letter-spacing:.08em; font-size:20px; }
-    .brand-mark { width:48px; height:48px; border-radius:12px; display:grid; place-items:center; background:var(--paper); color:var(--ink); font-weight:900; letter-spacing:-.08em; box-shadow:0 0 0 1px rgba(255,255,255,.18), 0 18px 60px rgba(0,0,0,.35); }
-    .brand-mark.large { width:118px; height:118px; border-radius:26px; font-size:42px; margin-bottom:26px; }
+    .brand-mark { width:48px; height:48px; display:block; overflow:hidden; box-shadow:0 18px 60px rgba(0,0,0,.35); }
+    .brand-mark img { width:100%; height:100%; object-fit:contain; display:block; }
+    .brand-mark.large { width:118px; height:118px; margin-bottom:26px; }
     .scene-no { position:absolute; z-index:5; top:52px; right:64px; color:var(--accent); font:700 18px/1 Consolas, monospace; letter-spacing:.18em; }
     .scene-no::before { content:"CUT / "; color:#667a74; }
     .eyebrow { margin:0 0 28px; color:var(--accent); font:760 19px/1.2 Consolas, monospace; letter-spacing:.14em; }
@@ -311,7 +314,7 @@ function renderHtml(scene, index) {
     .cta { border-left:5px solid var(--accent); padding:14px 20px; background:rgba(3,12,10,.72); color:#fff; font:700 25px/1 Consolas,monospace; letter-spacing:.025em; }
   </style></head>
   <body>
-    <div class="top-brand"><div class="brand-mark"><span>EB</span></div><span>EXPLORE BETTER</span></div>
+    <div class="top-brand"><div class="brand-mark"><img src="${brandMarkDataUrl}" alt=""></div><span>EXPLORE BETTER</span></div>
     <div class="scene-no">${sceneNumber}</div>
     ${sceneMarkup(scene, index)}
   </body></html>`;

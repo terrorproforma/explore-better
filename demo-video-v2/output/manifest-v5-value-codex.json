@@ -1,6 +1,6 @@
 {
   "title": "Explore Better - Value + Codex Demo v5",
-  "generatedAt": "2026-07-15T09:02:10.584Z",
+  "generatedAt": "2026-07-15T15:21:09.258Z",
   "direction": "Outcome-led feature story with full-workspace establishing shots, restrained detail pushes, and a real read-only Codex MCP handoff replayed at edit speed.",
   "timing": {
     "durationSeconds": 64.5,
@@ -71,69 +71,69 @@
     "tools": [
       {
         "marker": "codex-get-context-start",
-        "seconds": 103.471,
+        "seconds": 60.208,
         "status": "in_progress"
       },
       {
         "marker": "codex-get-context-complete",
-        "seconds": 103.48,
+        "seconds": 60.223,
         "status": "completed"
       },
       {
         "marker": "codex-search-files-start",
-        "seconds": 108.598,
+        "seconds": 62.65,
         "status": "in_progress"
       },
       {
         "marker": "codex-search-files-complete",
-        "seconds": 108.649,
+        "seconds": 62.71,
         "status": "completed"
       },
       {
         "marker": "codex-show-in-explore-better-start",
-        "seconds": 114.254,
+        "seconds": 65.808,
         "status": "in_progress"
       },
       {
         "marker": "codex-show-in-explore-better-complete",
-        "seconds": 114.29,
+        "seconds": 65.837,
         "status": "completed"
       }
     ],
     "sourceMarkers": [
       {
         "id": "codex-handoff",
-        "seconds": 40.595
+        "seconds": 41.536
       },
       {
         "id": "codex-get-context-start",
-        "seconds": 103.471
+        "seconds": 60.208
       },
       {
         "id": "codex-get-context-complete",
-        "seconds": 103.48
+        "seconds": 60.223
       },
       {
         "id": "codex-search-files-start",
-        "seconds": 108.598
+        "seconds": 62.65
       },
       {
         "id": "codex-search-files-complete",
-        "seconds": 108.649
+        "seconds": 62.71
       },
       {
         "id": "codex-show-in-explore-better-start",
-        "seconds": 114.254
+        "seconds": 65.808
       },
       {
         "id": "codex-show-in-explore-better-complete",
-        "seconds": 114.29
+        "seconds": 65.837
       }
     ]
   },
   "capture": {
     "resolution": "1600x900",
-    "durationSeconds": 136.978
+    "durationSeconds": 84.426
   },
   "arrangement": {
     "duration": 64.5,
@@ -192,9 +192,9 @@
     "loudnessRangeLu": 3.1
   },
   "integrity": {
-    "masterBytes": 47217027,
-    "masterSha256": "0E4CF8111B32694956A17125F1A14E02A3083E6164B6CC48BA1D293A5324EEA3",
-    "webBytes": 9813184,
-    "webSha256": "CADF875524268AD6D3A834D31B4FC7589EE507D5729192F68D30CE0D9877B536"
+    "masterBytes": 46540509,
+    "masterSha256": "81F3FC9FD6547ACEF47C78444C3AF89EB173A9476C5808F66F2787E119066F75",
+    "webBytes": 9629931,
+    "webSha256": "BBFB4FD2FFAD08118815305088B6626AB635172E4F1B83DED6F34A9AA91579E0"
   }
 }

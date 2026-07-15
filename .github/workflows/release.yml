@@ -61,6 +61,7 @@ jobs:
           npm run verify:packaged-terminal
           npm run build:mcpb
           npm run verify:mcpb
+          npm run verify:brand
           npm run build:update-feed
           npm run build:release-checksums
           npm run verify:release-checksums

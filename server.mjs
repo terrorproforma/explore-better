@@ -13397,6 +13397,7 @@ $ErrorActionPreference = "Stop"
 $Launcher = "${launcherPath.replaceAll("\\", "\\\\")}"
 $InstalledApp = "${installedAppPath().replaceAll("\\", "\\\\")}"
 $PackagedApp = "${packagedAppCandidatePath().replaceAll("\\", "\\\\")}"
+$BrandIcon = "${path.join(repoPath, "build", "icon.ico").replaceAll("\\", "\\\\")}"
 $ShellOpenMode = "${shellOpenMode}"
 $StartMenuDir = Join-Path $env:APPDATA "Microsoft\\Windows\\Start Menu\\Programs\\Explore Better"
 $DesktopDir = "${desktopDir.replaceAll("\\", "\\\\")}"
@@ -13424,7 +13425,7 @@ function New-ExploreBetterShortcut {
     $shortcut.TargetPath = "powershell.exe"
     $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \`"$Launcher\`" \`"$TargetPath\`""
     $shortcut.WorkingDirectory = Split-Path -Parent $Launcher
-    $shortcut.IconLocation = "imageres.dll,3"
+    $shortcut.IconLocation = if (Test-Path -LiteralPath $BrandIcon) { $BrandIcon } else { "imageres.dll,3" }
   }
   $shortcut.Description = "Open Explore Better"
   $shortcut.Save()
@@ -13517,6 +13518,7 @@ try {
 
   const winEInstallScriptContent = `$ErrorActionPreference = "Stop"
 $HotkeyScript = "${winEHotkeyPath.replaceAll("\\", "\\\\")}"
+$BrandIcon = "${path.join(repoPath, "build", "icon.ico").replaceAll("\\", "\\\\")}"
 $RoamingRoot = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $env:USERPROFILE "AppData\\Roaming" }
 $StartupDir = Join-Path $RoamingRoot "Microsoft\\Windows\\Start Menu\\Programs\\Startup"
 $ShortcutPath = Join-Path $StartupDir "Explore Better Win+E.lnk"
@@ -13527,7 +13529,7 @@ $shortcut = $Shell.CreateShortcut($ShortcutPath)
 $shortcut.TargetPath = "powershell.exe"
 $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \`"$HotkeyScript\`""
 $shortcut.WorkingDirectory = Split-Path -Parent $HotkeyScript
-$shortcut.IconLocation = "imageres.dll,3"
+$shortcut.IconLocation = if (Test-Path -LiteralPath $BrandIcon) { $BrandIcon } else { "imageres.dll,3" }
 $shortcut.Description = "Explore Better Win+E helper"
 $shortcut.Save()
 

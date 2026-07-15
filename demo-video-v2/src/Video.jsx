@@ -3,6 +3,7 @@ import {
   AbsoluteFill,
   Composition,
   Easing,
+  Img,
   OffthreadVideo,
   Sequence,
   interpolate,
@@ -31,21 +32,10 @@ function easeOut(frame, from, duration = 18) {
 }
 
 function Mark({ inverse = false, compact = false }) {
+  const size = compact ? 42 : 54;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-      <div style={{
-        width: compact ? 42 : 54,
-        height: compact ? 42 : 54,
-        border: `2px solid ${inverse ? lime : ink}`,
-        borderRadius: 5,
-        display: "grid",
-        placeItems: "center",
-        color: inverse ? lime : ink,
-        fontFamily: display,
-        fontWeight: 800,
-        letterSpacing: "-0.08em",
-        fontSize: compact ? 20 : 25
-      }}>EB</div>
+      <Img src={staticFile("brand-mark.svg")} style={{ width: size, height: size, display: "block" }} />
       <div style={{
         color: inverse ? paper : ink,
         fontFamily: display,
@@ -74,11 +64,11 @@ const valueEdits = [
   { from: 480, duration: 270, sourceStart: 576 },
   { from: 750, duration: 345, sourceStart: 864 },
   { from: 1095, duration: 75, sourceStart: 1218 },
-  { from: 1170, duration: 90, sourceStart: 3102 },
-  { from: 1260, duration: 90, sourceStart: 3258 },
-  { from: 1350, duration: 210, sourceStart: 3426 },
-  { from: 1560, duration: 240, sourceStart: 3723 },
-  { from: 1800, duration: 135, sourceStart: 3975 }
+  { from: 1170, duration: 90, sourceStart: 1800 },
+  { from: 1260, duration: 90, sourceStart: 1872 },
+  { from: 1350, duration: 210, sourceStart: 1970 },
+  { from: 1560, duration: 240, sourceStart: 2193 },
+  { from: 1800, duration: 135, sourceStart: 2397 }
 ];
 
 function EditedAppVideo({ style }) {
