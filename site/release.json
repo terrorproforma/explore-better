@@ -1,6 +1,6 @@
 {
-  "version": "0.2.1",
-  "installer": "ExploreBetter-0.2.1-x64-setup.exe",
+  "version": "0.2.2",
+  "installer": "ExploreBetter-0.2.2-x64-setup.exe",
   "sizeMiB": 107.6,
-  "sha256": "f99de8735176cfc333a093f984b9855a3f93c17ab39548f4590302e4be7c0a61"
+  "sha256": "c9abbf1831ca6ba9c19f457cf2567cd439ae12966382a5a568be9aa711e158b3"
 }

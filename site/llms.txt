@@ -27,7 +27,7 @@ Measured on the same deterministic Windows fixture, Explore Better MCP recorded 
 ## Releases
 
 - [Latest release](https://github.com/terrorproforma/explore-better/releases/latest): Public Windows installer and SHA-256 checksums.
-- [Standalone Windows MCP bundle](https://github.com/terrorproforma/explore-better/releases/tag/v0.2.1): MCPB package, sidecar, manifest, documentation, screenshots, and SHA-256 metadata.
+- [Standalone Windows MCP bundle](https://github.com/terrorproforma/explore-better/releases/tag/v0.2.2): MCPB package, sidecar, manifest, documentation, screenshots, and SHA-256 metadata.
 - Official Registry identity: `io.github.terrorproforma/explore-better`.
 - [Release notes](https://github.com/terrorproforma/explore-better/blob/master/RELEASE_NOTES.md): Version history and known limitations.
 
