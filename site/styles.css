@@ -181,7 +181,8 @@ h3 {
 
 .brand img[src$="brand-mark.svg"] {
   width: 44px;
-  height: 44px;
+  height: auto;
+  aspect-ratio: 334 / 321;
 }
 
 .site-nav {

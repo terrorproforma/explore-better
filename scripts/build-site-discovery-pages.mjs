@@ -257,7 +257,7 @@ function renderPage(page) {
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
     <header class="site-header detail-header">
-      <a class="brand" href="${prefix}" aria-label="Explore Better home"><img src="${prefix}assets/brand-mark.svg" alt="" width="34" height="34" /><span>Explore Better</span></a>
+      <a class="brand" href="${prefix}" aria-label="Explore Better home"><img src="${prefix}assets/brand-mark.svg" alt="" width="44" height="42" /><span>Explore Better</span></a>
       <nav class="site-nav" aria-label="Primary navigation"><a href="${prefix}ai-file-manager-windows/">Human + AI</a><a href="${prefix}mcp-file-manager/">MCP server</a><a href="${prefix}integrations/">Integrations</a><a href="${prefix}mcp/">Proof</a></nav>
       <a class="header-download" href="${prefix}#download"><img src="${prefix}assets/icons/download.svg" alt="" width="18" height="18" /><span>Download</span></a>
     </header>
@@ -265,7 +265,7 @@ function renderPage(page) {
       <section class="detail-hero"><div class="page-shell"><p class="eyebrow light">${page.eyebrow}</p><h1>${page.title}</h1><p class="detail-hero__lede">${page.lede}</p><div class="hero__actions"><a class="button button--primary" href="${prefix}#download">Download for Windows</a><a class="button button--ghost" href="${prefix}mcp/">See measured proof</a></div></div></section>
       ${body}
     </main>
-    <footer class="site-footer"><div class="page-shell footer-layout"><a class="brand brand--footer" href="${prefix}"><img src="${prefix}assets/brand-mark.svg" alt="" width="32" height="32" /><span>Explore Better</span></a><p>The Windows file manager built for humans and AI.</p><div class="footer-links"><a href="${prefix}security/">Security</a><a href="${prefix}privacy/">Privacy</a><a href="${prefix}terms/">Terms</a><a href="https://github.com/terrorproforma/explore-better">Source</a></div><small>MIT licensed</small></div></footer>
+    <footer class="site-footer"><div class="page-shell footer-layout"><a class="brand brand--footer" href="${prefix}"><img src="${prefix}assets/brand-mark.svg" alt="" width="44" height="42" /><span>Explore Better</span></a><p>The Windows file manager built for humans and AI.</p><div class="footer-links"><a href="${prefix}security/">Security</a><a href="${prefix}privacy/">Privacy</a><a href="${prefix}terms/">Terms</a><a href="https://github.com/terrorproforma/explore-better">Source</a></div><small>MIT licensed</small></div></footer>
   </body>
 </html>`;
 }
