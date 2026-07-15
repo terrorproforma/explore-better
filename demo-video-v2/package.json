@@ -1,0 +1,19 @@
+{
+  "name": "explore-better-demo-video-v2",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "capture": "node capture-app-footage.mjs",
+    "render": "node render.mjs",
+    "render:industrial": "node render-industrial.mjs",
+    "render:tight": "node render-tight.mjs",
+    "render:value": "node render-value.mjs"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.489",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.489"
+  }
+}

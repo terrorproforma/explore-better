@@ -1,0 +1,28 @@
+{
+  "title": "Explore Better - Website-matched Hype Demo v2",
+  "generatedAt": "2026-07-14T15:16:34.854Z",
+  "durationSeconds": 55,
+  "resolution": "1920x1080",
+  "frameRate": "30 fps",
+  "video": "demo-video-v2\\output\\explore-better-hype-demo-v2-1080p.mp4",
+  "poster": "demo-video-v2\\output\\explore-better-hype-demo-v2-poster.png",
+  "contactSheet": "demo-video-v2\\output\\explore-better-hype-demo-v2-contact-sheet.jpg",
+  "auditSheet": "demo-video-v2\\output\\explore-better-hype-demo-v2-audit-sheet.jpg",
+  "sourceFootage": "demo-video-v2\\capture\\explore-better-live-walkthrough.mp4",
+  "direction": "Continuous real app interaction with website-matched ink, lime, paper, type and copy.",
+  "audio": "Original procedural electronic score; two-pass normalization followed by AAC-safe true-peak limiting.",
+  "audioMetrics": {
+    "integratedLufs": -16.59,
+    "truePeakDbtp": -0.75,
+    "loudnessRangeLu": 0.9
+  },
+  "integrity": {
+    "bytes": 44881128,
+    "sha256": "5FCC12B8FC3DC61B76B1A30E30F63B8232F797BBFA9B5C001FBA35FF938B31A4"
+  },
+  "claims": {
+    "searchLatency": "54.7x lower median search latency (published website benchmark)",
+    "typedTools": "28 tools typed local MCP surface",
+    "recovery": "Preview + undo recoverable file changes"
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "capturedAt": "2026-07-15T08:43:56.144Z",
+  "durationSeconds": 136.978,
+  "sourceFrames": 2043,
+  "sourceRate": 14.915,
+  "outputFrameRate": 30,
+  "resolution": "1600x900",
+  "markers": [
+    {
+      "id": "workspace",
+      "seconds": 0.002
+    },
+    {
+      "id": "live-filter",
+      "seconds": 2.316
+    },
+    {
+      "id": "command-center",
+      "seconds": 7.097
+    },
+    {
+      "id": "disk-map",
+      "seconds": 11.294
+    },
+    {
+      "id": "operation-preview",
+      "seconds": 19.205
+    },
+    {
+      "id": "terminal",
+      "seconds": 28.795
+    },
+    {
+      "id": "codex-handoff",
+      "seconds": 40.595
+    },
+    {
+      "id": "codex-get-context-start",
+      "seconds": 103.471
+    },
+    {
+      "id": "codex-get-context-complete",
+      "seconds": 103.48
+    },
+    {
+      "id": "codex-search-files-start",
+      "seconds": 108.598
+    },
+    {
+      "id": "codex-search-files-complete",
+      "seconds": 108.649
+    },
+    {
+      "id": "codex-show-in-explore-better-start",
+      "seconds": 114.254
+    },
+    {
+      "id": "codex-show-in-explore-better-complete",
+      "seconds": 114.29
+    },
+    {
+      "id": "ai-bridge",
+      "seconds": 124.071
+    },
+    {
+      "id": "proof-hold",
+      "seconds": 132.46
+    },
+    {
+      "id": "end",
+      "seconds": 136.972
+    }
+  ],
+  "output": "demo-video-v2\\capture\\explore-better-live-walkthrough.mp4",
+  "codexTrace": "demo-video-v2\\capture\\codex-handoff-trace.json"
+}

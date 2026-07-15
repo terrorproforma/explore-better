@@ -1,0 +1,200 @@
+{
+  "title": "Explore Better - Value + Codex Demo v5",
+  "generatedAt": "2026-07-15T09:02:10.584Z",
+  "direction": "Outcome-led feature story with full-workspace establishing shots, restrained detail pushes, and a real read-only Codex MCP handoff replayed at edit speed.",
+  "timing": {
+    "durationSeconds": 64.5,
+    "pictureCuts": [
+      16,
+      25,
+      36.5,
+      39,
+      42,
+      45,
+      52,
+      60
+    ],
+    "sectionPoints": {
+      "human": 4,
+      "command": 6.8,
+      "disk": 11,
+      "safety": 16,
+      "terminal": 25,
+      "ai": 36.5,
+      "proof": 60,
+      "final": 62,
+      "end": 64.5
+    },
+    "chapters": [
+      {
+        "time": 0,
+        "label": "Shared context"
+      },
+      {
+        "time": 4,
+        "label": "Find anything"
+      },
+      {
+        "time": 11,
+        "label": "Map every byte"
+      },
+      {
+        "time": 16,
+        "label": "Preview safely"
+      },
+      {
+        "time": 25,
+        "label": "Terminal ready"
+      },
+      {
+        "time": 36.5,
+        "label": "Codex handoff"
+      },
+      {
+        "time": 52,
+        "label": "Scope the AI"
+      }
+    ]
+  },
+  "valueClaims": [
+    "Go from thought to file without breaking flow.",
+    "Find what is eating the drive visually.",
+    "Know what will happen before a byte moves.",
+    "Open a real shell already in the right folder.",
+    "Give Codex the same live pane context without pasted paths or terminal scraping.",
+    "Give every AI only the roots and tools it needs."
+  ],
+  "codexEvidence": {
+    "realRun": true,
+    "replayedAtEditSpeed": true,
+    "profile": "demo-readonly",
+    "tools": [
+      {
+        "marker": "codex-get-context-start",
+        "seconds": 103.471,
+        "status": "in_progress"
+      },
+      {
+        "marker": "codex-get-context-complete",
+        "seconds": 103.48,
+        "status": "completed"
+      },
+      {
+        "marker": "codex-search-files-start",
+        "seconds": 108.598,
+        "status": "in_progress"
+      },
+      {
+        "marker": "codex-search-files-complete",
+        "seconds": 108.649,
+        "status": "completed"
+      },
+      {
+        "marker": "codex-show-in-explore-better-start",
+        "seconds": 114.254,
+        "status": "in_progress"
+      },
+      {
+        "marker": "codex-show-in-explore-better-complete",
+        "seconds": 114.29,
+        "status": "completed"
+      }
+    ],
+    "sourceMarkers": [
+      {
+        "id": "codex-handoff",
+        "seconds": 40.595
+      },
+      {
+        "id": "codex-get-context-start",
+        "seconds": 103.471
+      },
+      {
+        "id": "codex-get-context-complete",
+        "seconds": 103.48
+      },
+      {
+        "id": "codex-search-files-start",
+        "seconds": 108.598
+      },
+      {
+        "id": "codex-search-files-complete",
+        "seconds": 108.649
+      },
+      {
+        "id": "codex-show-in-explore-better-start",
+        "seconds": 114.254
+      },
+      {
+        "id": "codex-show-in-explore-better-complete",
+        "seconds": 114.29
+      }
+    ]
+  },
+  "capture": {
+    "resolution": "1600x900",
+    "durationSeconds": 136.978
+  },
+  "arrangement": {
+    "duration": 64.5,
+    "sampleRate": 48000,
+    "bpm": 116,
+    "cueTimes": [
+      0.1,
+      4,
+      6.8,
+      11,
+      16,
+      25,
+      36.5,
+      39,
+      42,
+      45,
+      52,
+      60,
+      62
+    ],
+    "motif": [
+      0,
+      0,
+      3,
+      -2,
+      0,
+      5,
+      3,
+      -5
+    ],
+    "sectionPoints": {
+      "human": 4,
+      "command": 6.8,
+      "disk": 11,
+      "safety": 16,
+      "terminal": 25,
+      "ai": 36.5,
+      "proof": 60,
+      "final": 62,
+      "end": 64.5
+    }
+  },
+  "files": {
+    "video": "demo-video-v2\\output\\explore-better-hype-demo-v5-value-codex-1080p.mp4",
+    "poster": "demo-video-v2\\output\\explore-better-v5-value-poster.png",
+    "contactSheet": "demo-video-v2\\output\\explore-better-v5-value-contact-sheet.jpg",
+    "rawScore": "demo-video-v2\\output\\explore-better-v5-value-industrial-score.wav",
+    "masteredScore": "demo-video-v2\\output\\explore-better-v5-value-industrial-master.wav",
+    "webVideo": "site\\assets\\explore-better-demo.mp4",
+    "webPoster": "site\\assets\\explore-better-demo-poster.webp",
+    "codexTrace": "demo-video-v2\\capture\\codex-handoff-trace.json"
+  },
+  "audioMetrics": {
+    "integratedLufs": -15.11,
+    "truePeakDbtp": -1.9,
+    "loudnessRangeLu": 3.1
+  },
+  "integrity": {
+    "masterBytes": 47217027,
+    "masterSha256": "0E4CF8111B32694956A17125F1A14E02A3083E6164B6CC48BA1D293A5324EEA3",
+    "webBytes": 9813184,
+    "webSha256": "CADF875524268AD6D3A834D31B4FC7589EE507D5729192F68D30CE0D9877B536"
+  }
+}

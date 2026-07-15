@@ -1,0 +1,18 @@
+{
+  "title": "Explore Better — Hype Demo",
+  "durationSeconds": 40.15,
+  "resolution": "1920x1080",
+  "frameRate": 30,
+  "video": "demo-video\\output\\explore-better-hype-demo-1080p.mp4",
+  "poster": "demo-video\\output\\explore-better-hype-demo-poster.png",
+  "contactSheet": "demo-video\\output\\explore-better-hype-demo-contact-sheet.jpg",
+  "audio": "Original procedural electronic score; two-pass target -14 LUFS / -2.5 dBTP",
+  "claims": {
+    "filenameSearch": "9.8 ms via MCP vs 536.1 ms via equivalent fresh PowerShell process (54.7x ratio)",
+    "diskAnalysis": "6.2x ratio on published fixture",
+    "duplicateFinding": "4.5x ratio on published fixture",
+    "typedTools": 28,
+    "largeFolder": "100,000-entry verified UI fixture"
+  },
+  "generatedAt": "2026-07-14T13:59:16.994Z"
+}

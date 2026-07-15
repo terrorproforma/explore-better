@@ -1,0 +1,83 @@
+{
+  "title": "Explore Better - Tight Website Demo v4",
+  "generatedAt": "2026-07-15T06:22:06.403Z",
+  "timing": {
+    "durationSeconds": 45.666666666666664,
+    "removedSeconds": 9.333333333333336,
+    "pictureCuts": [
+      16.8,
+      25.2,
+      33.4,
+      40.7
+    ],
+    "sectionPoints": {
+      "human": 4.27,
+      "command": 6.83,
+      "disk": 11.354,
+      "safety": 16.67,
+      "terminal": 25.6,
+      "ai": 35.83,
+      "proof": 40.6,
+      "final": 43,
+      "end": 45.666666666666664
+    }
+  },
+  "direction": "Tighter product-led edit with motivated cuts, earlier safety proof, and an original industrial score rebuilt around the revised markers.",
+  "arrangement": {
+    "duration": 45.666666666666664,
+    "sampleRate": 48000,
+    "bpm": 116,
+    "cueTimes": [
+      0.1,
+      4.27,
+      7.245,
+      11.354,
+      17.621,
+      25.693,
+      36.2,
+      41.183,
+      43
+    ],
+    "motif": [
+      0,
+      0,
+      3,
+      -2,
+      0,
+      5,
+      3,
+      -5
+    ],
+    "sectionPoints": {
+      "human": 4.27,
+      "command": 6.83,
+      "disk": 11.354,
+      "safety": 16.67,
+      "terminal": 25.6,
+      "ai": 35.83,
+      "proof": 40.6,
+      "final": 43,
+      "end": 45.666666666666664
+    }
+  },
+  "files": {
+    "video": "demo-video-v2\\output\\explore-better-hype-demo-v4-tight-industrial-1080p.mp4",
+    "poster": "demo-video-v2\\output\\explore-better-v4-tight-poster.png",
+    "contactSheet": "demo-video-v2\\output\\explore-better-v4-tight-contact-sheet.jpg",
+    "rawScore": "demo-video-v2\\output\\explore-better-v4-tight-industrial-score.wav",
+    "masteredScore": "demo-video-v2\\output\\explore-better-v4-tight-industrial-master.wav",
+    "webVideo": "site\\assets\\explore-better-demo.mp4",
+    "webPoster": "site\\assets\\explore-better-demo-poster.webp"
+  },
+  "audioMetrics": {
+    "integratedLufs": -15.58,
+    "truePeakDbtp": -1.96,
+    "loudnessRangeLu": 3.5
+  },
+  "integrity": {
+    "masterBytes": 36595263,
+    "masterSha256": "60C51ECE64909C1255900687C8680D5DC1B239FEBF0D0DA7AFF5BC5AE6070C4B",
+    "webBytes": 7218424,
+    "webSha256": "D6E9BF42E7E7AA1D481CDD9B3EAB5E013CB9C4433FCAC258E4D070BFA7EDE776"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "title": "Explore Better - Original Industrial Score v3",
+  "generatedAt": "2026-07-15T04:19:10.926Z",
+  "direction": "Original brutal-minimal industrial techno synchronized to the approved product edit.",
+  "originality": "Procedural synthesis only; no samples, interpolations, or copied musical material.",
+  "arrangement": {
+    "duration": 55,
+    "sampleRate": 48000,
+    "bpm": 116,
+    "cueTimes": [
+      0.1,
+      5.2,
+      10.3,
+      13.7,
+      19.5,
+      28.8,
+      41.3,
+      47.9,
+      51.2
+    ],
+    "motif": [
+      0,
+      0,
+      3,
+      -2,
+      0,
+      5,
+      3,
+      -5
+    ]
+  },
+  "video": "demo-video-v2\\output\\explore-better-hype-demo-v3-industrial-1080p.mp4",
+  "silentPictureMaster": "demo-video-v2\\output\\explore-better-hype-demo-v2-silent.mp4",
+  "sourceScore": "demo-video-v2\\output\\explore-better-v3-industrial-score.wav",
+  "masteredScore": "demo-video-v2\\output\\explore-better-v3-industrial-master.wav",
+  "spectrogram": "demo-video-v2\\output\\explore-better-v3-industrial-spectrogram.png",
+  "waveform": "demo-video-v2\\output\\explore-better-v3-industrial-waveform.png",
+  "audioMetrics": {
+    "integratedLufs": -14.89,
+    "truePeakDbtp": -1.35,
+    "loudnessRangeLu": 4.3
+  },
+  "integrity": {
+    "bytes": 45382569,
+    "sha256": "737799C6A215908483F4767784A8CE147E7F4816D892D08676E5F0E93278778D"
+  }
+}
