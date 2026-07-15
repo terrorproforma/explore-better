@@ -5,7 +5,7 @@ This cut matches the current website's ink, fluorescent lime, off-white, Bahnsch
 ## Build
 
 ```powershell
-cd <USER_HOME>\OneDrive\Desktop\projects\explore-better\demo-video-v2
+cd path\to\explore-better\demo-video-v2
 npm install
 npm run capture
 npm run render

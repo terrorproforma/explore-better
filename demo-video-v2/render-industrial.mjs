@@ -13,7 +13,7 @@ const masteredScore = path.join(outputDir, "explore-better-v3-industrial-master.
 const video = path.join(outputDir, "explore-better-hype-demo-v3-industrial-1080p.mp4");
 const spectrogram = path.join(outputDir, "explore-better-v3-industrial-spectrogram.png");
 const waveform = path.join(outputDir, "explore-better-v3-industrial-waveform.png");
-const ffmpeg = String.raw`<USER_HOME>\.rosie\bin\ffmpeg.exe`;
+const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {

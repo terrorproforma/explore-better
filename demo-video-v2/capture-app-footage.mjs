@@ -12,7 +12,7 @@ const frameDir = path.join(captureDir, "frames");
 const outputPath = path.join(captureDir, "explore-better-live-walkthrough.mp4");
 const codexTracePath = path.join(captureDir, "codex-handoff-trace.json");
 const electronApp = path.join(root, "node_modules", "electron", "dist", "electron.exe");
-const ffmpeg = String.raw`<USER_HOME>\.rosie\bin\ffmpeg.exe`;
+const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
 
 async function findCodexCli() {
   if (process.env.CODEX_CLI_PATH) return process.env.CODEX_CLI_PATH;

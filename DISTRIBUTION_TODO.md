@@ -49,10 +49,9 @@ Current facts:
   `explorebettersigning` account is provisioned successfully at
   `https://eus.codesigning.azure.net/`.
 - The publisher user has the narrowly scoped `Artifact Signing Identity Verifier`
-  role on the signing account. Public Trust individual validation request
-  `[redacted identity validation ID]` was created with the corrected sold-to
-  address and is `Action Required`: present or obtain a Verified ID through
-  Microsoft Authenticator using the open QR-code flow.
+  role on the signing account. A Public Trust individual validation request was
+  created and reached `Action Required`; account-specific validation identifiers
+  and personal details are intentionally excluded from this public document.
 - Explore Better is public under the MIT licence, so SignPath Foundation's free
   [open-source signing program](https://signpath.org/) is a credible alternative
   if its project review accepts the application.

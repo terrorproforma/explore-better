@@ -49,6 +49,7 @@
     "verify:action-inventory": "node scripts/action-inventory.mjs",
     "verify:landing-page": "node scripts/landing-page-smoke.mjs",
     "verify:seo-discovery": "node scripts/seo-discovery-smoke.mjs",
+    "verify:privacy": "node scripts/privacy-audit.mjs",
     "verify:perf-100k": "node scripts/perf-100k-verify.mjs",
     "verify:windows-baseline": "node scripts/windows-baseline-smoke.mjs",
     "verify:mixed-load": "node scripts/mixed-load-smoke.mjs",
