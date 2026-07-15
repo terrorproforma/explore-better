@@ -14,7 +14,7 @@ encrypted secret store.
 
 | # | Distribution track | Status | Owner action remaining |
 |---|---|---|---|
-| 1 | Code signing and SmartScreen trust | IN PROGRESS | Upgrade the Azure Free subscription, then complete Public Trust identity validation |
+| 1 | Code signing and SmartScreen trust | IN PROGRESS | Complete the open Public Trust individual identity validation |
 | 2 | Publisher identity and brand ownership | NOT STARTED | Choose the legal publisher and decide whether to register a business or trademark |
 | 3 | Microsoft Store publication | NOT STARTED | Open and verify the correct Partner Center developer account |
 | 4 | Domain and public support identity | NOT STARTED | Purchase the final domain and own the support mailboxes |
@@ -42,14 +42,15 @@ Current facts:
   requirement, subject to Microsoft's identity validation.
 - This machine has a verified per-user installation of Azure CLI 2.88.0 and the
   Artifact Signing CLI extension 1.0.0. SignTool is not yet installed.
-- Azure CLI is authenticated to the active `Azure subscription 1` subscription;
-  the publisher account is its Owner.
+- Azure CLI is authenticated to the active Pay-As-You-Go `Azure subscription 1`
+  subscription; the publisher account is its Owner.
 - The `Microsoft.CodeSigning` resource provider is registered, the East US
-  `explore-better-signing-rg` resource group exists, and the globally unique
-  `explorebettersigning` account name is available.
-- Azure rejected Artifact Signing account creation because the subscription is
-  currently classified as free/trial. Artifact Signing requires an upgraded
-  paid subscription. No Artifact Signing account or charge was created.
+  `explore-better-signing-rg` resource group exists, and the Basic
+  `explorebettersigning` account is provisioned successfully at
+  `https://eus.codesigning.azure.net/`.
+- The publisher user has the narrowly scoped `Artifact Signing Identity Verifier`
+  role on the signing account. Public Trust individual validation is selected and
+  the Azure form is open pending exact legal identity and address details.
 - Explore Better is public under the MIT licence, so SignPath Foundation's free
   [open-source signing program](https://signpath.org/) is a credible alternative
   if its project review accepts the application.
@@ -58,8 +59,8 @@ Owner-only actions:
 
 - [x] Confirm an eligible publisher country: United States.
 - [x] Choose the primary route: Microsoft Artifact Signing Public Trust.
-- [ ] Upgrade `Azure subscription 1` from Azure Free to Pay-As-You-Go.
-- [ ] Select individual or organization when completing the identity request.
+- [x] Upgrade `Azure subscription 1` from Azure Free to Pay-As-You-Go.
+- [x] Select individual or organization when completing the identity request: individual.
 - [ ] Complete the provider's identity validation or open-source project application.
 - [ ] Accept provider agreements and charges, if any.
 - [ ] Store provider credentials in Azure/GitHub secrets; never commit or message them.
@@ -69,7 +70,7 @@ Project actions after the provider route exists:
 - [x] Install Azure CLI and the Artifact Signing extension.
 - [x] Authenticate the owner subscription and register `Microsoft.CodeSigning`.
 - [x] Create the dedicated East US resource group and validate the signing account name.
-- [ ] Create the Basic `explorebettersigning` account after the subscription upgrade.
+- [x] Create the Basic `explorebettersigning` account after the subscription upgrade.
 - [ ] Add a public code-signing policy and named release roles when required.
 - [ ] Sign the Electron app, installer, uninstaller, native filesystem helper, terminal broker, and MCP sidecar.
 - [ ] Timestamp every signature and fail release builds when any required PE file is unsigned.
