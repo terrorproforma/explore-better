@@ -93,7 +93,12 @@ async function pageSnapshot(page, installerName) {
       renderedHeight: Math.round(image.getBoundingClientRect().height)
     }));
     const aspectIssues = [...document.images]
-      .filter((image) => image.naturalWidth >= 300 && !image.classList.contains("hero__media"))
+      .filter(
+        (image) =>
+          image.naturalWidth >= 300 &&
+          !image.classList.contains("hero__media") &&
+          !image.classList.contains("pitch-hero__media")
+      )
       .map((image) => {
         const rect = image.getBoundingClientRect();
         const naturalRatio = image.naturalWidth / image.naturalHeight;
@@ -127,10 +132,10 @@ async function pageSnapshot(page, installerName) {
       unsignedDisclosure: document.querySelector("#unsigned-preview-note")?.textContent.replace(/\s+/g, " ").trim() || "",
       brandMarks: document.querySelectorAll('.brand img[src$="assets/brand-mark.svg"]').length,
       svgFavicon: document.querySelector('link[rel="icon"][type="image/svg+xml"]')?.getAttribute("href") || "",
-      majorFeatures: ["terminal", "ai-bridge"].map((id) => ({
+      majorFeatures: ["demo", "outcomes", "ai-bridge"].map((id) => ({
         id,
         present: Boolean(document.getElementById(id)),
-        image: document.querySelector(`#${id} img[src^="assets/"]`)?.getAttribute("src") || ""
+        media: Boolean(document.querySelector(`#${id} img[src^="assets/"], #${id} video`))
       }))
     };
   }, installerName);
@@ -173,6 +178,14 @@ async function main() {
   const evidence = [];
   const errors = [];
   const release = await releaseExpectations();
+  const legacyHomepage = await fs.readFile(path.join(siteRoot, "legacy-2026-07-15.html"), "utf8");
+  addCheck(
+    checks,
+    "legacy-homepage-archive",
+    legacyHomepage.includes("Archived homepage from 15 July 2026") &&
+      legacyHomepage.includes('content="noindex,nofollow"'),
+    "Previous homepage is preserved with an archive notice and excluded from indexing"
+  );
   const { server, baseUrl } = await startServer();
   let browser;
   try {
@@ -203,19 +216,19 @@ async function main() {
 
       const snapshot = await pageSnapshot(page, release.installerName);
       addCheck(checks, `${viewport.name}-title`, snapshot.title.includes("Explore Better"), snapshot.title);
-      addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === "The Windows file manager built for humans and AI.", snapshot.h1 || "Missing H1");
+      addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === "Your files. Shared context.", snapshot.h1 || "Missing H1");
       addCheck(
         checks,
         `${viewport.name}-brand-system`,
         snapshot.brandMarks >= 2 && snapshot.svgFavicon === "assets/brand-mark.svg",
         `${snapshot.brandMarks} brand marks; favicon ${snapshot.svgFavicon || "missing"}`
       );
-      addCheck(checks, `${viewport.name}-sections`, snapshot.sectionCount >= 8, `${snapshot.sectionCount} main sections`);
+      addCheck(checks, `${viewport.name}-sections`, snapshot.sectionCount >= 7, `${snapshot.sectionCount} main sections`);
       addCheck(
         checks,
         `${viewport.name}-major-features`,
-        snapshot.majorFeatures.every((feature) => feature.present && feature.image),
-        snapshot.majorFeatures.map((feature) => `${feature.id}: ${feature.image || "missing"}`).join(", ")
+        snapshot.majorFeatures.every((feature) => feature.present && feature.media),
+        snapshot.majorFeatures.map((feature) => `${feature.id}: ${feature.media ? "media present" : "missing"}`).join(", ")
       );
       addCheck(
         checks,
@@ -297,47 +310,17 @@ async function main() {
         commandCopyStatus || "Missing copy status"
       );
 
-      await page.locator('[data-tour-tab][data-label="Disk Map"]').click();
+      const codexChapter = page.locator('[data-demo-time="36.5"]');
+      await page.locator("[data-demo-video]").evaluate((video) => {
+        video.pause();
+        video.play = () => Promise.resolve();
+      });
+      await codexChapter.click();
       addCheck(
         checks,
-        `${viewport.name}-gallery`,
-        (await page.locator("[data-tour-image]").getAttribute("src")) === "assets/disk-map.png" &&
-          (await page.locator("[data-tour-label]").textContent())?.trim() === "Disk Map",
-        "Disk Map tab updates the product stage"
-      );
-
-      const tourAspectResults = [];
-      for (const label of ["Dual panes", "Per-tab Terminal", "AI Bridge", "Disk Map", "Command Center", "Integration"]) {
-        await page.locator(`[data-tour-tab][data-label="${label}"]`).click();
-        const ratio = await page.locator("[data-tour-image]").evaluate(async (image) => {
-          if (!image.complete) {
-            await new Promise((resolve) => {
-              image.addEventListener("load", resolve, { once: true });
-              image.addEventListener("error", resolve, { once: true });
-            });
-          }
-          const rect = image.getBoundingClientRect();
-          const naturalRatio = image.naturalWidth / image.naturalHeight;
-          const renderedRatio = rect.width / rect.height;
-          return {
-            src: image.getAttribute("src"),
-            natural: `${image.naturalWidth}x${image.naturalHeight}`,
-            rendered: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
-            ratioDelta: Math.abs(renderedRatio - naturalRatio) / naturalRatio
-          };
-        });
-        tourAspectResults.push({ label, ...ratio });
-      }
-      const distortedTourImages = tourAspectResults.filter(
-        (image) => !Number.isFinite(image.ratioDelta) || image.ratioDelta > 0.02
-      );
-      addCheck(
-        checks,
-        `${viewport.name}-tour-image-aspect-ratios`,
-        distortedTourImages.length === 0,
-        distortedTourImages.length
-          ? JSON.stringify(distortedTourImages)
-          : tourAspectResults.map((image) => `${image.label}: ${image.rendered}`).join(", ")
+        `${viewport.name}-demo-chapters`,
+        (await codexChapter.getAttribute("aria-current")) === "true",
+        "Codex chapter click updates the current chapter state"
       );
 
       if (viewport.name === "mobile") {

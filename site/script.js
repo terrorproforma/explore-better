@@ -32,24 +32,41 @@ window.addEventListener(
 const tourImage = document.querySelector("[data-tour-image]");
 const tourLabel = document.querySelector("[data-tour-label]");
 const tourCaption = document.querySelector("[data-tour-caption]");
+const tourTabs = Array.from(document.querySelectorAll("[data-tour-tab]"));
 
-document.querySelectorAll("[data-tour-tab]").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll("[data-tour-tab]").forEach((candidate) => {
-      const selected = candidate === tab;
-      candidate.classList.toggle("active", selected);
-      candidate.setAttribute("aria-selected", String(selected));
-    });
-    if (tourImage) {
-      tourImage.src = tab.dataset.src || tourImage.src;
-      tourImage.alt = tab.dataset.alt || "Explore Better product screen";
-      if (tab.dataset.width) tourImage.width = Number(tab.dataset.width);
-      if (tab.dataset.height) tourImage.height = Number(tab.dataset.height);
-    }
-    if (tourLabel) tourLabel.textContent = tab.dataset.label || "Product view";
-    if (tourCaption) tourCaption.textContent = tab.dataset.caption || "";
+function activateTourTab(tab) {
+  tourTabs.forEach((candidate) => {
+    const selected = candidate === tab;
+    candidate.classList.toggle("active", selected);
+    candidate.setAttribute("aria-selected", String(selected));
+    candidate.tabIndex = selected ? 0 : -1;
+  });
+  if (tourImage) {
+    tourImage.src = tab.dataset.src || tourImage.src;
+    tourImage.alt = tab.dataset.alt || "Explore Better product screen";
+    if (tab.dataset.width) tourImage.width = Number(tab.dataset.width);
+    if (tab.dataset.height) tourImage.height = Number(tab.dataset.height);
+  }
+  if (tourLabel) tourLabel.textContent = tab.dataset.label || "Product view";
+  if (tourCaption) tourCaption.textContent = tab.dataset.caption || "";
+}
+
+tourTabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => activateTourTab(tab));
+  tab.addEventListener("keydown", (event) => {
+    let nextIndex = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % tourTabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + tourTabs.length) % tourTabs.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = tourTabs.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    activateTourTab(tourTabs[nextIndex]);
+    tourTabs[nextIndex].focus();
   });
 });
+
+if (tourTabs.length) activateTourTab(tourTabs.find((tab) => tab.classList.contains("active")) || tourTabs[0]);
 
 document.querySelectorAll("[data-copy-target]").forEach((button) => {
   button.addEventListener("click", async () => {
@@ -76,6 +93,15 @@ document.querySelectorAll("[data-copy-target]").forEach((button) => {
 const demoVideo = document.querySelector("[data-demo-video]");
 const demoChapters = Array.from(document.querySelectorAll("[data-demo-time]"));
 
+function setDemoChapterState(active) {
+  demoChapters.forEach((chapter) => {
+    const selected = chapter === active;
+    chapter.classList.toggle("active", selected);
+    if (selected) chapter.setAttribute("aria-current", "true");
+    else chapter.removeAttribute("aria-current");
+  });
+}
+
 function syncDemoChapter() {
   if (!demoVideo || !demoChapters.length) return;
   const current = demoVideo.currentTime;
@@ -83,7 +109,7 @@ function syncDemoChapter() {
   demoChapters.forEach((chapter) => {
     if (Number(chapter.dataset.demoTime || 0) <= current + 0.05) active = chapter;
   });
-  demoChapters.forEach((chapter) => chapter.classList.toggle("active", chapter === active));
+  setDemoChapterState(active);
 }
 
 demoChapters.forEach((chapter) => {
@@ -92,6 +118,7 @@ demoChapters.forEach((chapter) => {
     demoVideo.currentTime = Number(chapter.dataset.demoTime || 0);
     demoVideo.play().catch(() => {});
     syncDemoChapter();
+    setDemoChapterState(chapter);
   });
 });
 

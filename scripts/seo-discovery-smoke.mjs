@@ -9,7 +9,7 @@ const artifactsDir = path.join(root, "artifacts");
 const reportPath = path.join(artifactsDir, "seo-discovery-latest.json");
 const canonicalRoot = "https://terrorproforma.github.io/explore-better/";
 const pages = [
-  { name: "home", route: "/", file: "index.html", canonical: canonicalRoot, h1: "The Windows file manager built for humans and AI." },
+  { name: "home", route: "/", file: "index.html", canonical: canonicalRoot, h1: "YOUR FILES. SHARED CONTEXT." },
   { name: "mcp", route: "/mcp/", file: "mcp/index.html", canonical: `${canonicalRoot}mcp/`, h1: "Explore Better MCP Server" },
   ...[
     ["ai-file-manager-windows", "AI-native Windows file manager and Explorer replacement"],
@@ -164,7 +164,7 @@ async function main() {
   add(checks, "benchmark-mcp-proofs", benchmark.summary?.mcpSpecificProofsPassed === 6 && benchmark.summary?.mcpSpecificProofsTotal === 6, `${benchmark.summary?.mcpSpecificProofsPassed}/${benchmark.summary?.mcpSpecificProofsTotal}`);
   add(checks, "benchmark-repetitions", benchmark.methodology?.repetitions >= 3 && benchmark.methodology?.limitation?.includes("warm shell"), `${benchmark.methodology?.repetitions} repetitions with comparison caveat`);
   add(checks, "benchmark-page-sync", benchmark.workflows.every((workflow) => htmlByPage.get("mcp").includes(`${workflow.mcp.medianMs} ms`) && htmlByPage.get("mcp").includes(`${workflow.powershell.medianMs} ms`)), "Published medians match machine-readable evidence");
-  add(checks, "benchmark-ratio-sync", htmlByPage.get("home").includes("54.7x") && htmlByPage.get("home").includes("6.2x") && htmlByPage.get("home").includes("4.5x") && htmlByPage.get("home").includes("warm persistent shell may be faster"), "Measured ratios and comparison caveat are visible");
+  add(checks, "benchmark-ratio-sync", htmlByPage.get("home").includes("54.7×") && htmlByPage.get("home").includes("6.2×") && htmlByPage.get("home").includes("4.5×") && htmlByPage.get("home").includes("warm persistent shell may be faster"), "Measured ratios and comparison caveat are visible");
 
   const { server, baseUrl } = await startServer();
   let browser;
