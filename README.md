@@ -10,7 +10,7 @@
 
 **The Windows file manager built for humans and AI: fast dual panes, per-tab terminals, a local MCP server, transactional file operations, reversible Explorer integration, and a visual disk-space analyzer.**
 
-[Visit the Explore Better website](https://terrorproforma.github.io/explore-better/) | [See the MCP proof](https://terrorproforma.github.io/explore-better/mcp/) | [Download the latest Windows release](https://github.com/terrorproforma/explore-better/releases/latest) | [Read the user manual](USER_MANUAL.md) | [Report an issue](https://github.com/terrorproforma/explore-better/issues)
+[Visit the Explore Better website](https://terrorproforma.github.io/explore-better/) | [See the MCP proof](https://terrorproforma.github.io/explore-better/mcp/) | [Download the latest Windows release](https://github.com/terrorproforma/explore-better/releases/latest) | [Read the user manual](USER_MANUAL.md) | [Track distribution readiness](DISTRIBUTION_TODO.md) | [Report an issue](https://github.com/terrorproforma/explore-better/issues)
 
 ## Why Explore Better Exists
 
