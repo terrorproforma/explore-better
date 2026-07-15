@@ -27,7 +27,7 @@ Overall: **0 / 8 complete**. Active track: **1 - Code signing and SmartScreen tr
 
 ## 1. Code Signing And SmartScreen Trust
 
-Status: **IN PROGRESS - provider route under evaluation**
+Status: **IN PROGRESS - Microsoft Artifact Signing route selected**
 
 Current facts:
 
@@ -38,16 +38,21 @@ Current facts:
 - Public Trust currently accepts organizations in the US, Canada, EU, and UK,
   and individual developers in the US and Canada. Private Trust does not solve
   public-download trust.
-- This machine does not currently have Azure CLI, the Artifact Signing CLI
-  extension, or SignTool on `PATH`.
+- The publisher is US-based and therefore meets the current Public Trust regional
+  requirement, subject to Microsoft's identity validation.
+- This machine has a verified per-user installation of Azure CLI 2.88.0 and the
+  Artifact Signing CLI extension 1.0.0. SignTool is not yet installed.
+- Azure authentication is the next setup boundary; no subscription resource has
+  been created or modified yet.
 - Explore Better is public under the MIT licence, so SignPath Foundation's free
   [open-source signing program](https://signpath.org/) is a credible alternative
   if its project review accepts the application.
 
 Owner-only actions:
 
-- [ ] Confirm the country and type of the legal publisher: individual or organization.
-- [ ] Choose one eligible route: Microsoft Artifact Signing, SignPath Foundation, or a commercial OV certificate.
+- [x] Confirm an eligible publisher country: United States.
+- [x] Choose the primary route: Microsoft Artifact Signing Public Trust.
+- [ ] Select individual or organization when completing the identity request.
 - [ ] Complete the provider's identity validation or open-source project application.
 - [ ] Accept provider agreements and charges, if any.
 - [ ] Store provider credentials in Azure/GitHub secrets; never commit or message them.
