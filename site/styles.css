@@ -2900,7 +2900,7 @@ h3 {
   color: rgba(255, 255, 255, 0.62);
 }
 
-.pitch-sound {
+.pitch-local-note {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -2912,10 +2912,12 @@ h3 {
   text-transform: uppercase;
 }
 
-.pitch-sound::before {
-  width: 18px;
-  height: 11px;
-  background: repeating-linear-gradient(90deg, var(--acid) 0 2px, transparent 2px 4px);
+.pitch-local-note::before {
+  width: 8px;
+  height: 8px;
+  background: var(--acid);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px rgba(199, 255, 74, 0.12);
   content: "";
 }
 
