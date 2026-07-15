@@ -27,7 +27,7 @@ Overall: **0 / 8 complete**. Active track: **1 - Code signing and SmartScreen tr
 
 ## 1. Code Signing And SmartScreen Trust
 
-Status: **IN PROGRESS - Microsoft Artifact Signing route selected**
+Status: **IN PROGRESS - Microsoft Verified ID action required**
 
 Current facts:
 
@@ -40,8 +40,8 @@ Current facts:
   public-download trust.
 - The publisher is US-based and therefore meets the current Public Trust regional
   requirement, subject to Microsoft's identity validation.
-- This machine has a verified per-user installation of Azure CLI 2.88.0 and the
-  Artifact Signing CLI extension 1.0.0. SignTool is not yet installed.
+- This machine has a verified per-user installation of Azure CLI 2.88.0, the
+  Artifact Signing CLI extension 1.0.0, and Windows SDK SignTool 10.0.26100.0.
 - Azure CLI is authenticated to the active Pay-As-You-Go `Azure subscription 1`
   subscription; the publisher account is its Owner.
 - The `Microsoft.CodeSigning` resource provider is registered, the East US
@@ -49,8 +49,10 @@ Current facts:
   `explorebettersigning` account is provisioned successfully at
   `https://eus.codesigning.azure.net/`.
 - The publisher user has the narrowly scoped `Artifact Signing Identity Verifier`
-  role on the signing account. Public Trust individual validation is selected and
-  the Azure form is open pending exact legal identity and address details.
+  role on the signing account. Public Trust individual validation request
+  `[redacted identity validation ID]` was created with the corrected sold-to
+  address and is `Action Required`: present or obtain a Verified ID through
+  Microsoft Authenticator using the open QR-code flow.
 - Explore Better is public under the MIT licence, so SignPath Foundation's free
   [open-source signing program](https://signpath.org/) is a credible alternative
   if its project review accepts the application.
@@ -62,7 +64,7 @@ Owner-only actions:
 - [x] Upgrade `Azure subscription 1` from Azure Free to Pay-As-You-Go.
 - [x] Select individual or organization when completing the identity request: individual.
 - [ ] Complete the provider's identity validation or open-source project application.
-- [ ] Accept provider agreements and charges, if any.
+- [x] Accept the Artifact Signing terms and submit the Public Trust application.
 - [ ] Store provider credentials in Azure/GitHub secrets; never commit or message them.
 
 Project actions after the provider route exists:
