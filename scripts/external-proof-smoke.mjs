@@ -53,30 +53,30 @@ function limitedAppend(current, chunk, limit = 36000) {
   return next.length <= limit ? next : next.slice(next.length - limit);
 }
 
-function runCommand(commandText, { timeoutMs = refreshTimeoutMs } = {}) {
+function runScript(script, args = [], { timeoutMs = refreshTimeoutMs } = {}) {
   return new Promise((resolve) => {
     let child = null;
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const command = process.platform === "win32" ? "cmd.exe" : "sh";
-    const args = process.platform === "win32" ? ["/d", "/s", "/c", commandText] : ["-lc", commandText];
+    const command = process.execPath;
+    const commandArgs = [path.join(workspace, script), ...args];
     try {
-      child = spawn(command, args, {
+      child = spawn(command, commandArgs, {
         cwd: workspace,
         env: process.env,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true
       });
     } catch (error) {
-      resolve({ code: null, error: error.message, stdout, stderr, command: commandText });
+      resolve({ code: null, error: error.message, stdout, stderr, script, args });
       return;
     }
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
       child.kill();
-      resolve({ code: null, timedOut: true, stdout, stderr, command: commandText });
+      resolve({ code: null, timedOut: true, stdout, stderr, script, args });
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout = limitedAppend(stdout, chunk);
@@ -88,13 +88,13 @@ function runCommand(commandText, { timeoutMs = refreshTimeoutMs } = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      resolve({ code: null, error: error.message, stdout, stderr, command: commandText });
+      resolve({ code: null, error: error.message, stdout, stderr, script, args });
     });
     child.on("exit", (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      resolve({ code, stdout, stderr, command: commandText });
+      resolve({ code, stdout, stderr, script, args });
     });
   });
 }
@@ -152,60 +152,77 @@ async function refreshExternalProofs(checks) {
       id: "code-signing-rehearsal-refresh",
       label: "Refresh code-signing rehearsal proof",
       command: "npm run verify:code-signing",
+      script: "scripts/code-signing-rehearsal-smoke.mjs",
       required: true
     },
     {
       id: "release-update-feed-refresh",
       label: "Refresh static update feed proof",
       command: "npm run verify:release-update-feed",
+      script: "scripts/generate-update-feed.mjs",
       required: true
     },
     {
       id: "release-update-feed-desktop-refresh",
       label: "Refresh desktop update feed proof",
       command: "npm run verify:release-update-feed-desktop",
+      script: "scripts/release-update-feed-desktop-smoke.mjs",
+      required: true
+    },
+    {
+      id: "release-checksums-refresh",
+      label: "Refresh release checksums after update feed",
+      command: "npm run build:release-checksums",
+      script: "scripts/generate-release-checksums.mjs",
       required: true
     },
     {
       id: "release-readiness-refresh",
       label: "Refresh release readiness proof",
       command: "npm run verify:release-readiness",
+      script: "scripts/release-readiness-smoke.mjs",
       required: true
     },
     {
       id: "release-integrity-refresh",
       label: "Refresh release integrity proof",
       command: "npm run verify:release-integrity",
+      script: "scripts/release-integrity-smoke.mjs",
       required: true
     },
     {
       id: "release-bundle-refresh",
       label: "Refresh release bundle proof",
       command: "npm run verify:release-bundle",
+      script: "scripts/release-bundle-manifest-smoke.mjs",
       required: true
     },
     {
       id: "shell-devices-refresh",
       label: "Refresh shell device proof",
       command: strictMode ? "npm run verify:shell-devices -- --require-device" : "npm run verify:shell-devices",
+      script: "scripts/shell-devices-smoke.mjs",
+      args: strictMode ? ["--require-device"] : [],
       required: false
     },
     {
       id: "production-signing-refresh",
       label: "Refresh production signing proof",
       command: "npm run verify:production-signing",
+      script: "scripts/production-signing-smoke.mjs",
       required: false
     },
     {
       id: "hosted-feed-refresh",
       label: "Refresh hosted update feed proof",
       command: "npm run verify:hosted-update-feed",
+      script: "scripts/hosted-update-feed-smoke.mjs",
       required: false
     }
   ];
   const results = [];
   for (const item of commands) {
-    const result = await runCommand(item.command);
+    const result = await runScript(item.script, item.args || []);
     const ok = result.code === 0 && !result.timedOut && !result.error;
     const status = ok ? "pass" : item.required || strictMode ? "fail" : "warn";
     addCheck(

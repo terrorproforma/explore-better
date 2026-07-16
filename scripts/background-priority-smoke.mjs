@@ -151,7 +151,8 @@ async function main() {
       APPDATA: appData,
       EXPLORE_BETTER_LIST_CONCURRENCY: String(foregroundConcurrency),
       EXPLORE_BETTER_BACKGROUND_LIST_CONCURRENCY: String(backgroundConcurrency),
-      EXPLORE_BETTER_CONTENT_INDEX_CONCURRENCY: String(contentConcurrency)
+      EXPLORE_BETTER_CONTENT_INDEX_CONCURRENCY: String(contentConcurrency),
+      EXPLORE_BETTER_DISABLE_NATIVE_LISTING: "1"
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true

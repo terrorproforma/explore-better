@@ -24,13 +24,15 @@
         </div>
         <div class="root-strip" id="root-strip" aria-label="Roots"></div>
         <div class="topbar-actions" aria-label="Primary commands">
-          <button type="button" data-topbar-action="search" title="Search the active folder"><span class="lucide-icon icon-search" aria-hidden="true"></span><span>Search</span></button>
-          <button type="button" class="topbar-disk-map" data-topbar-action="sizeAnalysis" title="Open the hierarchical disk usage map"><span class="lucide-icon icon-disk-map" aria-hidden="true"></span><span>Disk Map</span></button>
-          <button type="button" data-topbar-action="ops" title="View file operations and recovery"><span class="lucide-icon icon-operations" aria-hidden="true"></span><span>Operations</span></button>
-          <button type="button" data-topbar-action="palette" title="Find any command (Ctrl+P)"><span class="lucide-icon icon-command" aria-hidden="true"></span><span>Command</span></button>
-          <button type="button" data-topbar-action="focus" title="Toggle file-focused workspace (F9)"><span class="lucide-icon icon-focus" aria-hidden="true"></span><span>Focus</span></button>
+          <button type="button" data-topbar-action="search" title="Search the active folder"><span class="lucide-icon icon-search" aria-hidden="true"></span><span class="topbar-action-label">Search</span></button>
+          <button type="button" class="topbar-disk-map" data-topbar-action="sizeAnalysis" title="Open the hierarchical disk usage map"><span class="lucide-icon icon-disk-map" aria-hidden="true"></span><span class="topbar-action-label">Disk Map</span></button>
+          <button type="button" data-topbar-action="ops" title="View file operations and recovery"><span class="lucide-icon icon-operations" aria-hidden="true"></span><span class="topbar-action-label">Operations</span></button>
+          <button type="button" data-topbar-action="palette" title="Find any command (Ctrl+P)"><span class="lucide-icon icon-command" aria-hidden="true"></span><span class="topbar-action-label">Command</span></button>
+          <button type="button" data-topbar-action="focus" title="Toggle file-focused workspace (F9)"><span class="lucide-icon icon-focus" aria-hidden="true"></span><span class="topbar-action-label">Focus</span></button>
+          <button type="button" class="topbar-more-toggle" id="topbar-more-toggle" aria-haspopup="menu" aria-expanded="false" title="More commands" hidden><span class="lucide-icon icon-more" aria-hidden="true"></span><span class="topbar-action-label">More</span></button>
         </div>
         <div class="status-pill" id="status-pill">Ready</div>
+        <div class="topbar-more-menu" id="topbar-more-menu" role="menu" aria-label="More top bar commands" hidden></div>
       </header>
 
       <aside class="update-banner" id="update-banner" role="status" aria-live="polite" aria-atomic="true" hidden>
@@ -68,43 +70,42 @@
               </button>
             </div>
           </div>
-          <section class="nav-section" aria-labelledby="nav-favorites-title">
-            <div class="nav-section-title" id="nav-favorites-title">Favorites</div>
-            <div class="nav-list" id="nav-favorites"></div>
-          </section>
-          <section class="nav-section" aria-labelledby="nav-aliases-title">
-            <div class="nav-section-title" id="nav-aliases-title">Aliases</div>
-            <div class="nav-list" id="nav-aliases"></div>
-          </section>
-          <section class="nav-section" aria-labelledby="nav-shortcuts-title">
-            <div class="nav-section-title" id="nav-shortcuts-title">Quick Access</div>
-            <div class="nav-list" id="nav-shortcuts"></div>
-          </section>
-          <section class="nav-section" aria-labelledby="nav-shell-title">
-            <div class="nav-section-title nav-section-title-row" id="nav-shell-title">
-              <span>Shell</span>
-              <button type="button" data-shell-namespace-open="thisPc" title="Browse Windows shell namespaces">Browse</button>
-            </div>
-            <div class="nav-list" id="nav-shell"></div>
-          </section>
-          <section class="nav-section" aria-labelledby="nav-drives-title">
-            <div class="nav-section-title" id="nav-drives-title">Drives</div>
-            <div class="nav-list" id="nav-drives"></div>
+          <section class="nav-section pinned-section" id="nav-pinned-section" aria-labelledby="nav-pinned-title" hidden>
+            <div class="nav-section-title" id="nav-pinned-title">Pinned</div>
+            <div class="nav-list" id="nav-pinned"></div>
           </section>
           <section class="nav-section tree-section" aria-labelledby="folder-tree-title">
             <div class="nav-section-title nav-section-title-row" id="folder-tree-title">
               <span>Folder Tree</span>
               <span class="nav-title-actions">
                 <button data-nav-action="reveal-tree" title="Reveal active pane folder">Reveal</button>
-                <button data-nav-action="refresh-tree" title="Refresh folder tree">R</button>
+                <button data-nav-action="refresh-tree" title="Refresh folder tree">Refresh</button>
               </span>
             </div>
             <div class="folder-tree" id="folder-tree"></div>
           </section>
+          <section class="nav-section devices-section" id="nav-devices-section" aria-labelledby="nav-devices-title" hidden>
+            <div class="nav-section-title nav-section-title-row" id="nav-devices-title">
+              <span>Devices</span>
+              <button data-nav-action="open-devices" title="Open Devices & Windows locations">View</button>
+            </div>
+            <div class="nav-list" id="nav-devices"></div>
+          </section>
+          <section class="nav-section" aria-labelledby="nav-shortcuts-title">
+            <div class="nav-section-title" id="nav-shortcuts-title">Quick Access</div>
+            <div class="nav-list" id="nav-shortcuts"></div>
+          </section>
+          <section class="nav-section" aria-labelledby="nav-drives-title">
+            <div class="nav-section-title" id="nav-drives-title">Drives</div>
+            <div class="nav-list" id="nav-drives"></div>
+          </section>
           <section class="nav-section recent-section" aria-labelledby="nav-recents-title">
             <div class="nav-section-title nav-section-title-row" id="nav-recents-title">
               <span>Recent</span>
-              <button data-nav-action="clear-recents" title="Clear recent locations">Clear</button>
+              <span class="nav-title-actions">
+                <button data-nav-action="toggle-recents" id="nav-recents-toggle" title="Show all recent locations" hidden>Show all</button>
+                <button data-nav-action="clear-recents" title="Clear recent locations">Clear</button>
+              </span>
             </div>
             <div class="nav-list" id="nav-recents"></div>
           </section>
@@ -374,8 +375,8 @@
         <button data-global-action="favorite">Favorite</button>
         <button data-global-action="recycle">Recycle</button>
         <button data-global-action="delete">Delete</button>
-        <button data-global-action="appTrash">Trash Bin</button>
-        <button data-global-action="ops">Ops</button>
+        <button data-global-action="appTrash">App Trash</button>
+        <button data-global-action="ops">Operations</button>
           <button data-global-action="integration">Integrate</button>
           <button type="button" id="dock-overflow-toggle" class="dock-overflow-toggle" title="More shelf actions" aria-label="More shelf actions" aria-haspopup="menu" aria-expanded="false" hidden>
             <span class="lucide-icon icon-more" aria-hidden="true"></span>
@@ -803,10 +804,17 @@
         </div>
       </div>
       <form id="preferences-form" class="preferences-form">
-        <section class="preference-section">
+        <div class="preferences-searchbar">
+          <label for="preferences-search"><span class="lucide-icon icon-search" aria-hidden="true"></span><input id="preferences-search" type="search" autocomplete="off" placeholder="Search settings and help" /></label>
+          <button type="button" id="preferences-search-clear" title="Clear Preferences search">Clear</button>
+        </div>
+        <div class="preferences-scroll">
+        <section class="preference-section" data-preference-section="files">
           <div class="preference-section-head">
-            <strong>Lister</strong>
-            <small>Daily pane behavior</small>
+            <strong>Files and folders</strong>
+            <small>Browsing and startup</small>
+            <span class="preference-changed-badge" data-preference-changed="files" hidden>Changed</span>
+            <button type="button" data-preferences-reset-section="files">Reset section</button>
           </div>
           <label>
             <span class="field-label">Density</span>
@@ -826,7 +834,7 @@
           <label>
             <span class="field-label">Startup</span>
             <select id="preference-startup-mode">
-              <option value="last">Restore Last Lister</option>
+              <option value="last">Restore Last Folders</option>
               <option value="homeDownloads">Home + Downloads</option>
               <option value="workspaceHome">Workspace + Home</option>
               <option value="documentsDownloads">Documents + Downloads</option>
@@ -871,42 +879,41 @@
           </label>
           <label class="check-row">
             <input id="preference-confirm-trash" type="checkbox" />
-            <span>Confirm app trash actions</span>
+            <span>Confirm moves to App Trash</span>
           </label>
         </section>
-        <section class="preference-section">
+        <section class="preference-section" data-preference-section="windows">
           <div class="preference-section-head">
-            <strong>Replacement</strong>
-            <small>Default shell entry behavior</small>
+            <strong>Windows integration</strong>
+            <small>How Explorer requests open</small>
+            <span class="preference-changed-badge" data-preference-changed="windows" hidden>Changed</span>
+            <button type="button" data-preferences-reset-section="windows">Reset section</button>
           </div>
           <label>
             <span class="field-label">Launch Mode</span>
             <select id="preference-launch-mode">
-              <option value="native">Native Window</option>
-              <option value="appWindow">App Window</option>
-              <option value="browser">Browser Tab</option>
+              <option value="native">Installed Desktop App</option>
+              <option value="appWindow">Edge/Chrome App Window</option>
+              <option value="browser">Default Browser Tab</option>
             </select>
           </label>
           <label>
-            <span class="field-label">Shell Opens</span>
+            <span class="field-label">Explorer Requests</span>
             <select id="preference-shell-open-mode">
-              <option value="leftReplace">Replace Left</option>
-              <option value="rightReplace">Replace Right</option>
-              <option value="activeReplace">Replace Active</option>
-              <option value="activeNewTab">New Active Tab</option>
+              <option value="leftReplace">Replace Left Pane</option>
+              <option value="rightReplace">Replace Right Pane</option>
+              <option value="activeReplace">Replace Active Pane</option>
+              <option value="activeNewTab">New Tab in Active Pane</option>
             </select>
           </label>
           <div class="preferences-readout" id="preferences-readout"></div>
-          <div class="preferences-actions">
-            <button type="submit">Save</button>
-            <button type="button" data-preferences-action="reset">Defaults</button>
-            <button type="button" data-preferences-action="integration">Integration</button>
-          </div>
         </section>
-        <section class="preference-section terminal-preferences">
+        <section class="preference-section terminal-preferences" data-preference-section="terminal">
           <div class="preference-section-head">
             <strong>Terminal</strong>
             <small>New per-tab sessions</small>
+            <span class="preference-changed-badge" data-preference-changed="terminal" hidden>Changed</span>
+            <button type="button" data-preferences-reset-section="terminal">Reset section</button>
           </div>
           <label><span class="field-label">Profile</span><select id="preference-terminal-profile"><option value="auto">Automatic</option></select></label>
           <label><span class="field-label">Privilege</span><select id="preference-terminal-elevation"><option value="standard">Standard user</option><option value="administrator">Administrator (UAC on open)</option></select></label>
@@ -916,7 +923,7 @@
           <label><span class="field-label">Scrollback</span><input id="preference-terminal-scrollback" type="number" min="1000" max="50000" step="1000" /></label>
           <label class="check-row"><input id="preference-terminal-follow" type="checkbox" /><span>Follow pane folder while shell is idle</span></label>
         </section>
-        <section class="preference-section ai-bridge-preferences">
+        <section class="preference-section ai-bridge-preferences" data-preference-section="aiBridge">
           <div class="preference-section-head">
             <strong>AI Bridge</strong>
             <small>Local MCP clients</small>
@@ -932,10 +939,10 @@
             <label><span class="field-label">Access</span><select id="preference-ai-access"><option value="read-only">Read only</option><option value="read-write">Preview + apply writes</option></select></label>
           </div>
           <label><span class="field-label">Authorized Folders</span><textarea id="preference-ai-roots" rows="3" spellcheck="false"></textarea></label>
-          <fieldset class="ai-bridge-permissions">
-            <legend>Tool Permissions</legend>
+          <details class="ai-bridge-permissions">
+            <summary><span>Tool permissions</span><small id="preference-ai-tools-summary">Loading</small></summary>
             <div id="preference-ai-tools"></div>
-          </fieldset>
+          </details>
           <label class="check-row"><input id="preference-ai-permanent-delete" type="checkbox" /><span>Allow permanent deletion</span></label>
           <div class="ai-bridge-actions">
             <button type="button" data-ai-bridge-action="save-profile">Save Profile</button>
@@ -950,6 +957,17 @@
           <button type="button" data-ai-bridge-action="copy-snippet">Copy generic config</button>
           <details class="ai-bridge-audit"><summary>Audit History</summary><div id="preference-ai-audit"></div></details>
         </section>
+        </div>
+        <div class="preferences-no-results" id="preferences-no-results" hidden>No settings match this search.</div>
+        <div class="preferences-actions">
+          <span id="preferences-save-status" role="status" aria-live="polite">All app preferences saved</span>
+          <div>
+            <button type="submit" class="primary-command">Save App Preferences</button>
+            <button type="button" data-preferences-action="reset">Reset All</button>
+            <button type="button" data-preferences-action="integration">Windows Integration</button>
+            <button type="button" data-preferences-action="health">Health &amp; diagnostics</button>
+          </div>
+        </div>
       </form>
     </dialog>
 
@@ -1741,6 +1759,7 @@
         <div id="text-editor-summary" class="text-editor-summary">No file loaded</div>
         <div class="text-editor-actions">
           <button type="submit">Save</button>
+          <button type="button" data-text-editor-action="force-save" hidden>Overwrite Disk Version</button>
           <button type="button" data-text-editor-action="reload">Reload</button>
           <button type="button" data-text-editor-action="reveal">Reveal</button>
         </div>
@@ -2065,7 +2084,7 @@
 
     <dialog class="shell-namespace-dialog" id="shell-namespace-dialog">
       <div class="dialog-head">
-        <strong>Shell Browser</strong>
+        <strong>Windows locations</strong>
         <div class="dialog-actions">
           <span id="shell-namespace-summary">No namespace loaded</span>
           <button class="icon-button" data-close-dialog="shell-namespace-dialog" title="Close">X</button>
@@ -2074,8 +2093,8 @@
       <div class="shell-namespace-grid">
         <section class="shell-namespace-roots">
           <div class="open-with-copy">
-            <strong>Windows Namespaces</strong>
-            <small>Browse virtual shell locations such as This PC, Libraries, Network providers, phones, and other devices.</small>
+            <strong>Location groups</strong>
+            <small>Shows Windows-only locations such as connected devices and network providers. Use Folder Tree or Drives for ordinary folders.</small>
           </div>
           <div class="shell-namespace-root-buttons" id="shell-namespace-roots"></div>
           <div class="shell-namespace-actions">
@@ -2087,7 +2106,54 @@
           <div class="shell-namespace-head" id="shell-namespace-head"></div>
           <div id="shell-namespace-list" class="shell-namespace-list"></div>
         </section>
-        <pre id="shell-namespace-output"></pre>
+        <details class="shell-namespace-debug">
+          <summary>Technical details</summary>
+          <pre id="shell-namespace-output"></pre>
+        </details>
+      </div>
+    </dialog>
+
+    <dialog class="devices-dialog" id="devices-dialog">
+      <div class="dialog-head">
+        <div>
+          <strong>Devices &amp; Windows locations</strong>
+          <small id="devices-summary">Ready to inspect connected devices</small>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" id="devices-refresh">Refresh</button>
+          <button class="icon-button" data-close-dialog="devices-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="devices-dashboard">
+        <div class="devices-counts" id="devices-counts"></div>
+        <div class="devices-warnings" id="devices-warnings" hidden></div>
+        <div class="devices-groups" id="devices-groups"></div>
+        <footer class="devices-footer">
+          <button type="button" id="devices-load-network">Load network locations</button>
+          <small>Network providers are only queried when you choose to load them.</small>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog class="health-dialog" id="health-dialog">
+      <div class="dialog-head">
+        <div>
+          <strong>Health &amp; diagnostics</strong>
+          <small id="health-summary">Ready for local checks</small>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" id="health-probe">Run active checks</button>
+          <button class="icon-button" data-close-dialog="health-dialog" title="Close">X</button>
+        </div>
+      </div>
+      <div class="health-dashboard">
+        <div class="health-overall" id="health-overall"></div>
+        <div class="health-components" id="health-components"></div>
+        <section class="health-support">
+          <div><strong>Export support bundle</strong><small>ZIP contains redacted health, settings summaries, operation metadata, audit summaries, and performance metrics. It never contains file contents, terminal output, clipboard data, credentials, nonces, capabilities, or apply tokens.</small></div>
+          <label class="check-row"><input id="health-include-paths" type="checkbox" /><span>Include local paths</span></label>
+          <button type="button" id="health-export">Export support bundle</button>
+        </section>
       </div>
     </dialog>
 
@@ -2314,12 +2380,12 @@
       </div>
       <form id="search-form" class="search-form">
         <label for="search-root" class="search-wide">
-          <span class="field-label">Root</span>
-          <input id="search-root" aria-label="Search root" />
+          <span class="field-label">Search in</span>
+          <input id="search-root" aria-label="Folder to search" />
         </label>
         <label for="search-name">
-          <span class="field-label">Name</span>
-          <input id="search-name" aria-label="Search name" placeholder="server, .md, report" />
+          <span class="field-label">File name</span>
+          <input id="search-name" aria-label="File name contains" placeholder="server, .md, report" />
         </label>
         <label for="search-content">
           <span class="field-label">Content</span>
@@ -2350,8 +2416,8 @@
           <input id="search-size-value" aria-label="Search size value" placeholder="10 MB" />
         </label>
         <label for="search-date-field">
-          <span class="field-label">Date Field</span>
-          <select id="search-date-field" aria-label="Search date field">
+          <span class="field-label">Date</span>
+          <select id="search-date-field" aria-label="Date to search">
             <option value="modified">Modified</option>
             <option value="created">Created</option>
           </select>
@@ -2382,29 +2448,29 @@
           </select>
         </label>
         <label for="search-limit">
-          <span class="field-label">Limit</span>
-          <input id="search-limit" aria-label="Search limit" type="number" min="1" max="1000" value="200" />
+          <span class="field-label">Max results</span>
+          <input id="search-limit" aria-label="Maximum search results" type="number" min="1" max="1000" value="200" />
         </label>
         <label for="search-max-scan">
-          <span class="field-label">Max Scan</span>
-          <input id="search-max-scan" aria-label="Search max scan" type="number" min="100" max="50000" value="8000" />
+          <span class="field-label">Max items</span>
+          <input id="search-max-scan" aria-label="Maximum items to check" type="number" min="100" max="50000" value="8000" />
         </label>
         <label for="search-max-kb">
-          <span class="field-label">Max KB</span>
-          <input id="search-max-kb" aria-label="Search max KB" type="number" min="1" max="5000" value="512" />
+          <span class="field-label">Text KB/file</span>
+          <input id="search-max-kb" aria-label="Maximum text kilobytes to read per file" type="number" min="1" max="5000" value="512" />
         </label>
         <label class="check-row">
-          <input id="search-hidden" aria-label="Search hidden" type="checkbox" />
-          <span>Hidden</span>
+          <input id="search-hidden" aria-label="Include hidden items" type="checkbox" />
+          <span>Include hidden</span>
         </label>
         <label class="check-row search-cache-toggle">
-          <input id="search-background-cache" aria-label="Use warm search cache" type="checkbox" />
-          <span>Warm Cache</span>
+          <input id="search-background-cache" aria-label="Use search index" type="checkbox" />
+          <span>Use search index</span>
         </label>
         <div class="search-actions">
-          <button type="submit">Run</button>
-          <button type="button" data-search-action="active-root">Active</button>
-          <button type="button" data-search-action="other-root">Other</button>
+          <button type="submit">Search</button>
+          <button type="button" data-search-action="active-root">Active folder</button>
+          <button type="button" data-search-action="other-root">Other pane</button>
         </div>
       </form>
       <div class="search-preset-strip">
@@ -2595,18 +2661,18 @@
 
     <dialog class="trash-dialog" id="trash-dialog">
       <div class="dialog-head">
-        <strong>Trash Browser</strong>
+        <strong id="trash-dialog-title">App Trash</strong>
         <div class="dialog-actions">
           <button data-trash-action="refresh">Refresh</button>
-          <button data-trash-action="restore">Restore To Active</button>
-          <button data-trash-action="delete">Delete Selected</button>
-          <button data-trash-action="open-windows" hidden>Open Windows</button>
+          <button data-trash-action="restore">Restore to Active Folder</button>
+          <button data-trash-action="delete">Delete Permanently</button>
+          <button data-trash-action="open-windows" hidden>Open in File Explorer</button>
           <button class="icon-button" data-close-dialog="trash-dialog" title="Close">X</button>
         </div>
       </div>
       <div class="trash-tabs" aria-label="Trash browser mode">
         <button type="button" data-trash-mode="app" aria-pressed="true">App Trash</button>
-        <button type="button" data-trash-mode="windows" aria-pressed="false">Windows Recycle</button>
+        <button type="button" data-trash-mode="windows" aria-pressed="false">Windows Recycle Bin</button>
       </div>
       <div id="trash-summary" class="trash-summary">Loading trash</div>
       <div id="trash-results" class="trash-results"></div>
@@ -2680,9 +2746,9 @@
         <div>
           <span class="field-label">Launch Mode</span>
           <select id="launch-mode" aria-label="Launch mode">
-            <option value="native">Native Window</option>
-            <option value="appWindow">App Window</option>
-            <option value="browser">Browser Tab</option>
+            <option value="native">Installed Desktop App</option>
+            <option value="appWindow">Edge/Chrome App Window</option>
+            <option value="browser">Default Browser Tab</option>
           </select>
         </div>
         <div>

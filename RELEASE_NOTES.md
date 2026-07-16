@@ -1,6 +1,34 @@
 # Explore Better Release Notes
 
-## Unreleased
+## v0.2.4 - 2026-07-17
+
+### Product-Tested Navigation And Device Experience
+
+- Kept the Electron title bar to one measured 44 px row from 390 through 1920 px, with deterministic label collapse and keyboard-accessible overflow for Focus, Operations, and Disk Map.
+- Combined Favorites and Aliases into a compact Pinned presentation without changing either saved model, moved Folder Tree above Drives, limited Recent to eight initial entries, and retained one Navigator scroll owner.
+- Replaced the ambiguous This PC shell browser with a capability-aware Devices & Windows locations dashboard. Default loading never waits on the Network provider, and every action says whether it stays in Explore Better or requests File Explorer.
+- Added command outcome chips and plain-language expected results for in-app, File Explorer, external-app, and Windows-dialog actions.
+
+### MCP Control And Observability
+
+- Expanded the additive schema-v1 contract to 32 tools, 6 resources, 4 prompts, and 43 controlled views while preserving existing profile permission lists.
+- Added a renderer-owned, selector-free semantic action registry with validated inputs, disabled reasons, stale-context rejection, correlation IDs, and visible outcomes.
+- Added cancelable event-driven `wait_for_ui`, proper bridge request cancellation, and standard context/operation resource subscriptions that publish only the changed URI.
+- Added Devices and Health views/resources, updated the Go sidecar and internal bridge protocol atomically, and added native-sidecar tests for semantic boundaries, operation waits, subscriptions, and cancellation.
+
+### Recovery, Diagnostics, Preferences, And Performance
+
+- Added bounded operation timelines with phase/progress deduplication, retry/Undo linkage, recovery events, and synthesized display timelines for older journal rows.
+- Added Health & diagnostics with bounded active probes, scheduler metrics, and a streamed 10 MB support ZIP that redacts paths by default and permanently excludes file contents, terminal output, clipboard data, credentials, nonces, and capability/apply tokens.
+- Added sticky Preferences search, no-results feedback, per-section draft-change badges, and draft-only scoped reset actions for Files and folders, Windows integration, and Terminal.
+- Added shared foreground scheduling so speculative listing and background index work pause for navigation, search, analysis, active operations, or hidden windows and resume without duplicating cached requests.
+
+### Website And Verification
+
+- Repositioned the website around safe shared control: Explore Better is a Windows file manager that both people and AI can operate without screen scraping or unrestricted shell access.
+- Added current Devices, Health, semantic-action, operation-timeline, and foreground-scheduling value propositions plus refreshed release screenshots and measured performance evidence.
+- Preserved the previous 17 July 2026 homepage as a no-index legacy snapshot alongside the earlier 15 July archive.
+- Passed the complete 130-suite acceptance profile with zero internal failures, 175/175 speed-health checks, 31/31 release-readiness checks, and only the documented external hardware, trusted-certificate, and hosted-feed proofs outstanding.
 
 ## v0.2.3 - 2026-07-16
 

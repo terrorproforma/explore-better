@@ -12,6 +12,8 @@ const rightFixture = path.join(runRoot, "right-target");
 const appData = path.join(runRoot, "appdata");
 const sourcePath = path.join(leftFixture, "transfer-proof.txt");
 const copiedPath = path.join(rightFixture, "transfer-proof.txt");
+const hiddenSourcePath = path.join(leftFixture, "single-hidden-transfer.txt");
+const hiddenCopiedPath = path.join(rightFixture, "single-hidden-transfer.txt");
 const latestJsonPath = path.join(artifactsDir, "dual-pane-safety-latest.json");
 const latestMdPath = path.join(artifactsDir, "dual-pane-safety-latest.md");
 const horizontalScreenshotPath = path.join(artifactsDir, "dual-pane-source-target-horizontal.png");
@@ -106,6 +108,7 @@ async function main() {
   await fs.mkdir(rightFixture, { recursive: true });
   await fs.mkdir(appData, { recursive: true });
   await fs.writeFile(sourcePath, "dual pane transfer proof\n");
+  await fs.writeFile(hiddenSourcePath, "single pane transfer proof\n");
   await fs.writeFile(path.join(rightFixture, "target-only.txt"), "target\n");
   const port = Number(process.env.PORT || 51000 + Math.floor(Math.random() * 6000));
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -274,6 +277,59 @@ async function main() {
       evidence.cleared.panes.left.actions["copy-other"].disabled && evidence.cleared.panes.left.actions["copy-other"].selectionCount === 0,
       JSON.stringify(evidence.cleared.panes.left.actions["copy-other"])
     );
+
+    await page.locator('.pane[data-pane="left"] [data-entry-path]').filter({ hasText: "single-hidden-transfer.txt" }).click();
+    await page.locator('[data-list="left"]').focus();
+    await page.keyboard.press("Control+Shift+3");
+    await page.waitForFunction(() => document.querySelector(".workbench")?.classList.contains("layout-single"));
+    evidence.singleSelected = await paneSafetyState(page);
+    const hiddenCopyAction = evidence.singleSelected.panes.left.actions["copy-other"];
+    check(
+      checks,
+      "single-pane-discloses-hidden-target",
+      hiddenCopyAction.direction === "hidden" && /Review copying 1 selected item to the hidden target pane/.test(hiddenCopyAction.title),
+      JSON.stringify(hiddenCopyAction)
+    );
+
+    await page.locator('.pane[data-pane="left"] [data-action="copy-other"]').click();
+    await page.waitForFunction(() => document.getElementById("transfer-dialog")?.open && !document.getElementById("transfer-apply")?.disabled);
+    evidence.singleCopyPreview = await page.evaluate(() => ({
+      open: document.getElementById("transfer-dialog")?.open === true,
+      target: document.getElementById("transfer-target")?.value || "",
+      mode: document.getElementById("transfer-mode")?.value || "",
+      summary: document.getElementById("transfer-summary")?.textContent || "",
+      hiddenPaneDisplay: getComputedStyle(document.querySelector('.pane[data-pane="right"]')).display
+    }));
+    const hiddenCopyBeforeApply = await fs.access(hiddenCopiedPath).then(() => true, () => false);
+    check(
+      checks,
+      "single-pane-copy-requires-preview",
+      evidence.singleCopyPreview.open && evidence.singleCopyPreview.target === rightFixture && evidence.singleCopyPreview.mode === "copy" &&
+        evidence.singleCopyPreview.hiddenPaneDisplay === "none" && !hiddenCopyBeforeApply,
+      JSON.stringify({ ...evidence.singleCopyPreview, targetExistsBeforeApply: hiddenCopyBeforeApply })
+    );
+    await page.locator('#transfer-dialog [data-close-dialog="transfer-dialog"]').click();
+    await page.waitForFunction(() => !document.getElementById("transfer-dialog")?.open);
+
+    await page.locator('[data-list="left"]').focus();
+    await page.keyboard.press("F6");
+    await page.waitForFunction(() => document.getElementById("transfer-dialog")?.open && !document.getElementById("transfer-apply")?.disabled);
+    evidence.singleMovePreview = await page.evaluate(() => ({
+      target: document.getElementById("transfer-target")?.value || "",
+      mode: document.getElementById("transfer-mode")?.value || "",
+      summary: document.getElementById("transfer-summary")?.textContent || ""
+    }));
+    const hiddenMoveBeforeApply = {
+      sourceExists: await fs.access(hiddenSourcePath).then(() => true, () => false),
+      targetExists: await fs.access(hiddenCopiedPath).then(() => true, () => false)
+    };
+    check(
+      checks,
+      "single-pane-f6-requires-preview",
+      evidence.singleMovePreview.target === rightFixture && evidence.singleMovePreview.mode === "move" && hiddenMoveBeforeApply.sourceExists && !hiddenMoveBeforeApply.targetExists,
+      JSON.stringify({ ...evidence.singleMovePreview, ...hiddenMoveBeforeApply })
+    );
+    await page.locator('#transfer-dialog [data-close-dialog="transfer-dialog"]').click();
     check(checks, "runtime-clean", pageErrors.length === 0, `${pageErrors.length} page error(s).`);
   } catch (error) {
     check(checks, "smoke-execution", false, error.message);

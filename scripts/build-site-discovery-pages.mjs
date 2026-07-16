@@ -6,6 +6,13 @@ const siteRoot = path.join(root, "site");
 const baseUrl = "https://terrorproforma.github.io/explore-better";
 const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
 const releaseTag = `v${packageJson.version}`;
+const benchmark = JSON.parse(await fs.readFile(path.join(siteRoot, "benchmarks", "mcp-value.json"), "utf8"));
+const benchmarkById = new Map(benchmark.workflows.map((workflow) => [workflow.id, workflow]));
+const benchmarkMetric = (id, side) => benchmarkById.get(id)?.[side]?.medianMs ?? "n/a";
+const benchmarkRatio = (id) => {
+  const workflow = benchmarkById.get(id);
+  return workflow ? Math.round((workflow.powershell.medianMs / workflow.mcp.medianMs) * 10) / 10 : "n/a";
+};
 
 const integrations = {
   claude: {
@@ -75,14 +82,15 @@ const pages = [
     sections: [
       section("A shared view of the filesystem", "Terminal agents know what commands printed. Explore Better gives an AI the same active panes, tabs, selection, authorized roots, indexes, and operation history that you can see.", cards([
         ["For people", "Dual panes, tabs, native listing, per-tab terminals, visual disk analysis, search, previews, and reversible Explorer integration."],
-        ["For AI clients", "Twenty-eight typed MCP tools for context, discovery, analysis, organization, planning, operations, progress, cancellation, and undo."],
+        ["For AI clients", "Thirty-two typed MCP tools plus 22 selector-free semantic actions for context, discovery, analysis, safe UI control, planning, operations, progress, cancellation, and undo."],
         ["One authority", "Explore Better owns Windows permissions, root policy, path validation, transaction journals, recovery records, and the visible workspace."]
       ])),
       section("More useful than terminal-only access", "A terminal is still available in every tab, but reliable file work benefits from typed pagination, durable jobs, exact errors, and plans that can be inspected before anything changes.", cards([
         ["No shell parsing", "File entries, checksums, duplicate groups, folder comparisons, and Analyzer results return as bounded structured data."],
         ["No invisible writes", "Mutation tools plan first. Apply tokens expire, are one-use, and bind the current paths, policy, plan digest, and filesystem signatures."],
-        ["No separate AI filesystem", "The AI works through the same indexes, Analyzer, operations queue, recovery system, and pane state as the desktop app."]
-      ]) + `<div class="benchmark-strip"><div><strong>54.7x</strong><span>filename search median</span></div><div><strong>6.2x</strong><span>disk analysis median</span></div><div><strong>4.5x</strong><span>duplicate search median</span></div><p>Compared with equivalent fresh PowerShell processes on the same deterministic fixture, three measured runs. A warm persistent shell may be faster. See the published benchmark for method and raw timings.</p></div>`, true),
+        ["No separate AI filesystem", "The AI works through the same indexes, Analyzer, operations queue, recovery system, and pane state as the desktop app."],
+        ["No screen scraping", "Stable semantic actions expose validated inputs, disabled reasons, stale-context protection, visible outcomes, and event-driven waits without selectors or scripts."]
+      ]) + `<div class="benchmark-strip"><div><strong>${benchmarkRatio("filename-search")}x</strong><span>filename search median</span></div><div><strong>${benchmarkRatio("disk-usage")}x</strong><span>disk analysis median</span></div><div><strong>${benchmarkRatio("duplicate-space")}x</strong><span>duplicate search median</span></div><p>Compared with equivalent fresh PowerShell processes on the same deterministic fixture, three measured runs. A warm persistent shell may be faster. See the published benchmark for method and raw timings.</p></div>`, true),
       section("Start local and read-only", "Install the Windows app, enable AI Bridge, authorize one folder, and connect the client you already use.", steps([
         ["Install", "Run the per-user Windows installer. Normal browsing and AI Bridge use do not require administrator rights."],
         ["Authorize", "Create a read-only profile for exact folders and tools. Each profile has a separate revocable ID."],
@@ -94,14 +102,15 @@ const pages = [
     slug: "mcp-file-manager",
     title: "A local MCP file manager for Windows",
     description: "Explore Better MCP gives AI clients typed file context, indexed search, disk analysis, duplicate finding, comparisons, and previewed recoverable operations.",
-    eyebrow: "Twenty-eight typed tools / local stdio",
+    eyebrow: "Thirty-two typed tools / 22 semantic actions / local stdio",
     lede: "Reliable AI file work without arbitrary shell execution, cloud file uploads, or unrestricted machine access.",
     sections: [
       section("Tools built around real file workflows", "The MCP sidecar is a thin adapter. Explore Better remains the authority for filesystem state, policy, indexing, transactions, and recovery.", cards([
         ["Context and discovery", "Read active pane context, list locations and directories, search indexes, inspect paths, read bounded text, and compute checksums."],
         ["Analysis", "Run durable disk-usage, duplicate, and folder-comparison jobs with progress, cancellation, and paginated results."],
-        ["Safe operations", "Plan transfers, rename, delete, archive, create, text writes, labels, and collections; then apply, monitor, control, or undo."]
-      ]) + `<div class="benchmark-strip"><div><strong>9.8 ms</strong><span>typed filename search median</span></div><div><strong>72.3 ms</strong><span>exact disk analysis median</span></div><div><strong>130.4 ms</strong><span>duplicate job median</span></div><p>All three workflows matched ground truth. Equivalent fresh PowerShell baselines measured 536.1 ms, 445.4 ms, and 580.5 ms respectively. A warm persistent shell may be faster.</p></div>`),
+        ["Safe operations", "Plan transfers, rename, delete, archive, create, text writes, labels, and collections; then apply, monitor, control, or undo."],
+        ["Semantic UI control", "List stable actions, invoke validated in-app behavior, wait for structured outcomes, and reject stale context without DOM selectors."]
+      ]) + `<div class="benchmark-strip"><div><strong>${benchmarkMetric("filename-search", "mcp")} ms</strong><span>typed filename search median</span></div><div><strong>${benchmarkMetric("disk-usage", "mcp")} ms</strong><span>exact disk analysis median</span></div><div><strong>${benchmarkMetric("duplicate-space", "mcp")} ms</strong><span>duplicate job median</span></div><p>All three workflows matched ground truth. Equivalent fresh PowerShell baselines measured ${benchmarkMetric("filename-search", "powershell")} ms, ${benchmarkMetric("disk-usage", "powershell")} ms, and ${benchmarkMetric("duplicate-space", "powershell")} ms respectively. A warm persistent shell may be faster.</p></div>`),
       section("A deliberately narrow security boundary", "The server uses local stdio and an authenticated same-user named pipe. It has no remote HTTP transport, arbitrary shell tool, terminal control, registry mutation, or AI-controlled elevation.", cards([
         ["Exact roots", "Effective access intersects per-client profile roots, client roots when supplied, and Windows permissions after canonicalization."],
         ["Read-first", "Profiles default to read-only. Permanent deletion and writable tools are separate permissions, disabled unless selected."],

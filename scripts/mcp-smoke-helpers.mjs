@@ -94,7 +94,7 @@ export async function waitForOperation(request, operationId, timeoutMs = 30_000)
   }, timeoutMs);
 }
 
-export async function startElectronMcp({ visible = false, prepareFixture = null } = {}) {
+export async function startElectronMcp({ visible = false, prepareFixture = null, electronArgs = [], beforeSidecar = null, access = "read-only", tools = null } = {}) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "eb-mcp-electron-"));
   const fixture = path.join(temp, "authorized");
   await fs.mkdir(fixture, { recursive: true });
@@ -113,22 +113,42 @@ export async function startElectronMcp({ visible = false, prepareFixture = null 
   process.env.EXPLORE_BETTER_WORKSPACE_ROOT = fixture;
   const backend = await import(`../server.mjs?mcp-electron=${Date.now()}-${Math.random()}`);
   await backend.configureMcpBridge({ enabled: true });
-  const profile = await backend.upsertMcpProfile({ name: "Electron MCP", access: "read-only", roots: [fixture], clientType: "generic" });
+  const profile = await backend.upsertMcpProfile({
+    name: "Electron MCP",
+    access,
+    roots: [fixture],
+    clientType: "generic",
+    ...(Array.isArray(tools) ? { tools } : {})
+  });
   if (previous.LOCALAPPDATA === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = previous.LOCALAPPDATA;
   if (previous.EXPLORE_BETTER_WORKSPACE_ROOT === undefined) delete process.env.EXPLORE_BETTER_WORKSPACE_ROOT; else process.env.EXPLORE_BETTER_WORKSPACE_ROOT = previous.EXPLORE_BETTER_WORKSPACE_ROOT;
 
   const electronExe = path.join(root, "node_modules", "electron", "dist", "electron.exe");
-  const electron = spawn(electronExe, [root, ...(visible ? [] : ["--ai-host"]), "--no-updates"], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: !visible });
+  const electron = spawn(electronExe, [root, ...(visible ? [] : ["--ai-host"]), ...electronArgs, "--no-updates"], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: !visible });
   let electronLog = "";
   electron.stdout.on("data", (chunk) => { electronLog += chunk; });
   electron.stderr.on("data", (chunk) => { electronLog += chunk; });
   const manifest = path.join(env.LOCALAPPDATA, "ExploreBetter", "MCP", "bridge-v1.json");
   await waitFor(() => fs.access(manifest).then(() => true, () => false), 25_000);
+  let beforeSidecarResult = null;
+  try {
+    beforeSidecarResult = beforeSidecar
+      ? await beforeSidecar({ electron, env, fixture, manifest, logs: () => electronLog })
+      : null;
+  } catch (error) {
+    if (electron.exitCode === null) {
+      spawnSync("taskkill", ["/PID", String(electron.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    }
+    await backend.stopServer().catch(() => {});
+    await removeTreeEventually(temp).catch(() => {});
+    throw error;
+  }
 
   const sidecar = spawn(path.join(root, "native", "bin", "ExploreBetterMcp.exe"), ["--profile", profile.id, "--manifest", manifest], { cwd: root, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
   let sidecarError = "";
   sidecar.stderr.on("data", (chunk) => { sidecarError += chunk; });
   const pending = new Map();
+  const notifications = [];
   let nextId = 1;
   let closing = false;
   const lines = readline.createInterface({ input: sidecar.stdout });
@@ -150,19 +170,27 @@ export async function startElectronMcp({ visible = false, prepareFixture = null 
       writeSidecar({ jsonrpc: "2.0", id: message.id, result: {} });
       return;
     }
+    if (message.id === undefined && message.method) {
+      notifications.push(message);
+      while (notifications.length > 100) notifications.shift();
+      return;
+    }
     const record = pending.get(String(message.id));
     if (record) {
       pending.delete(String(message.id));
       record.resolve(message);
     }
   });
-  const call = (method, params = {}) => {
+  const startCall = (method, params = {}) => {
     const id = nextId++;
-    return new Promise((resolve, reject) => {
+    const promise = new Promise((resolve, reject) => {
+      const timeoutMs = method === "tools/call" && params?.name === "wait_for_ui"
+        ? Math.max(20_000, Number(params?.arguments?.timeoutMs || 10_000) + 5_000)
+        : 20_000;
       const timer = setTimeout(() => {
         pending.delete(String(id));
         reject(new Error(`MCP ${method} timed out. ${sidecarError}`));
-      }, 20_000);
+      }, timeoutMs);
       pending.set(String(id), {
         resolve: (value) => { clearTimeout(timer); resolve(value); },
         reject: (error) => { clearTimeout(timer); reject(error); }
@@ -173,7 +201,9 @@ export async function startElectronMcp({ visible = false, prepareFixture = null 
         reject(new Error(`MCP ${method} cannot run because the sidecar is closed. ${sidecarError}`));
       }
     });
+    return { id, promise };
   };
+  const call = (method, params = {}) => startCall(method, params).promise;
   const initialized = await call("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "Explore Better verifier", version: "1" } });
   assert(!initialized.error, `MCP initialize failed: ${JSON.stringify(initialized.error)}`);
   assert(writeSidecar({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }), "MCP sidecar closed during initialization.");
@@ -192,5 +222,5 @@ export async function startElectronMcp({ visible = false, prepareFixture = null 
     await new Promise((resolve) => setTimeout(resolve, 350));
     await removeTreeEventually(temp);
   }
-  return { temp, fixture, preparedFixture, env, profile, electron, sidecar, manifest, initialized, call, close, logs: () => ({ electronLog, sidecarError }) };
+  return { temp, fixture, preparedFixture, env, profile, electron, sidecar, manifest, initialized, call, startCall, writeSidecar, notifications, close, beforeSidecarResult, logs: () => ({ electronLog, sidecarError }) };
 }

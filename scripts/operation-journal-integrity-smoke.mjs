@@ -213,6 +213,9 @@ function assertCompletedOperation(operation, type, undoType = undefined) {
   assert(operation.error === null, `${type} should not have an error.`);
   assert(operation.progress?.phase === "Completed", `${type} progress should finish as Completed.`);
   assert(operation.result && typeof operation.result === "object", `${type} should have a structured result.`);
+  assert(Array.isArray(operation.events) && operation.events.length >= 3 && operation.events.length <= 64, `${type} should have a bounded operation timeline.`);
+  assert(operation.events.some((event) => /queued/.test(event.kind)) && operation.events.some((event) => event.kind === "started"), `${type} timeline should include queue and start events.`);
+  assert(operation.events.some((event) => /completed/.test(event.kind)), `${type} timeline should include completion.`);
   if (type === "undo") {
     assert(operation.retry === null, "Undo should not have retry metadata.");
   } else {
@@ -370,14 +373,19 @@ async function main() {
       const saved = operationById(state, operation.id);
       assert(saved.status === operation.status, `${operation.type} saved status should match response.`);
       assert(saved.progress?.phase === "Completed", `${operation.type} saved progress should be completed.`);
+      assert(Array.isArray(saved.events) && saved.events.length <= 64, `${operation.type} persisted timeline should remain bounded.`);
     }
 
     const originalCopy = operationById(state, copy.operation.id);
     assert(originalCopy.undo?.appliedAt, "Original copy operation should record undo appliedAt.");
     assert(originalCopy.undo?.result, "Original copy operation should record undo result.");
+    assert(originalCopy.events?.some((event) => event.kind === "undo" && event.relatedOperationId === undoCopy.operation.id), "Original copy timeline should link its Undo operation.");
+    assert(undoCopy.operation.relatedOperationId === originalCopy.id, "Undo operation should link back to its source.");
     const seeded = operationById(state, "seed-failed-copy");
     assert(seeded.result?.recovery?.lastRetryOperationId === retryRemaining.operation.id, "Seeded failed operation should record retry lineage.");
     assert(seeded.result?.recovery?.lastRetriedAt, "Seeded failed operation should record last retry timestamp.");
+    assert(seeded.events?.some((event) => event.kind === "retry" && event.relatedOperationId === retryRemaining.operation.id), "Failed operation timeline should link its retry.");
+    assert(retryRemaining.operation.relatedOperationId === seeded.id, "Retry operation should link back to its source.");
     assert(operationsByType(state, "copy").length >= 3, "Journal should include original copy, seeded failure, and retry copy.");
     assert(operationsByType(state, "undo").length === 1, "Journal should include one undo operation.");
 

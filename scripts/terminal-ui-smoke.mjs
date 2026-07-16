@@ -30,17 +30,33 @@ async function waitForServer(baseUrl, child) {
 }
 
 const terminalMockScript = `(() => {
-  const state = { creates: [], writes: [], resizes: [], syncs: [], restarts: [], disposes: [], sessions: new Map(), listeners: new Set(), next: 1 };
+  const state = { creates: [], writes: [], resizes: [], syncs: [], restarts: [], disposes: [], sessions: new Map(), listeners: new Set(), contexts: [], next: 1, failNextCreate: '', failNextRestart: '' };
   const emit = (message) => state.listeners.forEach((listener) => listener(message));
+  state.emit = emit;
   const metadata = (request, id) => ({ sessionId: id, profileId: request.profileId === 'auto' ? 'windows-powershell' : request.profileId, profileLabel: request.profileId === 'command-prompt' ? 'Command Prompt' : 'Windows PowerShell', elevation: request.elevation, cwd: request.cwd });
   window.__terminalMock = state;
   window.exploreBetterDesktop = {
-    getPathForFile: () => '',
+    getPathForFile: (file) => ({
+      'cmd-drop.txt': 'C:\\\\Folder With Spaces\\\\cmd-drop.txt',
+      'ps-drop.txt': "C:\\\\Folder With Spaces\\\\O'Brien.txt"
+    })[file?.name] || '',
+    aiBridge: {
+      publishContext: (context) => {
+        state.contexts.push(context);
+        while (state.contexts.length > 100) state.contexts.shift();
+        return true;
+      }
+    },
     terminal: {
       capabilities: async () => ({ available: true, defaultProfileId: 'windows-powershell', elevationAvailable: true, profiles: [{ id: 'windows-powershell', label: 'Windows PowerShell' }, { id: 'command-prompt', label: 'Command Prompt' }] }),
       create: async (request) => {
         const id = 'mock-session-' + state.next++;
         state.creates.push({ ...request, sessionId: id });
+        if (state.failNextCreate) {
+          const message = state.failNextCreate;
+          state.failNextCreate = '';
+          throw new Error(message);
+        }
         state.sessions.set(id, request);
         setTimeout(() => emit({ sessionId: id, type: 'data', data: 'Mock terminal ready\\r\\n' }), 0);
         return metadata(request, id);
@@ -51,6 +67,11 @@ const terminalMockScript = `(() => {
       restart: async (sessionId, request) => {
         const id = 'mock-session-' + state.next++;
         state.restarts.push({ from: sessionId, ...request, sessionId: id });
+        if (state.failNextRestart) {
+          const message = state.failNextRestart;
+          state.failNextRestart = '';
+          throw new Error(message);
+        }
         state.sessions.delete(sessionId);
         state.sessions.set(id, request);
         return metadata(request, id);
@@ -83,6 +104,15 @@ async function main() {
       headless: true
     });
     const page = await browser.newPage({ viewport: { width: 1366, height: 768 } });
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: baseUrl });
+    const externalTerminalRequests = [];
+    await page.route("**/api/open-with", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const payload = route.request().postDataJSON();
+      if (payload?.mode !== "terminal") return route.continue();
+      externalTerminalRequests.push(payload);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ mode: "terminal", launched: true }) });
+    });
     page.on("pageerror", (error) => errors.push(error.message));
     await page.addInitScript({ content: terminalMockScript });
     await page.goto(`${baseUrl}/?left=${encodeURIComponent(fixture)}&right=${encodeURIComponent(fixture)}`, { waitUntil: "domcontentloaded" });
@@ -155,28 +185,143 @@ async function main() {
     }));
     addCheck(checks, "administrator-transactional-restart", elevationState.requested === "administrator" && !elevationState.badgeHidden && elevationState.drawerElevated, JSON.stringify(elevationState));
 
+    await page.evaluate(() => { window.__terminalMock.failNextRestart = "Mock restart failed"; });
+    await page.click('[data-terminal-action="restart"][data-pane="left"]');
+    await page.waitForFunction(() => document.querySelector('[data-terminal-title="left"]')?.textContent?.includes("Error"));
+    const restartFailure = await page.evaluate(() => ({
+      title: document.querySelector('[data-terminal-title="left"]')?.textContent || "",
+      accessibleLabel: document.querySelector('[data-terminal-title="left"]')?.getAttribute("aria-label") || "",
+      toast: document.getElementById("toast")?.textContent || ""
+    }));
+    addCheck(checks, "restart-failure-feedback", restartFailure.title.includes("Error") && restartFailure.accessibleLabel.includes("Mock restart failed") && restartFailure.toast.includes("Mock restart failed"), JSON.stringify(restartFailure));
+    await page.click('[data-terminal-action="restart"][data-pane="left"]');
+    await page.waitForFunction(() => document.querySelector('[data-terminal-title="left"]')?.textContent?.includes("Ready"));
+    addCheck(checks, "restart-recovery", await page.evaluate(() => window.__terminalMock.restarts.length === 4 && document.querySelector('[data-terminal-title="left"]')?.textContent?.includes("Ready")), "A retry replaces the failed restart and returns to Ready.");
+
+    await page.locator('[data-terminal-drawer="left"] .terminal-session-surface').evaluate((host) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["cmd"], "cmd-drop.txt", { type: "text/plain" }));
+      host.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    });
+    addCheck(checks, "command-prompt-drop-quoting", await page.evaluate(() => window.__terminalMock.writes.at(-1)?.data === '"C:\\Folder With Spaces\\cmd-drop.txt"'), JSON.stringify(await page.evaluate(() => window.__terminalMock.writes.at(-1))));
+    await page.selectOption('[data-terminal-profile="left"]', "windows-powershell");
+    await page.waitForFunction(() => window.__terminalMock.restarts.length === 5 && document.querySelector('[data-terminal-title="left"]')?.textContent?.includes("Ready"));
+    await page.locator('[data-terminal-drawer="left"] .terminal-session-surface').evaluate((host) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["powershell"], "ps-drop.txt", { type: "text/plain" }));
+      host.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    });
+    addCheck(checks, "powershell-drop-quoting", await page.evaluate(() => window.__terminalMock.writes.at(-1)?.data === "'C:\\Folder With Spaces\\O''Brien.txt'"), JSON.stringify(await page.evaluate(() => window.__terminalMock.writes.at(-1))));
+
+    const rightDisposesBeforeFailure = await page.evaluate(() => window.__terminalMock.disposes.length);
+    await page.click('[data-terminal-action="close"][data-pane="right"]');
+    await page.waitForFunction(() => document.querySelector('[data-terminal-drawer="right"]')?.hidden === true);
+    await page.evaluate(() => { window.__terminalMock.failNextCreate = "Mock terminal startup failed"; });
+    await page.click('[data-terminal-toggle="right"]');
+    await page.waitForFunction(() => document.querySelector('[data-terminal-title="right"]')?.textContent?.includes("Error"));
+    const startupFailure = await page.evaluate(() => ({
+      title: document.querySelector('[data-terminal-title="right"]')?.textContent || "",
+      placeholder: document.querySelector('[data-terminal-placeholder="right"]')?.textContent || "",
+      disposed: window.__terminalMock.disposes.length
+    }));
+    addCheck(checks, "startup-failure-feedback", startupFailure.title.includes("Error") && startupFailure.placeholder === "Mock terminal startup failed" && startupFailure.disposed === rightDisposesBeforeFailure + 1, JSON.stringify(startupFailure));
+    await page.click('[data-terminal-action="restart"][data-pane="right"]');
+    await page.waitForFunction(() => document.querySelector('[data-terminal-title="right"]')?.textContent?.includes("Ready") && Boolean(document.querySelector('[data-terminal-drawer="right"] .xterm canvas')));
+    addCheck(checks, "startup-recovery", await page.evaluate(() => document.querySelector('[data-terminal-title="right"]')?.textContent?.includes("Ready")), "Restart recovers the failed terminal in place.");
+
+    await page.click('[data-terminal-action="search"][data-pane="left"]');
+    await page.fill('[data-terminal-search="left"]', "Mock terminal ready");
+    await page.click('[data-terminal-action="search-next"][data-pane="left"]');
+    addCheck(checks, "terminal-search", await page.evaluate(() => !document.querySelector('[data-terminal-search-panel="left"]')?.hidden && document.querySelector('[data-terminal-search="left"]')?.value === "Mock terminal ready"), "Search opens, accepts a query, and advances without leaving the terminal.");
+    const terminalTextarea = page.locator('[data-terminal-drawer="left"] .xterm-helper-textarea');
+    await terminalTextarea.focus();
+    await terminalTextarea.evaluate((textarea) => textarea.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "C",
+      code: "KeyC",
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true
+    })));
+    await page.waitForTimeout(50);
+    const copiedTerminalText = await page.evaluate(() => navigator.clipboard.readText());
+    addCheck(checks, "terminal-copy-shortcut", copiedTerminalText === "Mock terminal ready", JSON.stringify(copiedTerminalText));
+    await page.evaluate(() => navigator.clipboard.writeText("clipboard paste Ω"));
+    const writesBeforePaste = await page.evaluate(() => window.__terminalMock.writes.length);
+    await terminalTextarea.focus();
+    await terminalTextarea.evaluate((textarea) => textarea.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "V",
+      code: "KeyV",
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true
+    })));
+    await page.waitForFunction((before) => window.__terminalMock.writes.length === before + 1, writesBeforePaste, { timeout: 5000 });
+    addCheck(checks, "terminal-paste-shortcut", await page.evaluate(() => window.__terminalMock.writes.at(-1)?.data === "clipboard paste Ω"), JSON.stringify(await page.evaluate(() => window.__terminalMock.writes.at(-1))));
+    await page.click('[data-terminal-action="clear"][data-pane="left"]');
+    await page.waitForTimeout(50);
+    addCheck(checks, "terminal-clear", await page.evaluate(() => !(document.querySelector('[data-terminal-drawer="left"] .xterm-rows')?.textContent || "").includes("Mock terminal ready")), "Clear removes prior output from the active terminal view.");
+
     await page.click('[data-topbar-action="palette"]');
     await page.fill('#command-input', 'Open preferences');
     await page.press('#command-input', 'Enter');
     await page.selectOption('#preference-terminal-theme', 'high-contrast');
+    await page.fill('#preference-terminal-font-size', '15');
+    await page.selectOption('#preference-terminal-cursor', 'bar');
+    await page.fill('#preference-terminal-scrollback', '5000');
+    await page.uncheck('#preference-terminal-follow');
     await page.click('#preferences-form button[type="submit"]');
     await page.waitForFunction(() => document.querySelector('[data-terminal-drawer="left"]').classList.contains('theme-high-contrast'));
     addCheck(checks, "high-contrast-live-theme", await page.evaluate(() => document.querySelector('[data-terminal-drawer="left"]').classList.contains('theme-high-contrast')), "High Contrast applies to the live terminal.");
     await page.click('[data-close-dialog="preferences-dialog"]');
+
+    const syncsBeforeFollowDisabled = await page.evaluate(() => window.__terminalMock.syncs.length);
+    await page.fill('[data-path-input="left"]', fixture);
+    await page.press('[data-path-input="left"]', "Enter");
+    await page.waitForFunction((target) => document.querySelector('[data-path-input="left"]')?.value === target, fixture);
+    await page.click('[data-terminal-action="open-folder"][data-pane="left"]');
+    await page.waitForFunction((target) => document.querySelector('[data-path-input="left"]')?.value === target, childFolder);
+    addCheck(checks, "open-terminal-folder", await page.evaluate(({ target, syncsBefore }) => document.querySelector('[data-path-input="left"]')?.value === target && window.__terminalMock.syncs.length === syncsBefore, { target: childFolder, syncsBefore: syncsBeforeFollowDisabled }), "With folder following disabled, Open Folder returns the pane to the terminal's independent folder.");
+
+    await page.click('[data-terminal-action="external"][data-pane="left"]');
+    await page.waitForFunction(() => document.getElementById("toast")?.textContent === "External terminal opened");
+    addCheck(checks, "external-terminal-handoff", externalTerminalRequests.length === 1 && externalTerminalRequests[0].mode === "terminal" && externalTerminalRequests[0].paths?.[0] === childFolder, JSON.stringify(externalTerminalRequests[0]));
+
     await page.click('[data-topbar-action="palette"]');
     await page.fill('#command-input', 'Open preferences');
     await page.press('#command-input', 'Enter');
     await page.selectOption('#preference-terminal-theme', 'dark');
+    await page.check('#preference-terminal-follow');
     await page.click('#preferences-form button[type="submit"]');
     await page.waitForFunction(() => !document.querySelector('[data-terminal-drawer="left"]').classList.contains('theme-high-contrast'));
     await page.click('[data-close-dialog="preferences-dialog"]');
 
-    const createsBeforeShortcut = await page.evaluate(() => window.__terminalMock.creates.length);
+    const terminalBeforeShortcut = await page.evaluate(() => ({
+      creates: window.__terminalMock.creates.length,
+      disposes: window.__terminalMock.disposes.length
+    }));
     await page.locator('body').press('Control+Backquote');
     await page.waitForFunction(() => document.querySelector('[data-terminal-drawer="left"]').hidden);
+    await page.waitForFunction(() => window.__terminalMock.contexts.at(-1)?.ui?.terminals?.find((terminal) => terminal.pane === "left")?.visible === false);
+    const hiddenMcpState = await page.evaluate(() => window.__terminalMock.contexts.at(-1)?.ui?.terminals?.find((terminal) => terminal.pane === "left"));
     await page.locator('body').press('Control+Backquote');
-    await page.waitForFunction((before) => window.__terminalMock.creates.length === before + 1 && !document.querySelector('[data-terminal-drawer="left"]').hidden, createsBeforeShortcut);
-    addCheck(checks, "keyboard-toggle", await page.evaluate((before) => window.__terminalMock.creates.length === before + 1 && !document.querySelector('[data-terminal-drawer="left"]').hidden, createsBeforeShortcut), "Ctrl+Backquote closes and lazily reopens the active tab terminal.");
+    await page.waitForFunction((before) => window.__terminalMock.creates.length === before.creates && window.__terminalMock.disposes.length === before.disposes && !document.querySelector('[data-terminal-drawer="left"]').hidden, terminalBeforeShortcut);
+    addCheck(checks, "keyboard-toggle-preserves-session", await page.evaluate((before) => window.__terminalMock.creates.length === before.creates && window.__terminalMock.disposes.length === before.disposes && !document.querySelector('[data-terminal-drawer="left"]').hidden, terminalBeforeShortcut), "Ctrl+Backquote hides and restores the same terminal without ending it.");
+    addCheck(checks, "hidden-session-mcp-state", hiddenMcpState?.visible === false && hiddenMcpState?.session === true && hiddenMcpState?.state === "ready", JSON.stringify(hiddenMcpState));
+
+    await page.evaluate(() => {
+      const right = window.__terminalMock.creates.at(-1)?.sessionId;
+      window.__terminalMock.emit({ sessionId: right, type: "busy", busy: true });
+    });
+    page.once("dialog", (dialog) => dialog.dismiss());
+    const rightDisposesBeforeBusyClose = await page.evaluate(() => window.__terminalMock.disposes.length);
+    await page.click('[data-terminal-action="close"][data-pane="right"]');
+    addCheck(checks, "busy-close-cancel", await page.evaluate((before) => !document.querySelector('[data-terminal-drawer="right"]')?.hidden && window.__terminalMock.disposes.length === before, rightDisposesBeforeBusyClose), "Cancel keeps a busy terminal and its child-process session open.");
+    await page.evaluate(() => {
+      const right = window.__terminalMock.creates.at(-1)?.sessionId;
+      window.__terminalMock.emit({ sessionId: right, type: "busy", busy: false });
+    });
 
     await page.screenshot({ path: screenshotPath, fullPage: true });
     const disposedBeforeFinalClose = await page.evaluate(() => window.__terminalMock.disposes.length);
@@ -184,6 +329,20 @@ async function main() {
     await page.click('[data-terminal-action="close"][data-pane="right"]');
     await page.waitForFunction(() => window.__terminalMock.sessions.size === 1);
     addCheck(checks, "visible-session-cleanup", await page.evaluate((before) => window.__terminalMock.disposes.length === before + 2, disposedBeforeFinalClose), "Closing each visible drawer disposes its active session; the inactive tab remains alive.");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => Boolean(window.__exploreBetterStartup?.completedAt));
+    await page.click('[data-topbar-action="palette"]');
+    await page.fill('#command-input', 'Open preferences');
+    await page.press('#command-input', 'Enter');
+    const persistedTerminalPreferences = await page.evaluate(() => ({
+      theme: document.getElementById("preference-terminal-theme")?.value,
+      fontSize: document.getElementById("preference-terminal-font-size")?.value,
+      cursor: document.getElementById("preference-terminal-cursor")?.value,
+      scrollback: document.getElementById("preference-terminal-scrollback")?.value,
+      follow: document.getElementById("preference-terminal-follow")?.checked
+    }));
+    addCheck(checks, "terminal-preferences-persist", persistedTerminalPreferences.theme === "dark" && persistedTerminalPreferences.fontSize === "15" && persistedTerminalPreferences.cursor === "bar" && persistedTerminalPreferences.scrollback === "5000" && persistedTerminalPreferences.follow === true, JSON.stringify(persistedTerminalPreferences));
+    await page.click('[data-close-dialog="preferences-dialog"]');
     addCheck(checks, "renderer-errors", errors.length === 0, errors.join(" | ") || "No page errors.");
   } finally {
     await browser?.close().catch(() => {});

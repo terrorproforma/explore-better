@@ -9,12 +9,15 @@ Explore Better is a Windows file manager built for people and AI to work from th
 - Disk usage analysis, duplicate discovery, checksums, and folder comparison.
 - Preview-first collection, label, transfer, rename, delete, archive, create, and text-write operations.
 - Durable operation status, cancellation, recovery, and undo through Explore Better.
+- A bounded semantic UI action catalogue for non-destructive navigation and form control, with stale-context protection and no selector or script input.
+- Event-driven `wait_for_ui` plus context and concrete-operation resource subscriptions; unsolicited notifications contain only the changed resource URI.
+- Read-only Health & diagnostics inspection without support-bundle export or local-path inclusion.
 - Local stdio transport and an authenticated same-user named pipe. No arbitrary shell or terminal control.
 
 ## Requirements
 
 - Windows 11 x64.
-- Explore Better 0.2.0 or later installed from the [official GitHub release](https://github.com/terrorproforma/explore-better/releases/latest).
+- The matching Explore Better desktop release installed from the [official GitHub release](https://github.com/terrorproforma/explore-better/releases/latest). Bridge-protocol changes ship atomically with the bundled sidecar.
 - A compatible desktop client with MCPB or local stdio support.
 
 ## Installation
@@ -58,6 +61,7 @@ Expected behavior: the client uses the visible pane paths, returns a bounded com
 
 - The AI Bridge is disabled until the user enables it.
 - Every client uses a separately revocable profile.
+- Existing profiles keep their saved tool list when new permissions are introduced; the user must explicitly grant them.
 - Effective access is limited by profile roots, client roots when supplied, and Windows permissions.
 - Filenames and file contents are treated as untrusted data.
 - Write-capable profiles must plan first and consume a short-lived one-use apply token.

@@ -60,6 +60,11 @@ async function paletteSnapshot(page) {
     resultCount: document.querySelectorAll("[data-palette-index]").length,
     groups: [...document.querySelectorAll(".command-group-heading")].map((item) => item.textContent.trim()),
     items: [...document.querySelectorAll("[data-palette-index]")].slice(0, 8).map((item) => item.textContent.trim().replace(/\s+/g, " ")),
+    outcomes: [...document.querySelectorAll("[data-palette-index]")].slice(0, 8).map((item) => ({
+      label: item.querySelector(".command-outcome")?.textContent?.trim() || "",
+      description: item.querySelector(".command-outcome-row small")?.textContent?.trim() || "",
+      title: item.getAttribute("title") || ""
+    })),
     pins: [...document.querySelectorAll("[data-command-pin].pinned")].map((item) => item.getAttribute("aria-label")),
     storage: localStorage.getItem("explore-better-command-center-v1") || ""
   }));
@@ -106,6 +111,30 @@ async function main() {
       "disk-map-discoverable",
       /Open Disk Map/i.test(evidence.diskMap.items[0] || ""),
       `First result: ${evidence.diskMap.items[0] || "none"}.`
+    );
+    await page.locator("#command-input").fill("");
+
+    await page.locator("#command-input").fill("reveal in explorer");
+    evidence.fileExplorerOutcome = await paletteSnapshot(page);
+    check(
+      checks,
+      "file-explorer-outcome",
+      /Reveal in Explorer/i.test(evidence.fileExplorerOutcome.items[0] || "")
+        && evidence.fileExplorerOutcome.outcomes[0]?.label === "File Explorer"
+        && /not guaranteed/i.test(evidence.fileExplorerOutcome.outcomes[0]?.description || "")
+        && /File Explorer:/.test(evidence.fileExplorerOutcome.outcomes[0]?.title || ""),
+      JSON.stringify(evidence.fileExplorerOutcome.outcomes[0] || {})
+    );
+
+    await page.locator("#command-input").fill("open health diagnostics");
+    evidence.inAppOutcome = await paletteSnapshot(page);
+    check(
+      checks,
+      "in-app-outcome",
+      /Open Health & diagnostics/i.test(evidence.inAppOutcome.items[0] || "")
+        && evidence.inAppOutcome.outcomes[0]?.label === "In Explore Better"
+        && /Health & diagnostics dashboard/i.test(evidence.inAppOutcome.outcomes[0]?.description || ""),
+      JSON.stringify(evidence.inAppOutcome.outcomes[0] || {})
     );
     await page.locator("#command-input").fill("");
 

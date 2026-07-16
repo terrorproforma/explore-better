@@ -13,7 +13,7 @@ assert(await hash(source) === await hash(packaged), "Packaged MCP sidecar differ
 const result = spawnSync(packaged, ["--self-test-contract"], { encoding: "utf8", windowsHide: true });
 assert(result.status === 0, `Packaged MCP sidecar self-test failed: ${result.stderr}`);
 const report = JSON.parse(result.stdout);
-assert(report.ok && report.tools === 28 && report.mcpProtocolVersion === "2025-11-25", "Packaged MCP contract report is invalid.");
+assert(report.ok && report.tools === 32 && report.resources === 6 && report.mcpProtocolVersion === "2025-11-25", "Packaged MCP contract report is invalid.");
 const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
 assert(packageJson.build.extraResources.some((item) => item.to === "native/ExploreBetterMcp.exe"), "Package metadata does not include the MCP sidecar.");
 console.log(`Packaged MCP smoke passed: ${report.tools} tools, sha256=${await hash(packaged)}.`);

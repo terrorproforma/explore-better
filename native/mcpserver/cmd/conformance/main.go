@@ -43,7 +43,7 @@ func main() {
 		fail("official SDK tools/list failed: count=%d error=%v", len(tools.Tools), err)
 	}
 	resources, err := session.ListResources(ctx, nil)
-	if err != nil || len(resources.Resources) != 3 {
+	if err != nil || len(resources.Resources) != 4 {
 		fail("official SDK resources/list failed: count=%d error=%v", len(resources.Resources), err)
 	}
 	templates, err := session.ListResourceTemplates(ctx, nil)

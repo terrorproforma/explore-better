@@ -10,6 +10,7 @@ const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const acceptanceDir = path.join(artifacts, "acceptance", stamp);
 const full = process.argv.includes("--full");
 const refreshStale = process.argv.includes("--refresh-stale");
+const auditNpmVersion = "11.6.2";
 
 for (const stream of [process.stdout, process.stderr]) {
   stream.on("error", (error) => {
@@ -32,13 +33,19 @@ const coreSuites = [
   ["size-analysis-perf", "scripts/size-analysis-perf-smoke.mjs", 180000],
   ["size-analysis-cancel", "scripts/size-analysis-cancel-smoke.mjs", 120000],
   ["size-analysis-ui", "scripts/size-analysis-ui-smoke.mjs", 120000],
+  ["checksums-ui", "scripts/checksums-ui-smoke.mjs", 120000],
+  ["organizer-ui", "scripts/organizer-ui-smoke.mjs", 180000],
+  ["preview-editor-properties-ui", "scripts/preview-editor-properties-ui-smoke.mjs", 180000],
+  ["preferences-ui", "scripts/preferences-ui-smoke.mjs", 180000],
   ["interaction-resize", "scripts/interaction-resize-smoke.mjs", 180000],
   ["default-explorer-ui", "scripts/default-explorer-ui-smoke.mjs", 120000],
+  ["folder-tree-ui", "scripts/folder-tree-ui-smoke.mjs", 120000],
   ["adaptive-pane-chrome", "scripts/adaptive-pane-chrome-ui-smoke.mjs", 180000],
   ["workspace-panels-ui", "scripts/workspace-panels-ui-smoke.mjs", 180000],
   ["startup-recovery-ui", "scripts/startup-recovery-ui-smoke.mjs", 120000],
   ["pane-activity", "scripts/pane-activity-ui-smoke.mjs", 180000],
   ["dual-pane-safety", "scripts/dual-pane-safety-ui-smoke.mjs", 180000],
+  ["pane-navigation", "scripts/pane-navigation-ui-smoke.mjs", 180000],
   ["pane-layout", "scripts/pane-layout-no-scrollbars-smoke.mjs", 120000],
   ["layout", "scripts/layout-verify.mjs", 180000],
   ["keyboard", "scripts/keyboard-workflows-ui-smoke.mjs", 180000],
@@ -48,6 +55,7 @@ const coreSuites = [
   ["mcp-contract", "scripts/mcp-contract-smoke.mjs", 60000],
   ["mcp-security", "scripts/mcp-security-smoke.mjs", 120000],
   ["mcp-context", "scripts/mcp-context-smoke.mjs", 180000],
+  ["mcp-ui-views", "scripts/mcp-ui-views-smoke.mjs", 240000],
   ["mcp-analysis", "scripts/mcp-analysis-smoke.mjs", 180000],
   ["mcp-operations", "scripts/mcp-operations-smoke.mjs", 180000],
   ["mcp-clients", "scripts/mcp-clients-smoke.mjs", 120000],
@@ -73,7 +81,9 @@ const extendedSuites = [
   ["shell-verbs", "scripts/shell-verbs-smoke.mjs", 180000],
   ["shell-namespace", "scripts/shell-namespace-smoke.mjs", 180000],
   ["shell-devices", "scripts/shell-devices-smoke.mjs", 180000],
+  ["native-shell-readiness", "scripts/native-shell-readiness-smoke.mjs", 180000],
   ["windows-recycle", "scripts/windows-recycle-smoke.mjs", 180000],
+  ["trash-recovery-ui", "scripts/trash-recovery-ui-smoke.mjs", 180000],
   ["zip-browse", "scripts/zip-browse-smoke.mjs", 180000],
   ["production-readiness", "scripts/production-readiness-smoke.mjs", 300000],
   ["external-proof", "scripts/external-proof-smoke.mjs", 120000]
@@ -193,6 +203,44 @@ async function acquireLock() {
   }
 }
 
+async function npmAuditInvocation() {
+  const npmOnPath = process.platform === "win32"
+    ? spawnSync("where.exe", ["npm"], { stdio: "ignore", windowsHide: true }).status === 0
+    : spawnSync("npm", ["--version"], { stdio: "ignore" }).status === 0;
+  if (npmOnPath) {
+    return process.platform === "win32"
+      ? { command: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", "npm.cmd audit --audit-level=high"] }
+      : { command: "npm", args: ["audit", "--audit-level=high"] };
+  }
+
+  const toolingDir = path.join(artifacts, "npm-runtime");
+  const npmCli = path.join(toolingDir, "node_modules", "npm", "bin", "npm-cli.js");
+  const pnpmCli = process.env.PNPM_CLI_PATH || path.resolve(path.dirname(process.execPath), "..", "node_modules", "pnpm", "bin", "pnpm.cjs");
+  try {
+    await fs.access(npmCli);
+  } catch {
+    const pnpmAvailable = spawnSync(process.execPath, [pnpmCli, "--version"], { stdio: "ignore", windowsHide: true }).status === 0;
+    if (!pnpmAvailable) {
+      return { error: "npm audit requires npm, or a bundled pnpm runtime capable of provisioning npm." };
+    }
+    await fs.mkdir(toolingDir, { recursive: true });
+    await fs.writeFile(
+      path.join(toolingDir, "package.json"),
+      `${JSON.stringify({ name: "explore-better-npm-runtime", private: true, version: "0.0.0" }, null, 2)}\n`,
+      "utf8"
+    );
+    const provision = spawnSync(
+      process.execPath,
+      [pnpmCli, "--dir", toolingDir, "add", `npm@${auditNpmVersion}`, "--save-exact"],
+      { cwd: root, encoding: "utf8", windowsHide: true, timeout: 120_000 }
+    );
+    if (provision.status !== 0) {
+      return { error: `Could not provision npm ${auditNpmVersion}: ${provision.stderr || provision.stdout || provision.error?.message || provision.status}` };
+    }
+  }
+  return { command: process.execPath, args: [npmCli, "audit", "--audit-level=high"] };
+}
+
 async function main() {
   const lock = await acquireLock();
   await fs.mkdir(acceptanceDir, { recursive: true });
@@ -200,19 +248,31 @@ async function main() {
   const startedAt = new Date().toISOString();
   try {
     const auditStarted = Date.now();
-    const audit = process.platform === "win32"
-      ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npm.cmd audit --audit-level=high"], { cwd: root, encoding: "utf8", windowsHide: true, timeout: 120000 })
-      : spawnSync("npm", ["audit", "--audit-level=high"], { cwd: root, encoding: "utf8", timeout: 120000 });
+    const auditCommand = await npmAuditInvocation();
+    const audit = auditCommand.error
+      ? { status: 1, stdout: "", stderr: auditCommand.error }
+      : spawnSync(auditCommand.command, auditCommand.args, { cwd: root, encoding: "utf8", windowsHide: true, timeout: 120000 });
     results.push({ name: "dependency-audit", script: "npm audit --audit-level=high", status: audit.status === 0 ? "pass" : "fail", code: audit.status, timedOut: Boolean(audit.error?.code === "ETIMEDOUT"), durationMs: Date.now() - auditStarted, stdout: audit.stdout || "", stderr: audit.stderr || "" });
     const metaNames = new Set(["release-readiness", "speed-health", "goal"]);
     const coreWithoutMeta = coreSuites.filter((suite) => !metaNames.has(suite[0]));
     const metaSuites = coreSuites.filter((suite) => metaNames.has(suite[0]));
     const discoveredSuites = await packageVerificationSuites();
-    const selectedSuites = refreshStale
+    const baseSuites = refreshStale
       ? [...discoveredSuites, ...extendedSuites, ...metaSuites]
       : full
         ? [...coreWithoutMeta, ...discoveredSuites, ...extendedSuites, ...metaSuites]
         : [...coreWithoutMeta, ...metaSuites];
+    const finalReleaseOrder = new Map([
+      ["release-checksums", 1],
+      ["release-bundle", 2]
+    ]);
+    const selectedSuites = [
+      ...baseSuites.filter((suite) => !finalReleaseOrder.has(suite[0]) && !metaNames.has(suite[0])),
+      ...baseSuites
+        .filter((suite) => finalReleaseOrder.has(suite[0]))
+        .sort((left, right) => finalReleaseOrder.get(left[0]) - finalReleaseOrder.get(right[0])),
+      ...baseSuites.filter((suite) => metaNames.has(suite[0]))
+    ];
     const seenScripts = new Set();
     for (const suite of selectedSuites) {
       const suiteKey = `${suite[1]} ${JSON.stringify(suite[3] || [])}`;

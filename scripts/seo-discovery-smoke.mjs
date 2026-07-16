@@ -9,7 +9,7 @@ const artifactsDir = path.join(root, "artifacts");
 const reportPath = path.join(artifactsDir, "seo-discovery-latest.json");
 const canonicalRoot = "https://terrorproforma.github.io/explore-better/";
 const pages = [
-  { name: "home", route: "/", file: "index.html", canonical: canonicalRoot, h1: "YOUR FILES. SHARED CONTEXT." },
+  { name: "home", route: "/", file: "index.html", canonical: canonicalRoot, h1: "YOUR FILES. SHARED CONTROL." },
   { name: "mcp", route: "/mcp/", file: "mcp/index.html", canonical: `${canonicalRoot}mcp/`, h1: "Explore Better MCP Server" },
   ...[
     ["ai-file-manager-windows", "AI-native Windows file manager and Explorer replacement"],
@@ -161,10 +161,11 @@ async function main() {
   const benchmark = JSON.parse(await fs.readFile(path.join(siteRoot, "benchmarks", "mcp-value.json"), "utf8"));
   add(checks, "benchmark-schema", benchmark.schema === "explore-better.mcp-value.v1", benchmark.schema || "missing");
   add(checks, "benchmark-shared-correctness", benchmark.summary?.workflowsPassed === 3 && benchmark.summary?.workflowsTotal === 3, `${benchmark.summary?.workflowsPassed}/${benchmark.summary?.workflowsTotal}`);
-  add(checks, "benchmark-mcp-proofs", benchmark.summary?.mcpSpecificProofsPassed === 6 && benchmark.summary?.mcpSpecificProofsTotal === 6, `${benchmark.summary?.mcpSpecificProofsPassed}/${benchmark.summary?.mcpSpecificProofsTotal}`);
+  add(checks, "benchmark-mcp-proofs", benchmark.summary?.mcpSpecificProofsPassed === 7 && benchmark.summary?.mcpSpecificProofsTotal === 7, `${benchmark.summary?.mcpSpecificProofsPassed}/${benchmark.summary?.mcpSpecificProofsTotal}`);
   add(checks, "benchmark-repetitions", benchmark.methodology?.repetitions >= 3 && benchmark.methodology?.limitation?.includes("warm shell"), `${benchmark.methodology?.repetitions} repetitions with comparison caveat`);
   add(checks, "benchmark-page-sync", benchmark.workflows.every((workflow) => htmlByPage.get("mcp").includes(`${workflow.mcp.medianMs} ms`) && htmlByPage.get("mcp").includes(`${workflow.powershell.medianMs} ms`)), "Published medians match machine-readable evidence");
-  add(checks, "benchmark-ratio-sync", htmlByPage.get("home").includes("54.7×") && htmlByPage.get("home").includes("6.2×") && htmlByPage.get("home").includes("4.5×") && htmlByPage.get("home").includes("warm persistent shell may be faster"), "Measured ratios and comparison caveat are visible");
+  const expectedRatios = benchmark.workflows.map((workflow) => `${Math.round((workflow.powershell.medianMs / workflow.mcp.medianMs) * 10) / 10}×`);
+  add(checks, "benchmark-ratio-sync", expectedRatios.every((ratio) => htmlByPage.get("home").includes(ratio)) && htmlByPage.get("home").includes("warm persistent shell may be faster"), `${expectedRatios.join(", ")} and comparison caveat are visible`);
 
   const { server, baseUrl } = await startServer();
   let browser;

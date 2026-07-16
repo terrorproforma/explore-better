@@ -172,7 +172,7 @@ async function runDuplicates(page, checks) {
       const groups = document.querySelectorAll("#duplicates-results .duplicate-group").length;
       const items = [...document.querySelectorAll("#duplicates-results .duplicate-item-row")].map((row) => row.textContent.trim());
       return {
-        ok: /1 groups/.test(summary) && groups === 1 && items.length >= 2,
+        ok: /1 group\b/.test(summary) && !/1 groups\b/.test(summary) && groups === 1 && items.length >= 2,
         summary,
         groups,
         items: items.slice(0, 6),
@@ -182,7 +182,7 @@ async function runDuplicates(page, checks) {
     "duplicate results"
   );
   const layout = await inspectDialogLayout(page, "duplicates-dialog");
-  check(checks, "duplicate-summary", /1 groups/.test(result.summary), `Duplicate summary: ${result.summary}.`);
+  check(checks, "duplicate-summary", /1 group\b/.test(result.summary) && !/1 groups\b/.test(result.summary), `Duplicate summary: ${result.summary}.`);
   check(checks, "duplicate-hash-group", result.hasBothDuplicates, `Duplicate items: ${result.items.join(" | ")}.`);
   check(
     checks,
@@ -210,9 +210,9 @@ async function runCompareAndPreview(page, checks) {
       return {
         ok:
           /shown/.test(summary) &&
-          statuses.some((text) => text.includes("leftOnly")) &&
-          statuses.some((text) => text.includes("rightOnly")) &&
-          statuses.some((text) => text.includes("newerLeft")),
+          statuses.some((text) => text.includes("Only on left")) &&
+          statuses.some((text) => text.includes("Only on right")) &&
+          statuses.some((text) => text.includes("Newer on left")),
         summary,
         rowCount: rows.length,
         relatives: rows.map((row) => row.relative),
@@ -225,9 +225,10 @@ async function runCompareAndPreview(page, checks) {
   check(
     checks,
     "compare-statuses",
-    compare.statuses.some((text) => text.includes("leftOnly")) &&
-      compare.statuses.some((text) => text.includes("rightOnly")) &&
-      compare.statuses.some((text) => text.includes("newerLeft")),
+    compare.statuses.some((text) => text.includes("Only on left")) &&
+      compare.statuses.some((text) => text.includes("Only on right")) &&
+      compare.statuses.some((text) => text.includes("Newer on left")) &&
+      !compare.statuses.some((text) => /leftOnly|rightOnly|newerLeft/.test(text)),
     `Compare rows: ${compare.statuses.join(" | ")}.`
   );
 
@@ -239,7 +240,7 @@ async function runCompareAndPreview(page, checks) {
       const rows = [...document.querySelectorAll("#sync-preview .sync-preview-row")].map((row) => row.textContent.trim());
       const applyDisabled = document.getElementById("compare-sync-apply")?.disabled !== false;
       return {
-        ok: /planned/.test(summary) && rows.some((text) => text.includes("copy")) && rows.some((text) => text.includes("overwrite")),
+        ok: /planned/.test(summary) && /Left to right/.test(summary) && rows.some((text) => text.includes("Copy")) && rows.some((text) => text.includes("Replace")),
         summary,
         rows: rows.slice(0, 12),
         applyEnabled: !applyDisabled
@@ -252,7 +253,7 @@ async function runCompareAndPreview(page, checks) {
   check(
     checks,
     "sync-preview-actions",
-    preview.rows.some((text) => text.includes("copy")) && preview.rows.some((text) => text.includes("overwrite")),
+    preview.rows.some((text) => text.includes("Copy")) && preview.rows.some((text) => text.includes("Replace")) && !preview.rows.some((text) => /\boverwrite\b/.test(text)),
     `Sync preview rows: ${preview.rows.join(" | ")}.`
   );
   check(checks, "sync-preview-apply-ready", preview.applyEnabled, "Sync Apply button enabled after preview.");

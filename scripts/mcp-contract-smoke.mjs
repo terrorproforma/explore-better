@@ -6,9 +6,10 @@ import { assert, root } from "./mcp-smoke-helpers.mjs";
 
 const contractBytes = await fs.readFile(path.join(root, "mcp", "contracts-v1.json"));
 const contract = JSON.parse(contractBytes);
-assert(contract.bridgeProtocolVersion === 1, "Bridge protocol must be v1.");
+assert(contract.bridgeProtocolVersion === 2, "Bridge protocol must be v2.");
 assert(contract.mcpProtocolVersion === "2025-11-25", "Unexpected MCP protocol version.");
-assert(contract.tools.length === 28, `Expected 28 tools, found ${contract.tools.length}.`);
+assert(contract.tools.length === 32, `Expected 32 tools, found ${contract.tools.length}.`);
+assert(contract.resources.length === 6, `Expected 6 resources, found ${contract.resources.length}.`);
 assert(new Set(contract.tools.map((tool) => tool.name)).size === contract.tools.length, "Tool names must be unique.");
 assert(contract.tools.every((tool) => tool.inputSchema?.type === "object" && tool.annotations), "Every tool needs an object schema and annotations.");
 

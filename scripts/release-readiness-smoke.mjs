@@ -715,9 +715,10 @@ async function verifyDesktopSmoke(checks) {
     );
     return null;
   }
-  const command = process.platform === "win32" ? "cmd.exe" : "npm";
-  const args =
-    process.platform === "win32" ? ["/d", "/s", "/c", "npm run desktop:smoke-window"] : ["run", "desktop:smoke-window"];
+  const command = process.platform === "win32"
+    ? path.join(workspace, "node_modules", "electron", "dist", "electron.exe")
+    : path.join(workspace, "node_modules", ".bin", "electron");
+  const args = [".", "--smoke", "--smoke-window"];
   let result = null;
   let attempts = 0;
   for (; attempts < 4; attempts += 1) {

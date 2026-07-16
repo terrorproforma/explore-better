@@ -132,12 +132,13 @@ async function main() {
   await fs.mkdir(appData, { recursive: true });
   await fs.mkdir(artifactsDir, { recursive: true });
   const port = Number(optionValue("--port", process.env.PORT || randomPort()));
-  const command = process.platform === "win32" ? "cmd.exe" : "npm";
-  const args =
-    process.platform === "win32"
-      ? ["/d", "/s", "/c", "npm run desktop:smoke-backend-restart"]
-      : ["run", "desktop:smoke-backend-restart"];
-  const result = await runCommand(command, args, {
+  const build = await runCommand(process.execPath, [path.join(workspace, "scripts", "build-app.mjs")], {
+    timeoutMs: 60000
+  });
+  const command = path.join(workspace, "node_modules", "electron", "dist", process.platform === "win32" ? "electron.exe" : "electron");
+  const args = [workspace, "--smoke", "--smoke-window", "--smoke-backend-restart"];
+  const result = build.code === 0 && !build.timedOut && !build.error
+    ? await runCommand(command, args, {
     timeoutMs: Number(optionValue("--timeout-ms", process.env.EB_DESKTOP_BACKEND_TIMEOUT_MS || "90000")),
     env: {
       HOST: "127.0.0.1",
@@ -147,7 +148,8 @@ async function main() {
       EXPLORE_BETTER_USER_DATA_DIR: path.join(appData, "ElectronUserData"),
       EXPLORE_BETTER_BACKEND_WATCHDOG_MS: "500"
     }
-  });
+    })
+    : build;
   const recovery = parseRecovery(result.stdout);
   const checks = [];
   checks.push(
@@ -204,6 +206,13 @@ async function main() {
     args,
     checks,
     recovery,
+    build: {
+      code: build.code,
+      timedOut: Boolean(build.timedOut),
+      error: build.error || null,
+      stdout: build.stdout,
+      stderr: build.stderr
+    },
     result: {
       code: result.code,
       timedOut: Boolean(result.timedOut),

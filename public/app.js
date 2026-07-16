@@ -113,6 +113,9 @@ const app = {
     windowsSummary: null
   },
   folderTree: { expanded: new Set(), nodes: new Map(), loading: new Set(), leafPaths: new Set() },
+  recentsExpanded: false,
+  devices: { report: null, loading: false, includeNetwork: false, pollTimer: null, lastLoadedAt: 0 },
+  health: { report: null, loading: false, exportBusy: false },
   paneLoads: {
     left: { id: 0, controller: null, phase: "idle", text: "Ready", detail: "Left pane ready" },
     right: { id: 0, controller: null, phase: "idle", text: "Ready", detail: "Right pane ready" }
@@ -126,7 +129,8 @@ const app = {
   listingHydrations: new Map(),
   inspectorRenderToken: 0,
   inspectorPreviewController: null,
-  listingPrefetch: { queue: [], queued: new Set(), active: new Map() },
+  listingPrefetch: { queue: [], queued: new Set(), active: new Map(), timer: null, paused: false, metrics: { queued: 0, started: 0, aborts: 0, cacheHits: 0, resumptions: 0 } },
+  foregroundActivity: { leases: new Map(), nextId: 1, idleSince: performance.now(), publishTimer: null, metrics: { starts: 0, releases: 0 } },
   visibleEntryCache: new WeakMap(),
   sharedVisibleEntryCache: new WeakMap(),
   visibleEntryIndexes: new WeakMap(),
@@ -231,7 +235,7 @@ const listingCacheMaxEntries = 24;
 const listingWindowInitialLimit = 48;
 const listingPrefetchMaxActive = 2;
 const listingPrefetchMaxQueue = 8;
-const listingPrefetchDelayMs = 120;
+const listingPrefetchDelayMs = 250;
 const paneValueCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
 const layoutSizeDefaults = {
   navWidth: 236,
@@ -497,7 +501,7 @@ const commands = [
   },
   {
     name: "Toggle terminal",
-    detail: "Opens or closes the active pane tab's integrated terminal. Ctrl+`.",
+    detail: "Shows or hides the active pane tab's integrated terminal without ending its session. Ctrl+`.",
     run: () => togglePaneTerminal(app.activePane)
   },
   {
@@ -681,9 +685,18 @@ const commands = [
     run: () => openShellVerbsDialog(app.activePane)
   },
   {
-    name: "Open shell browser",
-    detail: "Browses Windows virtual namespaces such as This PC, Libraries, Network, phones, and devices.",
-    run: () => openShellNamespaceDialog("thisPc")
+    name: "Open Devices & Windows locations",
+    detail: "Shows connected devices, drives, libraries, and supported Windows locations with explicit browse choices.",
+    outcome: "inApp",
+    resultDescription: "Opens the local Devices dashboard in Explore Better.",
+    run: () => openDevicesDialog()
+  },
+  {
+    name: "Open Health & diagnostics",
+    detail: "Checks local app components, scheduling, caches, helpers, and bridge readiness.",
+    outcome: "inApp",
+    resultDescription: "Opens the local Health & diagnostics dashboard.",
+    run: () => openHealthDialog()
   },
   {
     name: "Calculate folder sizes",
@@ -922,6 +935,7 @@ function runtimeTabId() {
 
 let mcpContextRevision = 0;
 let mcpContextPublishFrame = 0;
+let mcpLastInteraction = null;
 
 function desktopAiBridge() {
   return window.exploreBetterDesktop?.aiBridge || null;
@@ -1115,6 +1129,233 @@ async function initializeAppUpdates() {
   app.update.repeatTimer = setInterval(() => checkForAppUpdates(), 6 * 60 * 60 * 1000);
 }
 
+function boundedMcpText(value, maxLength = 260) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+const mcpSafePathUiAttributes = new Set(["data-path-input", "data-path-suggest-index"]);
+
+function mcpElementAction(element) {
+  if (!element?.attributes) return { name: "", value: "" };
+  const dataAttributes = [...element.attributes].filter((attribute) => attribute.name.startsWith("data-"));
+  const preferred = dataAttributes.find((attribute) =>
+    /(action|open|close|toggle|choice|command|mode|tab|refresh|back|browse|select|run|save|cancel|apply|create|delete|copy|move|rename|terminal)/.test(attribute.name)
+  );
+  const attribute = preferred || dataAttributes[0];
+  if (!attribute) return { name: "", value: "" };
+  const pathBearing = /(path|file|target|cwd|root|entry)/.test(attribute.name) && !mcpSafePathUiAttributes.has(attribute.name);
+  return {
+    name: boundedMcpText(attribute.name, 100),
+    value: pathBearing ? "" : boundedMcpText(attribute.value, 100)
+  };
+}
+
+function mcpControlLabel(element) {
+  const explicit = element?.getAttribute?.("aria-label") || element?.getAttribute?.("title");
+  if (explicit) return boundedMcpText(explicit);
+  const label = element?.labels?.[0]?.textContent;
+  if (label) return boundedMcpText(label);
+  if (element?.tagName === "SUMMARY") {
+    return boundedMcpText([...element.childNodes].map((node) => node.textContent).join(" "));
+  }
+  if (["BUTTON", "A"].includes(element?.tagName)) return boundedMcpText(element.textContent);
+  return "";
+}
+
+function mcpControlSnapshot(element) {
+  const action = mcpElementAction(element);
+  const checked = "checked" in element ? Boolean(element.checked) : element.getAttribute("aria-checked") === "true";
+  const expanded =
+    element.tagName === "SUMMARY" && element.parentElement?.tagName === "DETAILS"
+      ? element.parentElement.open === true
+      : element.getAttribute("aria-expanded") === "true";
+  return {
+    id: boundedMcpText(element.id, 100),
+    tag: boundedMcpText(element.tagName?.toLowerCase(), 30),
+    role: boundedMcpText(element.getAttribute("role") || element.tagName?.toLowerCase(), 40),
+    label: mcpControlLabel(element),
+    action: action.name,
+    actionValue: action.value,
+    disabled: Boolean(element.disabled || element.getAttribute("aria-disabled") === "true"),
+    checked,
+    pressed: element.getAttribute("aria-pressed") === "true",
+    expanded,
+    selected: element.getAttribute("aria-selected") === "true"
+  };
+}
+
+function mcpElementIsVisible(element) {
+  if (!element || element.hidden || element.getAttribute("aria-hidden") === "true") return false;
+  if (element.closest('[hidden], [aria-hidden="true"]')) return false;
+  const closedDetails = element.closest("details:not([open])");
+  if (closedDetails) {
+    const summary = closedDetails.querySelector(":scope > summary");
+    if (!summary?.contains(element)) return false;
+  }
+  return element.getClientRects().length > 0;
+}
+
+function dialogTitleText(dialog) {
+  const labelledBy = boundedMcpText(dialog?.getAttribute?.("aria-labelledby"), 100);
+  const labelledTitle = labelledBy ? document.getElementById(labelledBy) : null;
+  return boundedMcpText(
+    labelledTitle?.textContent ||
+      dialog?.querySelector(
+        ".dialog-head strong, .dialog-title-block strong, .dialog-title-block h2, .dialog-title-block h3, .viewer-title-block strong"
+      )?.textContent
+  );
+}
+
+function mcpDialogSnapshot(dialog) {
+  const summaryElement = dialog.querySelector('.dialog-head [id$="-summary"], .dialog-head [aria-live], [id$="-summary"]');
+  const summary = boundedMcpText(summaryElement?.textContent, 500);
+  const controls = [...dialog.querySelectorAll('button, input, select, textarea, summary, a[href], [role="button"], [role="tab"], [role="checkbox"]')]
+    .filter(mcpElementIsVisible)
+    .slice(0, 80)
+    .map(mcpControlSnapshot);
+  let modal = false;
+  try { modal = dialog.matches(":modal"); } catch { modal = true; }
+  return {
+    id: boundedMcpText(dialog.id, 100),
+    title: dialogTitleText(dialog),
+    summary,
+    state: dialog.querySelector('[aria-busy="true"]') || /\b(loading|reading|starting|working|scanning|indexing)\b/i.test(summary)
+      ? "loading"
+      : /\b(error|failed|failure|could not)\b/i.test(summary) ? "error" : "ready",
+    modal,
+    controls
+  };
+}
+
+function mcpNavigatorSnapshot() {
+  const navigator = document.querySelector(".nav-rail");
+  if (!navigator) return { visible: false, sections: [] };
+  const folderTree = document.getElementById("folder-tree");
+  const scrollSnapshot = (element) => {
+    const style = getComputedStyle(element);
+    const overflowY = style.overflowY;
+    return {
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY,
+      scrollOwner: (overflowY === "auto" || overflowY === "scroll") && element.scrollHeight > element.clientHeight + 1
+    };
+  };
+  return {
+    visible: mcpElementIsVisible(navigator),
+    scroll: scrollSnapshot(navigator),
+    folderTree: folderTree
+      ? {
+          renderedNodes: folderTree.querySelectorAll(".tree-node").length,
+          expandedNodes: folderTree.querySelectorAll(".tree-node.expanded").length,
+          loadingNodes: folderTree.querySelectorAll(".tree-node.loading").length,
+          errorCount: folderTree.querySelectorAll(".tree-message.error").length,
+          activeNodeVisible: Boolean(folderTree.querySelector(".tree-node.active")),
+          truncated: [...folderTree.querySelectorAll(".tree-message")].some((element) => /Showing first \d+ folders/i.test(element.textContent)),
+          messages: [...folderTree.querySelectorAll(".tree-message")].slice(0, 8).map((element) => boundedMcpText(element.textContent, 180))
+        }
+      : null,
+    sections: [...navigator.querySelectorAll(":scope > .nav-section")].slice(0, 30).map((section) => {
+      const titleId = section.getAttribute("aria-labelledby") || "";
+      const titleElement = titleId ? document.getElementById(titleId) : section.querySelector(".nav-section-title");
+      const titleClone = titleElement?.cloneNode(true);
+      titleClone?.querySelectorAll("button, .nav-title-actions").forEach((element) => element.remove());
+      const itemContainer = section.querySelector(".nav-list, .folder-tree") || section;
+      return {
+        id: boundedMcpText(titleId || section.id, 100),
+        title: boundedMcpText(titleClone?.textContent),
+        itemCount: [...itemContainer.querySelectorAll("button, [role=button], [data-entry-path], [data-tree-open], [data-root-path]")]
+          .filter(mcpElementIsVisible).length,
+        scroll: scrollSnapshot(itemContainer)
+      };
+    })
+  };
+}
+
+function mcpTerminalSnapshots() {
+  return ["left", "right"].map((pane) => {
+    const session = activeTerminalSession(pane);
+    return {
+      pane,
+      visible: app.terminals.visible[pane] === true,
+      session: Boolean(session),
+      state: !session ? "idle" : session.starting ? "starting" : session.error ? "error" : session.exited ? "exited" : session.busy ? "busy" : "ready",
+      elevated: session?.elevation === "administrator"
+    };
+  });
+}
+
+function mcpUiSnapshot() {
+  const status = document.getElementById("status-pill");
+  const toast = document.getElementById("toast");
+  const activeElement = document.activeElement && document.activeElement !== document.body
+    ? mcpControlSnapshot(document.activeElement)
+    : null;
+  const updateBanner = document.getElementById("update-banner");
+  return {
+    status: boundedMcpText(status?.textContent, 500),
+    toast: {
+      visible: Boolean(toast?.classList.contains("show")),
+      text: boundedMcpText(toast?.textContent, 500)
+    },
+    openDialogs: [...document.querySelectorAll("dialog[open]")].slice(0, 12).map(mcpDialogSnapshot),
+    activeControl: activeElement,
+    lastInteraction: mcpLastInteraction,
+    navigator: mcpNavigatorSnapshot(),
+    terminals: mcpTerminalSnapshots(),
+    update: {
+      visible: Boolean(updateBanner && !updateBanner.hidden && mcpElementIsVisible(updateBanner)),
+      title: boundedMcpText(document.getElementById("update-title")?.textContent),
+      message: boundedMcpText(document.getElementById("update-message")?.textContent, 500)
+    }
+  };
+}
+
+function recordMcpInteraction(event, kind) {
+  const target = event.target?.closest?.('button, input, select, textarea, summary, a[href], [role="button"], [role="tab"], [role="checkbox"], [data-entry-path], [data-action], [data-global-action], [data-nav-action]') || event.target;
+  const action = mcpElementAction(target);
+  mcpLastInteraction = {
+    kind,
+    controlId: boundedMcpText(target?.id, 100),
+    tag: boundedMcpText(target?.tagName?.toLowerCase(), 30),
+    action: action.name,
+    actionValue: action.value,
+    dialogId: boundedMcpText(target?.closest?.("dialog")?.id, 100),
+    key: kind === "keyboard" ? boundedMcpText(event.key, 40) : "",
+    source: "user",
+    correlationId: "",
+    at: new Date().toISOString()
+  };
+  setTimeout(() => scheduleMcpContextPublish(), 0);
+}
+
+function initializeMcpUiObservation() {
+  if (!desktopAiBridge()?.publishContext) return;
+  document.body.addEventListener("click", (event) => recordMcpInteraction(event, "click"), { capture: true });
+  document.body.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " " || event.ctrlKey || event.altKey || event.metaKey) {
+      recordMcpInteraction(event, "keyboard");
+    }
+  }, { capture: true });
+  const observer = new MutationObserver((records) => {
+    const relevant = records.some((record) => {
+      const element = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
+      return Boolean(element?.closest?.("dialog[open], #status-pill, #toast, .nav-rail, #update-banner, .pane-terminal"))
+        || (record.type === "attributes" && element?.tagName === "DIALOG" && record.attributeName === "open");
+    });
+    if (relevant) scheduleMcpContextPublish();
+  });
+  for (const element of document.querySelectorAll("dialog, #status-pill, #toast, .nav-rail, #update-banner, .pane-terminal")) {
+    observer.observe(element, {
+      attributes: true,
+      attributeFilter: ["open", "class", "hidden", "disabled", "aria-busy", "aria-expanded", "aria-pressed", "aria-selected"],
+      childList: true,
+      characterData: true,
+      subtree: true
+    });
+  }
+}
+
 function mcpContextSnapshot() {
   const paneSnapshots = {};
   for (const paneName of ["left", "right"]) {
@@ -1138,6 +1379,7 @@ function mcpContextSnapshot() {
     panes: paneSnapshots,
     selection: [...(activeTab?.selected || [])].slice(0, 100),
     focusedPath: activeTab?.focusedPath || "",
+    ui: mcpUiSnapshot(),
     contextRevision: ++mcpContextRevision
   };
 }
@@ -1154,7 +1396,371 @@ function scheduleMcpContextPublish(immediate = false) {
   else mcpContextPublishFrame = requestAnimationFrame(publish);
 }
 
+function mcpActionPane(requestedPane = "active") {
+  return requestedPane === "left" || requestedPane === "right" ? requestedPane : app.activePane;
+}
+
+function validateMcpSemanticInputs(value, schema = { type: "object" }, label = "inputs") {
+  const fail = (message) => {
+    throw Object.assign(new Error(message), { code: "INVALID_ARGUMENT" });
+  };
+  if (schema.type === "object") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${label} must be an object.`);
+    for (const key of schema.required || []) if (value[key] === undefined) fail(`${label}.${key} is required.`);
+    if (schema.additionalProperties === false) {
+      const allowed = new Set(Object.keys(schema.properties || {}));
+      const unknown = Object.keys(value).find((key) => !allowed.has(key));
+      if (unknown) fail(`${label}.${unknown} is not supported.`);
+    }
+    for (const [key, child] of Object.entries(schema.properties || {})) {
+      if (value[key] !== undefined) validateMcpSemanticInputs(value[key], child, `${label}.${key}`);
+    }
+    return;
+  }
+  if (schema.type === "string" && typeof value !== "string") fail(`${label} must be text.`);
+  if (schema.type === "integer" && !Number.isInteger(value)) fail(`${label} must be an integer.`);
+  if (schema.type === "boolean" && typeof value !== "boolean") fail(`${label} must be true or false.`);
+  if (schema.enum && !schema.enum.includes(value)) fail(`${label} has an unsupported value.`);
+  if (typeof value === "string" && schema.maxLength && value.length > schema.maxLength) fail(`${label} is too long.`);
+  if (typeof value === "number" && Number.isFinite(schema.minimum) && value < schema.minimum) fail(`${label} is below its minimum.`);
+  if (typeof value === "number" && Number.isFinite(schema.maximum) && value > schema.maximum) fail(`${label} exceeds its maximum.`);
+}
+
+function mcpSemanticActionDefinitions() {
+  const noInputs = { type: "object", properties: {}, additionalProperties: false };
+  const currentDialog = () => document.querySelector("dialog[open]");
+  const searchOpen = () => document.getElementById("search-dialog")?.open === true;
+  const preferencesOpen = () => document.getElementById("preferences-dialog")?.open === true;
+  const paneReady = (paneName) => Boolean(tabOf(paneName)?.path);
+  return [
+    {
+      id: "pane.activate", title: "Activate pane", category: "pane", view: "navigator", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Makes the requested pane active without changing folders.", requiresFreshContext: false,
+      enabled: () => true,
+      handler: async ({ paneName }) => { app.activePane = paneName; updateActivePaneChrome(); focusPaneList(paneName); return { activePane: paneName }; }
+    },
+    {
+      id: "pane.navigate.back", title: "Go back", category: "navigation", view: "navigator", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Navigates the requested pane to its previous history entry.", requiresFreshContext: true,
+      enabled: (paneName) => Boolean(tabOf(paneName)?.history?.length), disabledReason: () => "The pane has no back history.",
+      handler: async ({ paneName }) => { await goBack(paneName); return { pane: paneName, path: tabOf(paneName).path }; }
+    },
+    {
+      id: "pane.navigate.forward", title: "Go forward", category: "navigation", view: "navigator", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Navigates the requested pane to its next history entry.", requiresFreshContext: true,
+      enabled: (paneName) => Boolean(tabOf(paneName)?.future?.length), disabledReason: () => "The pane has no forward history.",
+      handler: async ({ paneName }) => { await goForward(paneName); return { pane: paneName, path: tabOf(paneName).path }; }
+    },
+    {
+      id: "pane.navigate.up", title: "Go to parent folder", category: "navigation", view: "navigator", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Navigates the requested pane to the current folder's parent.", requiresFreshContext: true,
+      enabled: (paneName) => Boolean(tabOf(paneName)?.parent && tabOf(paneName).parent !== tabOf(paneName).path),
+      disabledReason: () => "The pane is already at its available root.",
+      handler: async ({ paneName }) => { await goUp(paneName); return { pane: paneName, path: tabOf(paneName).path }; }
+    },
+    {
+      id: "pane.refresh", title: "Refresh pane", category: "navigation", view: "navigator", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Refreshes the current folder in the requested pane.", requiresFreshContext: false,
+      enabled: paneReady, disabledReason: () => "The pane has no active folder.",
+      handler: async ({ paneName }) => { await refreshPane(paneName); return { pane: paneName, path: tabOf(paneName).path }; }
+    },
+    {
+      id: "tab.select", title: "Select tab", category: "tab", view: "navigator",
+      inputSchema: { type: "object", required: ["index"], properties: { index: { type: "integer", minimum: 0, maximum: 99 } }, additionalProperties: false },
+      outcome: "inApp", resultDescription: "Selects a numbered tab in the requested pane.", requiresFreshContext: true,
+      enabled: (paneName) => panes[paneName]?.tabs?.length > 0, disabledReason: () => "The pane has no tabs.",
+      handler: async ({ paneName, inputs }) => {
+        if (inputs.index >= panes[paneName].tabs.length) throw Object.assign(new Error("That tab index is no longer available."), { code: "UI_PRECONDITION" });
+        await activateTab(paneName, inputs.index); return { pane: paneName, tabIndex: inputs.index, path: tabOf(paneName).path };
+      }
+    },
+    {
+      id: "tab.new", title: "Open current folder in a new tab", category: "tab", view: "navigator", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Opens the current folder in a new tab in the requested pane.", requiresFreshContext: true,
+      enabled: paneReady, disabledReason: () => "The pane has no active folder.",
+      handler: async ({ paneName }) => { await openFolderInNewTab(paneName, tabOf(paneName).path); return { pane: paneName, tabIndex: panes[paneName].activeTab }; }
+    },
+    {
+      id: "tab.close", title: "Close active tab", category: "tab", view: "navigator", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Closes the active tab while keeping at least one tab open.", requiresFreshContext: true,
+      enabled: (paneName) => panes[paneName]?.tabs?.length > 1, disabledReason: () => "At least one tab must remain open.",
+      handler: async ({ paneName }) => { await closeTab(paneName); return { pane: paneName, tabIndex: panes[paneName].activeTab }; }
+    },
+    {
+      id: "folderTree.toggle", title: "Expand or collapse folder", category: "folderTree", view: "navigator",
+      inputSchema: { type: "object", required: ["path"], properties: { path: { type: "string", maxLength: 32768 } }, additionalProperties: false },
+      outcome: "inApp", resultDescription: "Expands or collapses an authorized folder in the Navigator tree.", requiresFreshContext: true,
+      enabled: () => !currentDialog(), disabledReason: () => "Close the open dialog before changing the Folder Tree.",
+      handler: async ({ inputs }) => { await toggleFolderTree(inputs.path); return { path: inputs.path, expanded: app.folderTree.expanded.has(normalizedPathKey(inputs.path)) }; }
+    },
+    {
+      id: "folderTree.refresh", title: "Refresh Folder Tree", category: "folderTree", view: "navigator", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Refreshes the Folder Tree and reveals the active folder.", requiresFreshContext: false,
+      enabled: () => !currentDialog(), disabledReason: () => "Close the open dialog before refreshing the Folder Tree.",
+      handler: async () => { await refreshFolderTree(); return { refreshed: true }; }
+    },
+    {
+      id: "folderTree.revealActive", title: "Reveal active folder", category: "folderTree", view: "navigator", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Expands the Folder Tree to reveal the requested pane's active folder.", requiresFreshContext: true,
+      enabled: (paneName) => !currentDialog() && paneReady(paneName), disabledReason: () => "Close the open dialog and choose an active folder first.",
+      handler: async ({ paneName }) => { await revealPathInFolderTree(tabOf(paneName).path); return { path: tabOf(paneName).path, revealed: true }; }
+    },
+    {
+      id: "search.setCriteria", title: "Set search criteria", category: "search", view: "search",
+      inputSchema: { type: "object", properties: {
+        path: { type: "string", maxLength: 32768 }, query: { type: "string", maxLength: 500 }, content: { type: "string", maxLength: 500 },
+        kind: { type: "string", enum: ["all", "file", "directory"] }, includeHidden: { type: "boolean" }, backgroundCache: { type: "boolean" }
+      }, additionalProperties: false },
+      outcome: "inApp", resultDescription: "Fills the visible Search form without starting a search.", requiresFreshContext: false,
+      enabled: () => searchOpen(), disabledReason: () => "Open the Search view before setting criteria.",
+      handler: async ({ inputs }) => {
+        const fields = { path: "search-root", query: "search-name", content: "search-content", kind: "search-kind" };
+        for (const [key, id] of Object.entries(fields)) if (inputs[key] !== undefined) document.getElementById(id).value = inputs[key];
+        if (inputs.includeHidden !== undefined) document.getElementById("search-hidden").checked = inputs.includeHidden;
+        if (inputs.backgroundCache !== undefined) document.getElementById("search-background-cache").checked = inputs.backgroundCache;
+        return { criteria: searchOptionsFromForm() };
+      }
+    },
+    {
+      id: "search.submit", title: "Run search", category: "search", view: "search", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Runs the current Search form and places results in the active pane.", requiresFreshContext: true,
+      enabled: () => searchOpen(), disabledReason: () => "Open the Search view before running it.",
+      handler: async ({ paneName }) => { app.activePane = paneName; await runAdvancedSearch(); return { pane: paneName, summary: document.getElementById("search-summary")?.textContent || "" }; }
+    },
+    {
+      id: "result.open", title: "Open result in pane", category: "result", view: "search",
+      inputSchema: { type: "object", required: ["path"], properties: { path: { type: "string", maxLength: 32768 }, mode: { type: "string", enum: ["replace", "newTab"] } }, additionalProperties: false },
+      outcome: "inApp", resultDescription: "Opens an authorized result in the requested Explore Better pane or a new tab.", requiresFreshContext: true,
+      enabled: () => !currentDialog() || searchOpen(), disabledReason: () => "Close the blocking dialog before opening the result.",
+      handler: async ({ paneName, inputs }) => {
+        if (inputs.mode === "newTab") await openFolderInNewTab(paneName, inputs.path);
+        else await loadPane(paneName, inputs.path, true, { allowLockedNavigation: true });
+        app.activePane = paneName; renderAll(); return { pane: paneName, path: inputs.path, mode: inputs.mode || "replace" };
+      }
+    },
+    {
+      id: "operation.inspect", title: "Inspect operation details", category: "operation", view: "operations",
+      inputSchema: { type: "object", required: ["operationId"], properties: { operationId: { type: "string", maxLength: 120 } }, additionalProperties: false },
+      outcome: "inApp", resultDescription: "Opens the read-only details and timeline for an existing operation.", requiresFreshContext: true,
+      enabled: () => true,
+      handler: async ({ inputs }) => {
+        if (!operationById(inputs.operationId)) throw Object.assign(new Error("That operation is no longer available."), { code: "UI_PRECONDITION" });
+        const blocking = currentDialog();
+        if (blocking && blocking.id !== "ops-dialog") throw Object.assign(new Error("Close the open dialog before inspecting an operation."), { code: "UI_BLOCKED" });
+        if (blocking?.id === "ops-dialog") blocking.close();
+        openOperationDetails(inputs.operationId); return { operationId: inputs.operationId, dialogId: "operation-details-dialog" };
+      }
+    },
+    {
+      id: "devices.refresh", title: "Refresh devices", category: "devices", view: "devices", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Refreshes the local Devices dashboard without probing network providers.", requiresFreshContext: false,
+      enabled: () => document.getElementById("devices-dialog")?.open === true && !app.devices.loading, disabledReason: () => "Open the Devices view and wait for its current refresh to finish.",
+      handler: async () => { const report = await loadDevicesReport({ refresh: true }); return { status: report?.status || "unavailable", counts: report?.counts || {} }; }
+    },
+    {
+      id: "devices.loadNetwork", title: "Load network locations", category: "devices", view: "devices", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Explicitly queries the slower Windows network provider and updates the Devices dashboard.", requiresFreshContext: true,
+      enabled: () => document.getElementById("devices-dialog")?.open === true && !app.devices.loading && app.devices.report?.networkLoaded !== true,
+      disabledReason: () => "Open the Devices view, wait for loading to finish, and ensure network locations have not already been loaded.",
+      handler: async () => { const report = await loadDevicesReport({ includeNetwork: true, refresh: true }); return { networkLoaded: report?.networkLoaded === true, networkCount: report?.groups?.network?.length || 0 }; }
+    },
+    {
+      id: "devices.browse", title: "Browse a device or Windows location", category: "devices", view: "devices",
+      inputSchema: { type: "object", required: ["deviceId", "action"], properties: { deviceId: { type: "string", maxLength: 200 }, action: { type: "string", enum: ["browseInApp", "browseShell"] } }, additionalProperties: false },
+      outcome: "inApp", resultDescription: "Uses the selected device capability to browse inside Explore Better.", requiresFreshContext: true,
+      enabled: () => document.getElementById("devices-dialog")?.open === true && !app.devices.loading, disabledReason: () => "Open the Devices view and wait for loading to finish.",
+      handler: async ({ inputs }) => {
+        const item = deviceItemById(inputs.deviceId);
+        if (!item || item.capabilities?.[inputs.action] !== true) throw Object.assign(new Error("That device or capability is no longer available."), { code: "UI_PRECONDITION" });
+        await runDeviceAction(inputs.action, inputs.deviceId);
+        return { deviceId: inputs.deviceId, action: inputs.action, pane: app.activePane };
+      }
+    },
+    {
+      id: "devices.openInExplorer", title: "Open a device in File Explorer", category: "devices", view: "devices",
+      inputSchema: { type: "object", required: ["deviceId"], properties: { deviceId: { type: "string", maxLength: 200 } }, additionalProperties: false },
+      outcome: "fileExplorer", resultDescription: "Starts a Windows File Explorer request without claiming another application opened.", requiresFreshContext: true,
+      enabled: () => document.getElementById("devices-dialog")?.open === true && !app.devices.loading, disabledReason: () => "Open the Devices view and wait for loading to finish.",
+      handler: async ({ inputs }) => {
+        const item = deviceItemById(inputs.deviceId);
+        if (!item || item.capabilities?.openInExplorer !== true) throw Object.assign(new Error("That device or File Explorer capability is no longer available."), { code: "UI_PRECONDITION" });
+        await runDeviceAction("openInExplorer", inputs.deviceId);
+        return { deviceId: inputs.deviceId, requestStarted: true };
+      }
+    },
+    {
+      id: "health.probe", title: "Run health checks", category: "health", view: "health", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Runs bounded, cancelable local health probes and updates the Health view.", requiresFreshContext: false,
+      enabled: () => document.getElementById("health-dialog")?.open === true && !app.health.loading, disabledReason: () => "Open Health & diagnostics and wait for the current check to finish.",
+      handler: async () => { const report = await loadHealthReport(true); return { overall: report?.overall || "attention", durationMs: report?.durationMs || 0 }; }
+    },
+    {
+      id: "preferences.search", title: "Search Preferences", category: "preferences", view: "preferences",
+      inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string", maxLength: 200 } }, additionalProperties: false },
+      outcome: "inApp", resultDescription: "Filters Preferences by setting and help text, never by entered values.", requiresFreshContext: false,
+      enabled: () => preferencesOpen() && Boolean(document.getElementById("preferences-search")), disabledReason: () => "Open the updated Preferences view before searching.",
+      handler: async ({ inputs }) => { setPreferencesSearchQuery(inputs.query); return { query: inputs.query }; }
+    },
+    {
+      id: "dialog.closeActive", title: "Close active dialog", category: "dialog", view: "global", inputSchema: noInputs,
+      outcome: "inApp", resultDescription: "Closes the active dialog when doing so will not discard unsaved Preferences.", requiresFreshContext: true,
+      enabled: () => Boolean(currentDialog()), disabledReason: () => "No dialog is open.",
+      handler: async () => {
+        const dialog = currentDialog();
+        if (dialog?.id === "preferences-dialog" && !requestClosePreferencesDialog({ prompt: false })) throw Object.assign(new Error("Save or discard Preferences changes first."), { code: "UI_BLOCKED" });
+        dialog?.close(); return { dialogId: dialog?.id || "", visible: false };
+      }
+    }
+  ];
+}
+
+function listedMcpSemanticActions(action = {}) {
+  const paneName = mcpActionPane(action.pane);
+  return mcpSemanticActionDefinitions()
+    .map((definition) => {
+      const enabled = definition.enabled?.(paneName) !== false;
+      return {
+        id: definition.id,
+        title: definition.title,
+        category: definition.category,
+        view: definition.view,
+        inputSchema: definition.inputSchema,
+        enabled,
+        disabledReason: enabled ? "" : (definition.disabledReason?.(paneName) || "This action is unavailable in the current UI state."),
+        outcome: definition.outcome,
+        resultDescription: definition.resultDescription,
+        freshnessRequirement: definition.requiresFreshContext ? "current-context" : "none",
+        handler: "renderer-owned",
+        planTool: null
+      };
+    })
+    .filter((definition) => (!action.view || definition.view === action.view) && (action.includeDisabled !== false || definition.enabled));
+}
+
+async function invokeMcpSemanticAction(action = {}) {
+  const definition = mcpSemanticActionDefinitions().find((item) => item.id === action.actionId);
+  if (!definition) throw Object.assign(new Error("That semantic UI action is not registered."), { code: "UNKNOWN_ACTION" });
+  const paneName = mcpActionPane(action.pane);
+  const inputs = action.inputs && typeof action.inputs === "object" && !Array.isArray(action.inputs) ? action.inputs : {};
+  validateMcpSemanticInputs(inputs, definition.inputSchema);
+  if (definition.requiresFreshContext && Number.isInteger(action.expectedContextRevision) && action.expectedContextRevision !== mcpContextRevision) {
+    throw Object.assign(new Error("The Explore Better selection or view changed. Read context and retry the action."), {
+      code: "STALE_CONTEXT",
+      details: { expectedContextRevision: action.expectedContextRevision, currentContextRevision: mcpContextRevision }
+    });
+  }
+  if (definition.enabled?.(paneName) === false) {
+    throw Object.assign(new Error(definition.disabledReason?.(paneName) || "This action is unavailable in the current UI state."), { code: "UI_PRECONDITION" });
+  }
+  const startingContextRevision = mcpContextRevision;
+  const state = await definition.handler({ paneName, inputs, action });
+  mcpLastInteraction = {
+    kind: "interaction",
+    controlId: "",
+    tag: "semantic-action",
+    action: definition.id,
+    actionValue: "",
+    dialogId: document.querySelector("dialog[open]")?.id || "",
+    key: "",
+    source: "mcp",
+    correlationId: action.correlationId || "",
+    at: new Date().toISOString()
+  };
+  scheduleMcpContextPublish(true);
+  return {
+    visibleOutcome: definition.resultDescription,
+    outcome: definition.outcome,
+    resultingView: definition.view,
+    state,
+    startingContextRevision,
+    finalContextRevision: mcpContextRevision
+  };
+}
+
 async function handleMcpUiAction(action = {}) {
+  if (action.type === "listActions") {
+    return { actions: listedMcpSemanticActions(action), contextRevision: mcpContextRevision };
+  }
+  if (action.type === "semantic") return invokeMcpSemanticAction(action);
+  if (action.type === "view") {
+    const paneName = action.pane === "left" || action.pane === "right" ? action.pane : app.activePane;
+    const views = {
+      operations: { dialogId: "ops-dialog", open: () => openOpsDialog() },
+      appTrash: { dialogId: "trash-dialog", open: () => openAppTrashDialog() },
+      windowsRecycleBin: { dialogId: "trash-dialog", open: () => openWindowsRecycleDialog() },
+      search: { dialogId: "search-dialog", open: () => openSearchDialog() },
+      indexManager: { dialogId: "speed-dialog", open: () => openSpeedDialog(paneName) },
+      diskUsage: { dialogId: "size-analysis-dialog", open: () => openSizeAnalysisDialog(paneName) },
+      duplicates: { dialogId: "duplicates-dialog", open: () => openDuplicatesDialog() },
+      compare: { dialogId: "compare-dialog", open: () => openCompareDialog() },
+      flat: { dialogId: "flat-dialog", open: () => openFlatDialog() },
+      viewer: { dialogId: "viewer-dialog", open: () => openViewer(paneName) },
+      editor: { dialogId: "text-editor-dialog", open: () => openTextEditor(paneName) },
+      properties: { dialogId: "properties-dialog", open: () => openPropertiesDialog(paneName) },
+      checksums: { dialogId: "checksums-dialog", open: () => openChecksumsDialog(paneName) },
+      collections: { dialogId: "collections-dialog", open: () => openCollectionsDialog() },
+      labels: { dialogId: "labels-dialog", open: () => openLabelsDialog(paneName) },
+      filters: { dialogId: "filters-dialog", open: () => openFilterPresetsDialog(paneName) },
+      selectionSets: { dialogId: "selection-sets-dialog", open: () => openSelectionSetsDialog(paneName) },
+      basket: { dialogId: "basket-dialog", open: () => openBasketDialog() },
+      layouts: { dialogId: "layouts-dialog", open: () => openLayoutsDialog() },
+      tabGroups: { dialogId: "tab-groups-dialog", open: () => openTabGroupsDialog() },
+      aliases: { dialogId: "aliases-dialog", open: () => openAliasesDialog() },
+      snapshots: { dialogId: "snapshots-dialog", open: () => openSnapshotsDialog() },
+      columns: { dialogId: "columns-dialog", open: () => openColumnsDialog(paneName) },
+      formats: { dialogId: "formats-dialog", open: () => openFormatsDialog(paneName) },
+      toolbar: { dialogId: "toolbar-dialog", open: () => openToolbarDialog() },
+      hotkeys: { dialogId: "hotkeys-dialog", open: () => openHotkeysDialog() },
+      backup: { dialogId: "backup-dialog", open: () => openBackupDialog() },
+      tools: { dialogId: "tools-dialog", open: () => openToolsDialog() },
+      scripts: { dialogId: "script-dialog", open: () => openScriptDialog() },
+      attributes: { dialogId: "attributes-dialog", open: () => openAttributesDialog(paneName) },
+      timestamps: { dialogId: "timestamps-dialog", open: () => openTimestampsDialog(paneName) },
+      openWith: { dialogId: "open-with-dialog", open: () => openOpenWithDialog(paneName) },
+      shellVerbs: { dialogId: "shell-verbs-dialog", open: () => openShellVerbsDialog(paneName) },
+      transfer: { dialogId: "transfer-dialog", open: () => openTransferDialog(paneName) },
+      destination: { dialogId: "destination-dialog", open: () => openDestinationDialog(paneName) },
+      archive: { dialogId: "archive-dialog", open: () => openArchiveDialog(paneName) },
+      bulkRename: { dialogId: "bulk-dialog", open: () => openBulkRenameDialog(paneName) },
+      integration: { dialogId: "integration-dialog", open: () => openIntegrationDialog() },
+      preferences: { dialogId: "preferences-dialog", open: () => openPreferencesDialog() },
+      commandCenter: { dialogId: "command-dialog", open: () => openCommandDialog() },
+      manual: { dialogId: "manual-dialog", open: () => openManualDialog() },
+      devices: { dialogId: "devices-dialog", open: () => { openDevicesDialog().catch((error) => showToast(error.message)); } },
+      health: { dialogId: "health-dialog", open: () => { openHealthDialog().catch((error) => showToast(error.message)); } }
+    };
+    const view = views[action.view];
+    if (!view) throw Object.assign(new Error("That AI Bridge view is not supported."), { code: "INVALID_REQUEST" });
+    const dialog = document.getElementById(view.dialogId);
+    if (!dialog) throw Object.assign(new Error("The requested Explore Better view is unavailable."), { code: "UI_UNAVAILABLE" });
+    if (action.visible === false) {
+      if (dialog.open && view.dialogId === "preferences-dialog" && !requestClosePreferencesDialog({ prompt: false })) {
+        throw Object.assign(new Error("Save or discard the unsaved Preferences changes before closing this view."), { code: "UI_BLOCKED" });
+      }
+      if (dialog.open) dialog.close();
+    } else if (!dialog.open) {
+      const blockingDialog = [...document.querySelectorAll("dialog[open]")].find((item) => item !== dialog);
+      if (blockingDialog) {
+        const title = dialogTitleText(blockingDialog) || "another dialog";
+        throw Object.assign(new Error(`Close ${title} before opening this view.`), { code: "UI_BLOCKED" });
+      }
+      app.activePane = paneName;
+      await view.open();
+      if (!dialog.open) {
+        throw Object.assign(new Error("The requested view needs a compatible selection or active folder."), {
+          code: "UI_PRECONDITION"
+        });
+      }
+    }
+    scheduleMcpContextPublish(true);
+    return {
+      view: action.view,
+      visible: dialog.open === true,
+      dialogId: view.dialogId,
+      pane: paneName,
+      contextRevision: mcpContextRevision
+    };
+  }
   if (action.type !== "show") throw Object.assign(new Error("Unsupported AI Bridge UI action."), { code: "INVALID_REQUEST" });
   const paneName = action.pane === "left" || action.pane === "right" ? action.pane : app.activePane;
   const targetPath = String(action.path || "");
@@ -1323,9 +1929,9 @@ const shellOpenModeLabels = {
 };
 
 const launchModeLabels = {
-  native: "Native window",
-  appWindow: "App window",
-  browser: "Browser tab"
+  native: "Installed desktop app",
+  appWindow: "Edge/Chrome app window",
+  browser: "Default browser tab"
 };
 
 const conflictModeLabels = {
@@ -1346,7 +1952,7 @@ const openGestureLabels = {
 };
 
 const startupModeLabels = {
-  last: "Restore last lister",
+  last: "Restore last folders",
   homeDownloads: "Home + Downloads",
   workspaceHome: "Workspace + Home",
   documentsDownloads: "Documents + Downloads",
@@ -1603,7 +2209,17 @@ function paneLayoutLabel(layoutMode = app.paneLayout) {
   return "Vertical split";
 }
 
-async function request(url, options = {}) {
+function foregroundRequestKind(url, options = {}) {
+  if (options.backgroundWork) return "";
+  const method = String(options.method || "GET").toUpperCase();
+  const pathname = new URL(url, window.location.href).pathname;
+  if (pathname === "/api/list") return "pane-navigation";
+  if (/^\/api\/(search|size-analysis|duplicates|compare|properties|folder-sizes)/.test(pathname)) return "analysis";
+  if (method !== "GET" && !new Set(["/api/state", "/api/health/renderer-scheduler"]).has(pathname)) return "file-operation";
+  return "";
+}
+
+async function requestWithoutForegroundTracking(url, options = {}) {
   const { invalidateListingCache, ...fetchOptions } = options;
   const method = String(options.method || "GET").toUpperCase();
   const pathname = new URL(url, window.location.href).pathname;
@@ -1653,6 +2269,17 @@ async function request(url, options = {}) {
     scheduleOperationPoll(200);
   }
   return data;
+}
+
+async function request(url, options = {}) {
+  const kind = foregroundRequestKind(url, options);
+  const release = kind ? beginForegroundActivity(kind) : null;
+  const { backgroundWork, ...requestOptions } = options;
+  try {
+    return await requestWithoutForegroundTracking(url, requestOptions);
+  } finally {
+    release?.();
+  }
 }
 
 function attributesFromCompactText(value) {
@@ -2092,6 +2719,7 @@ function scheduleStateSave() {
 
 function setStatus(message) {
   document.getElementById("status-pill").textContent = message;
+  scheduleMcpContextPublish();
 }
 
 function listingTimingText(data) {
@@ -2117,6 +2745,7 @@ function showToast(message) {
   const toast = document.getElementById("toast");
   toast.textContent = message;
   toast.classList.add("show");
+  scheduleMcpContextPublish();
   clearTimeout(app.toastTimer);
   app.toastTimer = setTimeout(() => toast.classList.remove("show"), 2400);
 }
@@ -2630,6 +3259,105 @@ function shouldInvalidateListingCache(method, pathname, override = undefined) {
   return method !== "GET" && listingCacheInvalidatingRoutes.has(pathname);
 }
 
+function foregroundBlocksListingPrefetch() {
+  return document.hidden || app.foregroundActivity.leases.size > 0 || activeOperations().length > 0;
+}
+
+function rendererSchedulerSnapshot() {
+  return {
+    capturedAt: new Date().toISOString(),
+    activeForegroundLeases: app.foregroundActivity.leases.size,
+    queuedPrefetches: app.listingPrefetch.queue.length,
+    activePrefetches: app.listingPrefetch.active.size,
+    paused: foregroundBlocksListingPrefetch(),
+    aborts: app.listingPrefetch.metrics.aborts,
+    cacheHits: app.listingPrefetch.metrics.cacheHits,
+    resumptions: app.listingPrefetch.metrics.resumptions,
+    started: app.listingPrefetch.metrics.started,
+    foregroundStarts: app.foregroundActivity.metrics.starts
+  };
+}
+
+function publishRendererSchedulerSnapshot() {
+  clearTimeout(app.foregroundActivity.publishTimer);
+  app.foregroundActivity.publishTimer = setTimeout(() => {
+    fetch("/api/health/renderer-scheduler", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rendererSchedulerSnapshot())
+    }).catch(() => {});
+  }, 100);
+}
+
+function pauseListingPrefetch() {
+  const prefetch = app.listingPrefetch;
+  clearTimeout(prefetch.timer);
+  prefetch.timer = null;
+  prefetch.paused = true;
+  for (const [cacheKey, active] of [...prefetch.active]) {
+    if (active.item && active.item.generation === app.listingCacheGeneration && !listingCacheIsFresh(cacheKey) && !prefetch.queued.has(cacheKey)) {
+      prefetch.queue.push(active.item);
+      prefetch.queued.add(cacheKey);
+    }
+    prefetch.metrics.aborts += 1;
+    active.controller?.abort();
+  }
+  prefetch.active.clear();
+  publishRendererSchedulerSnapshot();
+}
+
+function scheduleListingPrefetchRun(delayMs = listingPrefetchDelayMs) {
+  const prefetch = app.listingPrefetch;
+  clearTimeout(prefetch.timer);
+  if (foregroundBlocksListingPrefetch() || !prefetch.queue.length) {
+    prefetch.paused = foregroundBlocksListingPrefetch();
+    publishRendererSchedulerSnapshot();
+    return;
+  }
+  const idleFor = performance.now() - app.foregroundActivity.idleSince;
+  const waitMs = Math.max(Number(delayMs || 0), listingPrefetchDelayMs - idleFor);
+  prefetch.timer = setTimeout(() => requestIdle(runListingPrefetchQueue, 650), waitMs);
+}
+
+function beginForegroundActivity(kind = "foreground") {
+  const id = app.foregroundActivity.nextId++;
+  app.foregroundActivity.leases.set(id, { id, kind, startedAt: performance.now() });
+  app.foregroundActivity.metrics.starts += 1;
+  pauseListingPrefetch();
+  publishRendererSchedulerSnapshot();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    app.foregroundActivity.leases.delete(id);
+    app.foregroundActivity.metrics.releases += 1;
+    if (!app.foregroundActivity.leases.size) {
+      app.foregroundActivity.idleSince = performance.now();
+      scheduleListingPrefetchRun();
+    }
+    publishRendererSchedulerSnapshot();
+  };
+}
+
+function listingPrefetchPriority(reason = "intent") {
+  if (["keyboard", "focus"].includes(reason)) return 3;
+  if (["intent", "click"].includes(reason)) return 2;
+  return 1;
+}
+
+function setupForegroundActivityCoordinator() {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      pauseListingPrefetch();
+    } else {
+      app.foregroundActivity.idleSince = performance.now();
+      scheduleListingPrefetchRun();
+    }
+    publishRendererSchedulerSnapshot();
+  });
+  publishRendererSchedulerSnapshot();
+}
+
 function cancelListingPrefetch(cacheKey = null) {
   const prefetch = app.listingPrefetch;
   if (!prefetch) {
@@ -2643,6 +3371,8 @@ function cancelListingPrefetch(cacheKey = null) {
     prefetch.active.delete(cacheKey);
     return;
   }
+  clearTimeout(prefetch.timer);
+  prefetch.timer = null;
   prefetch.queue = [];
   prefetch.queued.clear();
   for (const active of prefetch.active.values()) {
@@ -2731,17 +3461,28 @@ function requestIdle(callback, timeout = 500) {
 
 function runListingPrefetchQueue() {
   const prefetch = app.listingPrefetch;
+  prefetch.timer = null;
+  if (foregroundBlocksListingPrefetch()) {
+    prefetch.paused = true;
+    publishRendererSchedulerSnapshot();
+    return;
+  }
+  if (prefetch.paused) prefetch.metrics.resumptions += 1;
+  prefetch.paused = false;
   while (prefetch.active.size < listingPrefetchMaxActive && prefetch.queue.length) {
     const item = prefetch.queue.shift();
     prefetch.queued.delete(item.cacheKey);
     if (listingCacheIsFresh(item.cacheKey)) {
+      prefetch.metrics.cacheHits += 1;
       continue;
     }
     const controller = new AbortController();
-    prefetch.active.set(item.cacheKey, { controller });
+    prefetch.active.set(item.cacheKey, { controller, item });
+    prefetch.metrics.started += 1;
     request(`/api/list?${item.query}`, {
       signal: controller.signal,
-      invalidateListingCache: false
+      invalidateListingCache: false,
+      backgroundWork: "prefetch"
     })
       .then((data) => {
         if (
@@ -2758,9 +3499,11 @@ function runListingPrefetchQueue() {
       })
       .finally(() => {
         prefetch.active.delete(item.cacheKey);
-        runListingPrefetchQueue();
+        scheduleListingPrefetchRun(0);
+        publishRendererSchedulerSnapshot();
       });
   }
+  publishRendererSchedulerSnapshot();
 }
 
 function queueListingPrefetch(paneName, targetPath, reason = "intent") {
@@ -2785,14 +3528,19 @@ function queueListingPrefetch(paneName, targetPath, reason = "intent") {
     cacheKey: plan.cacheKey,
     query: plan.query,
     reason,
-    generation: app.listingCacheGeneration
+    generation: app.listingCacheGeneration,
+    priority: listingPrefetchPriority(reason),
+    queuedAt: performance.now()
   });
+  app.listingPrefetch.queue.sort((left, right) => right.priority - left.priority || left.queuedAt - right.queuedAt);
   app.listingPrefetch.queued.add(plan.cacheKey);
+  app.listingPrefetch.metrics.queued += 1;
   while (app.listingPrefetch.queue.length > listingPrefetchMaxQueue) {
-    const dropped = app.listingPrefetch.queue.shift();
+    const dropped = app.listingPrefetch.queue.pop();
     app.listingPrefetch.queued.delete(dropped.cacheKey);
   }
-  setTimeout(() => requestIdle(runListingPrefetchQueue, 650), listingPrefetchDelayMs);
+  scheduleListingPrefetchRun();
+  publishRendererSchedulerSnapshot();
   return true;
 }
 
@@ -2940,33 +3688,33 @@ function renderRoots() {
     .join("");
   document.getElementById("session-root").textContent = app.roots.cwd;
 
-  document.getElementById("nav-favorites").innerHTML = renderNavRows(favorites, {
-    empty: "No favorites yet",
-    removable: true
+  const aliases = pathAliases().map((alias) => ({ ...alias, kind: "alias", name: `${alias.name}:`, typeLabel: "Alias" }));
+  const pinned = [...favorites.map((favorite) => ({ ...favorite, kind: "favorite", typeLabel: "Favorite" })), ...aliases];
+  const pinnedSection = document.getElementById("nav-pinned-section");
+  pinnedSection.hidden = pinned.length === 0;
+  document.getElementById("nav-pinned").innerHTML = renderNavRows(pinned, {
+    empty: "No pinned locations",
+    removable: (item) => item.kind === "favorite"
   });
-  document.getElementById("nav-aliases").innerHTML = renderNavRows(
-    pathAliases().map((alias) => ({
-      ...alias,
-      kind: "alias",
-      name: `${alias.name}:`
-    })),
-    {
-      empty: "No aliases yet"
-    }
-  );
   document.getElementById("nav-shortcuts").innerHTML = renderNavRows(app.roots.shortcuts, {
     empty: "No shortcuts"
-  });
-  document.getElementById("nav-shell").innerHTML = renderNavRows(shellNavigationItems(), {
-    empty: "No shell locations"
   });
   document.getElementById("nav-drives").innerHTML = renderNavRows(app.roots.drives, {
     empty: "No drives"
   });
-  document.getElementById("nav-recents").innerHTML = renderNavRows(app.state?.recentLocations || [], {
+  const recents = app.state?.recentLocations || [];
+  const recentSection = document.querySelector(".recent-section");
+  recentSection.hidden = recents.length === 0;
+  const shownRecents = app.recentsExpanded ? recents : recents.slice(0, 8);
+  document.getElementById("nav-recents").innerHTML = renderNavRows(shownRecents, {
     empty: "No recent folders",
     recent: true
   });
+  const recentsToggle = document.getElementById("nav-recents-toggle");
+  recentsToggle.hidden = recents.length <= 8;
+  recentsToggle.textContent = app.recentsExpanded ? "Show fewer" : `Show all (${recents.length})`;
+  recentsToggle.title = app.recentsExpanded ? "Show the eight most recent locations" : `Show all ${recents.length} recent locations`;
+  renderNavigatorDevices();
   renderFolderTree();
 }
 
@@ -3069,27 +3817,6 @@ function navGlyph(kind) {
   return glyphs[kind] || "DIR";
 }
 
-function shellNavigationItems() {
-  return Array.isArray(app.shellLocations?.navigation) ? app.shellLocations.navigation : [];
-}
-
-async function launchShellLocation(id) {
-  const result = await request("/api/shell/open", {
-    method: "POST",
-    body: JSON.stringify({ id })
-  });
-  setStatus(`Opened ${result.name}`);
-  showToast(`Opened ${result.name}`);
-  return result;
-}
-
-async function openShellLocation(id) {
-  if (id === "recycleBin") {
-    return openWindowsRecycleDialog();
-  }
-  return launchShellLocation(id);
-}
-
 function shellNamespaceRoots() {
   const roots = Array.isArray(app.shellLocations?.virtualFolders) ? app.shellLocations.virtualFolders : [];
   return roots.filter((item) => item.id !== "recycleBin");
@@ -3120,10 +3847,12 @@ function renderShellNamespaceDialog(message = "") {
   document.getElementById("shell-namespace-summary").textContent =
     message ||
     (state.loading
-      ? "Reading shell namespace..."
+      ? "Reading Windows locations..."
       : report.available === false
-      ? report.reason || "Shell namespace unavailable"
-      : `${items.length}${report.truncated ? `/${report.total}` : ""} item(s)`);
+      ? report.reason || "Windows locations unavailable"
+      : report.truncated
+        ? `${items.length}/${report.total} items`
+        : itemWord(items.length, "item"));
   document.getElementById("shell-namespace-roots").innerHTML = roots.length
     ? roots
         .map((root) => {
@@ -3138,8 +3867,7 @@ function renderShellNamespaceDialog(message = "") {
   document.getElementById("shell-namespace-back").disabled = state.loading || !(state.stack || []).length;
   document.getElementById("shell-namespace-refresh").disabled = Boolean(state.loading);
   document.getElementById("shell-namespace-head").innerHTML = `
-    <strong>${escapeHtml(report.name || "Shell Namespace")}</strong>
-    <code title="${escapeHtml(report.target || state.target || "")}">${escapeHtml(report.target || state.target || "")}</code>
+    <strong>${escapeHtml(report.name || "Windows locations")}</strong>
   `;
   document.getElementById("shell-namespace-list").innerHTML = items.length
     ? items
@@ -3147,13 +3875,13 @@ function renderShellNamespaceDialog(message = "") {
           const detail = item.detail || item.type || item.path || item.kind || "";
           const pathTitle = item.path || item.openTarget || detail;
           const browseButton = item.canBrowse
-            ? `<button type="button" data-shell-namespace-browse-index="${index}" title="Browse this shell folder">Browse</button>`
+            ? `<button type="button" data-shell-namespace-browse-index="${index}" title="Show items inside this Windows location">Explore</button>`
             : "";
           const paneButton = item.canOpenPane
-            ? `<button type="button" data-shell-namespace-pane-index="${index}" title="Open this filesystem folder in the active pane">Pane</button>`
+            ? `<button type="button" data-shell-namespace-pane-index="${index}" title="Open this folder in the active pane">Open here</button>`
             : "";
           const openButton = item.canOpen
-            ? `<button type="button" data-shell-namespace-external-index="${index}" title="Open this shell item with Explorer">Open</button>`
+            ? `<button type="button" data-shell-namespace-external-index="${index}" title="Ask Windows Explorer to open this location">Open in Explorer</button>`
             : "";
           return `<div class="shell-namespace-row" data-shell-namespace-index="${index}">
             <span class="shell-namespace-code">${escapeHtml(shellNamespaceKindCode(item))}</span>
@@ -3178,7 +3906,7 @@ function shellNamespaceItemTarget(item) {
   return item?.openTarget || item?.path || "";
 }
 
-function writeShellNamespaceError(error, message = "Shell namespace failed") {
+function writeShellNamespaceError(error, message = "Windows locations failed") {
   document.getElementById("shell-namespace-summary").textContent = error.message || message;
   document.getElementById("shell-namespace-output").textContent = error.stack || error.message || message;
   showToast(error.message || message);
@@ -3219,7 +3947,7 @@ async function loadShellNamespace(target = app.shellNamespace?.target || "thisPc
   app.shellNamespace.target = target;
   app.shellNamespace.loading = true;
   document.getElementById("shell-namespace-output").textContent = "";
-  renderShellNamespaceDialog("Reading shell namespace...");
+  renderShellNamespaceDialog("Reading Windows locations...");
   try {
     const params = new URLSearchParams({ target, limit: "160" });
     const report = await request(`/api/shell/namespace?${params}`);
@@ -3230,7 +3958,7 @@ async function loadShellNamespace(target = app.shellNamespace?.target || "thisPc
     return report;
   } catch (error) {
     app.shellNamespace.loading = false;
-    renderShellNamespaceDialog("Shell namespace failed");
+    renderShellNamespaceDialog("Windows locations failed");
     throw error;
   }
 }
@@ -3243,7 +3971,7 @@ async function openShellNamespaceDialog(target = "thisPc") {
     loading: false
   };
   document.getElementById("shell-namespace-output").textContent = "";
-  renderShellNamespaceDialog("Reading shell namespace...");
+  renderShellNamespaceDialog("Reading Windows locations...");
   document.getElementById("shell-namespace-dialog").showModal();
   try {
     await loadShellNamespace(target, { push: false });
@@ -3256,7 +3984,7 @@ async function goBackShellNamespace() {
   const stack = app.shellNamespace?.stack || [];
   const previous = stack.at(-1);
   if (!previous) {
-    return showToast("No shell namespace history");
+    return showToast("No Windows location history");
   }
   app.shellNamespace.stack = stack.slice(0, -1);
   await loadShellNamespace(previous, { push: false });
@@ -3271,8 +3999,8 @@ async function openShellNamespaceExternally(target) {
     body: JSON.stringify({ target })
   });
   document.getElementById("shell-namespace-output").textContent = JSON.stringify(result, null, 2);
-  setStatus(`Opened shell item: ${labelForPath(result.target || target)}`);
-  showToast("Shell item opened");
+  setStatus(`Sent ${result.name || labelForPath(result.target || target)} to Windows Explorer`);
+  showToast("Windows Explorer request started");
   return result;
 }
 
@@ -3283,6 +4011,243 @@ async function openShellNamespaceInPane(target) {
   await loadPane(app.activePane, target);
   document.getElementById("shell-namespace-dialog").close();
   showToast(`Opened ${labelForPath(target)} in ${app.activePane}`);
+}
+
+const deviceGroupDefinitions = [
+  { key: "connectedDevices", title: "Connected devices", empty: "No removable or portable devices connected" },
+  { key: "drives", title: "Drives", empty: "No drives available" },
+  { key: "network", title: "Network", empty: "No mapped network locations loaded" },
+  { key: "libraries", title: "Libraries", empty: "No Windows libraries found" },
+  { key: "windowsLocations", title: "Windows locations", empty: "No Windows-only locations available" }
+];
+
+function devicesItemMarkup(item, groupKey) {
+  const capacity = item.capacity?.totalBytes
+    ? `${formatSize(item.capacity.freeBytes || 0)} free of ${formatSize(item.capacity.totalBytes)}`
+    : "";
+  const detail = [item.detail, capacity, item.connectionState === "unavailable" ? "Unavailable" : ""].filter(Boolean).join(" / ");
+  const buttons = [
+    item.capabilities?.browseShell
+      ? `<button type="button" data-device-action="browseShell" data-device-id="${escapeHtml(item.id)}">Browse in Explore Better</button>`
+      : "",
+    item.capabilities?.browseInApp
+      ? `<button type="button" data-device-action="browseInApp" data-device-id="${escapeHtml(item.id)}">Open in active pane</button>`
+      : "",
+    item.capabilities?.openInExplorer
+      ? `<button type="button" data-device-action="openInExplorer" data-device-id="${escapeHtml(item.id)}">Open in File Explorer</button>`
+      : ""
+  ].filter(Boolean).join("");
+  return `<article class="device-card" id="device-${escapeHtml(item.id)}" data-device-group="${escapeHtml(groupKey)}">
+    <span class="device-card-code">${escapeHtml(shellNamespaceKindCode(item))}</span>
+    <div class="device-card-copy">
+      <strong>${escapeHtml(item.name)}</strong>
+      <small title="${escapeHtml(item.path || item.openTarget || detail)}">${escapeHtml(detail || item.kind)}</small>
+    </div>
+    <div class="device-card-actions">${buttons || `<span class="device-no-actions">No supported actions</span>`}</div>
+  </article>`;
+}
+
+function deviceItemById(id) {
+  const groups = app.devices?.report?.groups || {};
+  for (const items of Object.values(groups)) {
+    const found = (items || []).find((item) => item.id === id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function renderDevicesDialog() {
+  const report = app.devices?.report;
+  const summary = document.getElementById("devices-summary");
+  const counts = document.getElementById("devices-counts");
+  const warnings = document.getElementById("devices-warnings");
+  const groups = document.getElementById("devices-groups");
+  if (!summary || !counts || !warnings || !groups) return;
+  summary.textContent = app.devices.loading
+    ? "Checking connected devices..."
+    : report
+      ? `${report.status === "ready" ? "Ready" : report.status === "partial" ? "Partially available" : "Unavailable"} / updated ${formatDate(report.generatedAt)}`
+      : "Ready to inspect connected devices";
+  const metrics = report?.counts || {};
+  counts.innerHTML = [
+    ["Connected", metrics.connectedDevices || 0],
+    ["Removable", metrics.removableDrives || 0],
+    ["Network", metrics.mappedNetworkLocations || 0],
+    ["Fixed drives", metrics.fixedDrives || 0],
+    ["Windows locations", metrics.windowsLocations || 0]
+  ].map(([label, value]) => `<div><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`).join("");
+  const warningItems = report?.warnings || [];
+  warnings.hidden = warningItems.length === 0;
+  warnings.innerHTML = warningItems.map((warning) => `<div>${escapeHtml(warning)}</div>`).join("");
+  groups.innerHTML = report
+    ? deviceGroupDefinitions.map((definition) => {
+        const items = report.groups?.[definition.key] || [];
+        const networkNote = definition.key === "network" && !report.networkLoaded
+          ? `<div class="device-group-note">Mapped drives appear immediately. Load network locations to query the Windows provider.</div>`
+          : "";
+        return `<section class="device-group" data-device-group-section="${escapeHtml(definition.key)}">
+          <div class="device-group-head"><strong>${escapeHtml(definition.title)}</strong><span>${items.length}</span></div>
+          ${networkNote}
+          <div class="device-group-list">${items.length ? items.map((item) => devicesItemMarkup(item, definition.key)).join("") : `<div class="empty-state">${escapeHtml(definition.empty)}</div>`}</div>
+        </section>`;
+      }).join("")
+    : `<div class="empty-state">${app.devices.loading ? "Checking devices..." : "Open this dashboard to check devices."}</div>`;
+  document.getElementById("devices-refresh").disabled = app.devices.loading;
+  const networkButton = document.getElementById("devices-load-network");
+  networkButton.disabled = app.devices.loading || report?.networkLoaded === true;
+  networkButton.textContent = report?.networkLoaded ? "Network locations loaded" : "Load network locations";
+}
+
+async function loadDevicesReport(options = {}) {
+  if (app.devices.loading) return app.devices.report;
+  app.devices.loading = true;
+  if (options.includeNetwork === true) app.devices.includeNetwork = true;
+  renderDevicesDialog();
+  try {
+    const params = new URLSearchParams({
+      refresh: options.refresh === true ? "1" : "0",
+      includeNetwork: app.devices.includeNetwork ? "1" : "0"
+    });
+    app.devices.report = await request(`/api/windows/devices?${params}`);
+    app.devices.lastLoadedAt = Date.now();
+    renderDevicesDialog();
+    renderNavigatorDevices();
+    scheduleMcpContextPublish();
+    return app.devices.report;
+  } finally {
+    app.devices.loading = false;
+    renderDevicesDialog();
+  }
+}
+
+async function openDevicesDialog(options = {}) {
+  const dialog = document.getElementById("devices-dialog");
+  if (!dialog.open) dialog.showModal();
+  renderDevicesDialog();
+  await loadDevicesReport({ refresh: options.refresh === true, includeNetwork: options.includeNetwork === true });
+  if (options.focusId) {
+    document.getElementById(`device-${options.focusId}`)?.scrollIntoView({ block: "center" });
+  }
+}
+
+async function runDeviceAction(action, id) {
+  const item = deviceItemById(id);
+  if (!item) return showToast("That device is no longer available");
+  if (action === "browseInApp" && item.capabilities?.browseInApp && item.path) {
+    await loadPane(app.activePane, item.path);
+    document.getElementById("devices-dialog").close();
+    showToast(`Opened ${item.name} in ${app.activePane} pane`);
+    return;
+  }
+  if (action === "browseShell" && item.capabilities?.browseShell && (item.openTarget || item.path)) {
+    document.getElementById("devices-dialog").close();
+    await openShellNamespaceDialog(item.openTarget || item.path);
+    return;
+  }
+  if (action === "openInExplorer" && item.capabilities?.openInExplorer && (item.openTarget || item.path)) {
+    await request("/api/shell/namespace/open", {
+      method: "POST",
+      body: JSON.stringify({ target: item.openTarget || item.path })
+    });
+    setStatus(`Request started for ${item.name}`);
+    showToast("File Explorer request started");
+    return;
+  }
+  showToast("That action is not supported for this device");
+}
+
+function scheduleDeviceRefresh() {
+  clearInterval(app.devices.pollTimer);
+  app.devices.pollTimer = setInterval(() => {
+    if (document.visibilityState === "visible") loadDevicesReport().catch(() => {});
+  }, 15_000);
+}
+
+function renderHealthDialog() {
+  const report = app.health?.report;
+  const summary = document.getElementById("health-summary");
+  const overall = document.getElementById("health-overall");
+  const components = document.getElementById("health-components");
+  if (!summary || !overall || !components) return;
+  summary.textContent = app.health.loading
+    ? "Running local diagnostics..."
+    : report
+      ? `${report.probe ? "Active checks" : "Status read"} completed in ${formatMilliseconds(report.durationMs || 0)}`
+      : "Ready for local checks";
+  const state = report?.overall || "attention";
+  overall.className = `health-overall status-${state}`;
+  overall.innerHTML = report
+    ? `<div><span class="health-state-dot" aria-hidden="true"></span><strong>${escapeHtml(state === "healthy" ? "Healthy" : state === "attention" ? "Needs attention" : "Error")}</strong><small>${escapeHtml(report.version)} / ${escapeHtml(report.platform)} / ${escapeHtml(formatDate(report.generatedAt))}</small></div>
+      <div><span>Foreground leases</span><strong>${escapeHtml(report.scheduler?.activeForegroundLeases || 0)}</strong></div>
+      <div><span>Paused jobs</span><strong>${escapeHtml(report.scheduler?.pausedBackgroundJobs || 0)}</strong></div>
+      <div><span>Background resumptions</span><strong>${escapeHtml(report.scheduler?.resumptions || 0)}</strong></div>
+      <div><span>Queued prefetches</span><strong>${escapeHtml(report.scheduler?.renderer?.queuedPrefetches || 0)}</strong></div>
+      <div><span>Active prefetches</span><strong>${escapeHtml(report.scheduler?.renderer?.activePrefetches || 0)}</strong></div>
+      <div><span>Prefetch aborts</span><strong>${escapeHtml(report.scheduler?.renderer?.aborts || 0)}</strong></div>
+      <div><span>Prefetch cache hits</span><strong>${escapeHtml(report.scheduler?.renderer?.cacheHits || 0)}</strong></div>`
+    : `<div><strong>No health report yet</strong><small>Open the view to run an immediate safe status read.</small></div>`;
+  components.innerHTML = report?.components?.length
+    ? report.components.map((component) => `<article class="health-component status-${escapeHtml(component.status)}">
+        <span class="health-state-dot" aria-hidden="true"></span>
+        <div><strong>${escapeHtml(component.id.replace(/([A-Z])/g, " $1"))}</strong><small>${escapeHtml(component.summary)}</small>${component.suggestedAction ? `<em>${escapeHtml(component.suggestedAction)}</em>` : ""}</div>
+        <code>${escapeHtml(Object.entries(component.metrics || {}).slice(0, 6).map(([key, value]) => `${key}: ${value}`).join(" / "))}</code>
+      </article>`).join("")
+    : `<div class="empty-state">No component results yet.</div>`;
+  document.getElementById("health-probe").disabled = app.health.loading;
+  document.getElementById("health-export").disabled = app.health.exportBusy;
+}
+
+async function loadHealthReport(probe = false) {
+  if (app.health.loading) return app.health.report;
+  app.health.loading = true;
+  renderHealthDialog();
+  try {
+    app.health.report = await request(`/api/health/report?probe=${probe ? "1" : "0"}`);
+    renderHealthDialog();
+    return app.health.report;
+  } finally {
+    app.health.loading = false;
+    renderHealthDialog();
+  }
+}
+
+async function openHealthDialog() {
+  const dialog = document.getElementById("health-dialog");
+  if (!dialog.open) dialog.showModal();
+  renderHealthDialog();
+  await loadHealthReport(false);
+}
+
+async function exportSupportBundle() {
+  if (app.health.exportBusy) return;
+  app.health.exportBusy = true;
+  renderHealthDialog();
+  try {
+    const response = await fetch("/api/health/support-bundle", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ includePaths: document.getElementById("health-include-paths").checked })
+    });
+    if (!response.ok) {
+      const message = await response.json().catch(() => ({}));
+      throw new Error(message.error || `Support bundle failed: ${response.status}`);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("content-disposition") || "";
+    const fileName = disposition.match(/filename="([^"]+)"/)?.[1] || "explore-better-support.zip";
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast("Support bundle exported");
+  } finally {
+    app.health.exportBusy = false;
+    renderHealthDialog();
+  }
 }
 
 function normalizedPathKey(itemPath) {
@@ -4517,18 +5482,19 @@ function renderNavRows(items, options = {}) {
     .map((item) => {
       const kind = options.recent ? "recent" : item.kind || "folder";
       const canOpenPane = Boolean(item.path);
-      const canOpenShell = Boolean(item.id && item.openTarget);
       const active =
         canOpenPane && (samePath(item.path, activePath) || (kind === "drive" && pathInsideFolder(activePath, item.path)))
           ? " active"
           : "";
       const driveDetail = driveSpaceText(item);
-      const detail =
+      const baseDetail =
         driveDetail ||
         item.detail ||
         (options.recent && item.visitedAt ? formatDate(item.visitedAt) : item.path || item.openTarget || "");
+      const detail = item.typeLabel ? `${item.typeLabel} / ${baseDetail}` : baseDetail;
       const driveMeter = driveMeterMarkup(item);
-      const removeButton = options.removable
+      const removable = typeof options.removable === "function" ? options.removable(item) : options.removable;
+      const removeButton = removable
         ? `<button class="nav-mini danger" data-remove-favorite="${escapeHtml(
             item.id
           )}" title="Remove favorite" aria-label="Remove favorite">X</button>`
@@ -4536,19 +5502,13 @@ function renderNavRows(items, options = {}) {
       const favoriteClass = kind === "favorite" ? ` nav-favorite-row ${favoriteColorClass(item.color)}` : "";
       const mainAction = canOpenPane
         ? `data-root-path="${escapeHtml(item.path)}"`
-        : canOpenShell
-          ? `data-shell-open="${escapeHtml(item.id)}"`
-          : "disabled";
-      const mainLabel = canOpenPane ? `Open ${item.name || labelForPath(item.path)}` : `Open ${item.name}`;
+        : "disabled";
+      const mainLabel = canOpenPane ? `Open ${item.name || labelForPath(item.path)}` : `${item.name || "Location"} unavailable`;
       const sideAction = canOpenPane
         ? `<button class="nav-mini" data-nav-open-other="${escapeHtml(
             item.path
           )}" title="Open in other pane" aria-label="Open in other pane">&gt;</button>`
-        : canOpenShell
-          ? `<button class="nav-mini" data-shell-open="${escapeHtml(
-              item.id
-            )}" title="Open in Explorer" aria-label="Open in Explorer">EX</button>`
-          : `<button class="nav-mini" disabled aria-label="Unavailable">-</button>`;
+        : `<button class="nav-mini" disabled aria-label="Unavailable">-</button>`;
       return `<div class="nav-row${active}${kind === "drive" ? " nav-drive-row" : ""}${favoriteClass}">
         <button class="nav-main" ${mainAction} title="${escapeHtml(rootTitle(item))}" aria-label="${escapeHtml(mainLabel)}">
           <span class="nav-code">${escapeHtml(navGlyph(kind))}</span>
@@ -4563,6 +5523,43 @@ function renderNavRows(items, options = {}) {
       </div>`;
     })
     .join("");
+}
+
+function navigatorMeaningfulDevices(report = app.devices?.report) {
+  if (!report?.groups) return [];
+  const devices = [
+    ...(report.groups.connectedDevices || []),
+    ...(report.groups.drives || []).filter((item) => ["removable-drive", "optical-drive", "mapped-network"].includes(item.kind)),
+    ...(report.groups.network || [])
+  ];
+  const seen = new Set();
+  return devices.filter((item) => {
+    const key = item.id || normalizedPathKey(item.path || item.openTarget || item.name);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function renderNavigatorDevices() {
+  const section = document.getElementById("nav-devices-section");
+  const list = document.getElementById("nav-devices");
+  if (!section || !list) return;
+  const devices = navigatorMeaningfulDevices();
+  section.hidden = devices.length === 0;
+  list.innerHTML = devices.slice(0, 8).map((item) => {
+    const pathAction = item.path && item.capabilities?.browseInApp
+      ? `data-device-nav-path="${escapeHtml(item.path)}"`
+      : `data-device-nav-id="${escapeHtml(item.id)}"`;
+    const detail = item.detail || item.kind || "Connected";
+    return `<div class="nav-row nav-device-row">
+      <button class="nav-main" ${pathAction} title="${escapeHtml(detail)}" aria-label="Browse ${escapeHtml(item.name)}">
+        <span class="nav-code">${escapeHtml(shellNamespaceKindCode(item))}</span>
+        <span class="nav-text"><span>${escapeHtml(item.name)}</span><small>${escapeHtml(detail)}</small></span>
+      </button>
+      <button class="nav-mini" data-device-nav-id="${escapeHtml(item.id)}" title="View device actions" aria-label="View device actions">&gt;</button>
+    </div>`;
+  }).join("");
 }
 
 function folderTreeRoots() {
@@ -4629,7 +5626,7 @@ function renderFolderTreeNode(item, depth) {
   const toggle = hasChildren
     ? `<button class="tree-toggle" data-tree-toggle="${escapeHtml(itemPath)}" title="${
         expanded ? "Collapse folder" : "Expand folder"
-      }" aria-label="${expanded ? "Collapse folder" : "Expand folder"}">${expanded ? "-" : "+"}</button>`
+      }" aria-label="${expanded ? "Collapse folder" : "Expand folder"}" aria-expanded="${expanded}">${expanded ? "-" : "+"}</button>`
     : `<span class="tree-spacer"></span>`;
   const childMarkup = expanded
     ? `<div class="tree-children">${renderFolderTreeChildren(itemPath, depth + 1)}</div>`
@@ -4655,9 +5652,10 @@ function renderFolderTreeChildren(itemPath, depth) {
   }
   const node = folderTreeNodeFor(itemPath);
   if (node?.error) {
-    return `<div class="tree-message error" style="--tree-depth:${Math.min(depth, 12)}">${escapeHtml(
-      node.error
-    )}</div>`;
+    return `<div class="tree-message tree-error error" role="status" style="--tree-depth:${Math.min(depth, 12)}">
+      <span>${escapeHtml(node.error)}</span>
+      <button type="button" data-tree-retry="${escapeHtml(itemPath)}">Retry</button>
+    </div>`;
   }
   const entries = node?.entries || [];
   if (!entries.length) {
@@ -4696,12 +5694,17 @@ async function loadFolderTreeChildren(itemPath, options = {}) {
     }
     return node;
   } catch (error) {
-    app.folderTree.nodes.set(key, { path: itemPath, entries: [], error: error.message });
+    app.folderTree.nodes.set(key, { path: itemPath, entries: [], error: paneNavigationErrorMessage(error) });
     return null;
   } finally {
     app.folderTree.loading.delete(key);
     renderFolderTree();
   }
+}
+
+async function retryFolderTree(itemPath) {
+  app.folderTree.expanded.add(normalizedPathKey(itemPath));
+  await loadFolderTreeChildren(itemPath, { force: true });
 }
 
 async function toggleFolderTree(itemPath) {
@@ -4777,7 +5780,7 @@ function rememberLocation(itemPath) {
       visitedAt: new Date().toISOString()
     },
     ...recentLocations.filter((item) => normalizedPathKey(item.path) !== key)
-  ].slice(0, 16);
+  ].slice(0, 20);
 }
 
 function renderSavedCommandStrip() {
@@ -5313,6 +6316,23 @@ function shouldVirtualizeFileList(tab, entries) {
   return ["details", "compact", "tiles"].includes(tab.viewMode) && entries.length > virtualRenderThreshold;
 }
 
+function paneNavigationErrorMessage(error) {
+  const message = String(error?.message || error || "Could not open folder");
+  if (/\bENOENT\b|no such file or directory|cannot find the (file|path)/i.test(message)) {
+    return "Folder not found";
+  }
+  if (/\bENOTDIR\b|not a directory/i.test(message)) {
+    return "This path is not a folder";
+  }
+  if (/\bEACCES\b|\bEPERM\b|access (is )?denied|permission denied/i.test(message)) {
+    return "Access denied";
+  }
+  if (/\bEINVAL\b|invalid (path|name)/i.test(message)) {
+    return "That folder path is invalid";
+  }
+  return message;
+}
+
 function virtualListMetrics(tab, list, entriesLength) {
   if (tab.viewMode !== "tiles") {
     return {
@@ -5587,6 +6607,11 @@ function renderPane(paneName) {
   const breadcrumbs = document.querySelector(`[data-breadcrumbs="${paneName}"]`);
   if (breadcrumbs) {
     breadcrumbs.innerHTML = renderBreadcrumbs(paneName, tab.path);
+    requestAnimationFrame(() => {
+      if (breadcrumbs.isConnected) {
+        breadcrumbs.scrollLeft = breadcrumbs.scrollWidth;
+      }
+    });
   }
   document.querySelector(`[data-filter="${paneName}"]`).value = tab.filter;
   const kindFilter = document.querySelector(`[data-kind-filter="${paneName}"]`);
@@ -5709,6 +6734,12 @@ function transferDestinationForPane(paneName) {
 function paneSelectionActionDescription(action, count, destination) {
   const itemText = `${count} selected item${count === 1 ? "" : "s"}`;
   if (action === "rename") return `Rename the first of ${itemText}`;
+  if (action === "copy-other" && destination.direction === "hidden") {
+    return `Review copying ${itemText} to the ${destination.label}`;
+  }
+  if (action === "move-other" && destination.direction === "hidden") {
+    return `Review moving ${itemText} to the ${destination.label}`;
+  }
   if (action === "copy-other") return `Copy ${itemText} to the ${destination.label}`;
   if (action === "move-other") return `Move ${itemText} to the ${destination.label}`;
   if (action === "recycle") return `Send ${itemText} to the Windows Recycle Bin`;
@@ -5778,6 +6809,14 @@ function setPaneLayout(layoutMode, options = {}) {
   }
   app.paneLayout = nextLayout;
   renderLayoutChrome();
+  requestAnimationFrame(() => {
+    for (const paneName of ["left", "right"]) {
+      const breadcrumbs = document.querySelector(`[data-breadcrumbs="${paneName}"]`);
+      if (breadcrumbs?.isConnected && getComputedStyle(breadcrumbs).display !== "none") {
+        breadcrumbs.scrollLeft = breadcrumbs.scrollWidth;
+      }
+    }
+  });
   if (options.toast !== false) {
     showToast(paneLayoutLabel(nextLayout));
   }
@@ -6116,11 +7155,13 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
       return false;
     }
     if (!options.silent) {
-      setPaneNavigationStatus(paneName, `Could not open ${resolvedTargetPath}: ${error.message}`);
-      showToast(error.message);
+      const feedback = paneNavigationErrorMessage(error);
+      setPaneNavigationStatus(paneName, `${feedback}: ${resolvedTargetPath}`);
+      showToast(feedback);
     }
+    const feedback = paneNavigationErrorMessage(error);
     setPaneActivity(paneName, load, "error", {
-      detail: `${paneName === "left" ? "Left" : "Right"} pane could not open ${resolvedTargetPath}: ${error.message}`
+      detail: `${paneName === "left" ? "Left" : "Right"} pane: ${feedback.toLowerCase()} (${resolvedTargetPath})`
     });
     throw error;
   } finally {
@@ -6256,7 +7297,7 @@ async function calculateFolderSizes(paneName = app.activePane) {
 
   const scope = target.hasSelection ? "selected" : "visible";
   const capped = target.capped ? ` / first ${target.paths.length} of ${target.available}` : "";
-  setStatus(`Sizing ${target.paths.length} ${scope} folder(s)${capped}`);
+  setStatus(`Sizing ${itemWord(target.paths.length, `${scope} folder`)}${capped}`);
   markFolderSizes(target.paths, "scanning");
 
   try {
@@ -6276,7 +7317,7 @@ async function calculateFolderSizes(paneName = app.activePane) {
     const failed = (report.skipped || []).length;
     const bytes = folders.reduce((total, item) => total + Number(item.size || 0), 0);
     const status = [
-      `Sized ${folders.length} folder(s)`,
+      `Sized ${itemWord(folders.length, "folder")}`,
       formatSize(bytes),
       partial ? `${partial} partial` : "",
       failed ? `${failed} skipped` : "",
@@ -6524,7 +7565,7 @@ function sizeAnalysisIdleStrip() {
 function sizeAnalysisLoadingStrip(message = "Scanning...") {
   return `<div class="size-analysis-scan-line">
     <strong>${escapeHtml(message)}</strong>
-    <span>Walking the tree with capped entries and yielding between batches</span>
+    <span>Scanning folders and files. Large scans remain cancellable.</span>
   </div>
   <div class="size-analysis-progress-track is-loading" aria-hidden="true"><i></i></div>`;
 }
@@ -6536,30 +7577,34 @@ function sizeAnalysisSpaceText(space, totalBytes) {
   return `${formatSize(space.usedBytes)} used / ${formatSize(space.freeBytes)} free / ${formatSize(space.totalBytes)} total`;
 }
 
+function sizeAnalysisDriveShareText(bytes, totalBytes) {
+  const total = Number(totalBytes || 0);
+  const value = Number(bytes || 0);
+  if (!(value > 0) || !(total > 0)) return "";
+  const ratio = value / total;
+  return ratio < 0.0001 ? "less than 0.01% of drive" : `${sizeAnalysisPercentText(value, total)} of drive`;
+}
+
 function sizeAnalysisScanStrip(report) {
   const totalBytes = Number(report?.summary?.bytes || 0);
   const elapsed = Math.round(Number(report?.summary?.elapsedMs || 0));
   const scanned = Number(report?.scanned || 0);
   const skipped = Number(report?.summary?.skipped || 0);
   const cap = report?.cache?.hit
-    ? "Warm cache"
+    ? "Cached result"
     : report?.truncated
-      ? `Capped at ${Number(report.maxEntries || 0).toLocaleString()} entries`
+      ? `Stopped at ${itemWord(Number(report.maxEntries || 0), "item")}`
       : "Scan complete";
-  const cacheText = report?.cache?.hit
-    ? `saved ${Math.max(0, Math.round(Number(report.cache.originalElapsedMs || 0) - elapsed)).toLocaleString()}ms`
-    : "";
   const space = report?.space || null;
   const root = space?.root || report?.path || "";
-  const share = space?.available && Number(space.totalBytes || 0) > 0 ? `${sizeAnalysisPercentText(totalBytes, space.totalBytes)} of volume` : "";
+  const share = space?.available ? sizeAnalysisDriveShareText(totalBytes, space.totalBytes) : "";
   return `<div class="size-analysis-scan-line">
     <strong>${escapeHtml(cap)}</strong>
     <span>${escapeHtml(
       [
-        scanned === 1 ? "1 entry" : `${scanned.toLocaleString()} entries`,
-        skipped ? `${skipped.toLocaleString()} skipped` : "no skipped items",
-        `${elapsed}ms`,
-        cacheText
+        `${itemWord(scanned, "item")} checked`,
+        skipped ? `${skipped.toLocaleString()} skipped` : "",
+        `${elapsed.toLocaleString()} ms`
       ]
         .filter(Boolean)
         .join(" / ")
@@ -6844,8 +7889,8 @@ function renderSizeAnalysisDialog(message = "") {
   const allocatedBytes = Number(report.summary?.allocated || totalBytes);
   const skipped = Number(report.summary?.skipped || 0);
   const allocationLabel = report.allocationAccuracy === "exact"
-    ? `Exact via ${report.allocatedSource || "filesystem"}${report.clusterSize ? ` / ${formatSize(report.clusterSize)} clusters` : ""}`
-    : `Estimated${report.clusterSize ? ` / ${formatSize(report.clusterSize)} clusters` : ""}`;
+    ? `Exact disk allocation${report.clusterSize ? ` / ${formatSize(report.clusterSize)} clusters` : ""}`
+    : `Estimated disk allocation${report.clusterSize ? ` / ${formatSize(report.clusterSize)} clusters` : ""}`;
   renderSizeAnalysisSummary(report, message);
   const metricCards = [
     sizeAnalysisMetric("Total", formatSize(totalBytes), report.path),
@@ -6853,7 +7898,7 @@ function renderSizeAnalysisDialog(message = "") {
       "Allocated",
       formatSize(allocatedBytes),
       report.space?.available
-        ? `${sizeAnalysisPercentText(allocatedBytes, report.space.totalBytes)} of volume / ${allocationLabel}`
+        ? `${sizeAnalysisDriveShareText(allocatedBytes, report.space.totalBytes)} / ${allocationLabel}`
         : allocationLabel
     ),
     sizeAnalysisMetric("Files", Number(report.summary?.files || 0).toLocaleString(), `${Number(report.scanned || 0).toLocaleString()} scanned`),
@@ -7636,7 +8681,7 @@ async function setFileClipboard(mode, paneName) {
   renderAll();
   updateClipboardReadout();
   setStatus(clipboardSummaryText());
-  showToast(`${clipboardModeLabel(mode)} ${paths.length} item(s)`);
+  showToast(`${clipboardModeLabel(mode)} ${itemWord(paths.length, "item")}`);
   try {
     await publishWindowsFileClipboard(clipboardMode, paths);
     setStatus(`${clipboardSummaryText()} / Windows clipboard`);
@@ -7713,7 +8758,7 @@ async function pasteFileClipboard(paneName) {
       return;
     }
     const skipped = (plan.counts?.skip || 0) + (plan.counts?.unchanged || 0);
-    showToast(skipped ? `Paste skipped ${skipped} item(s)` : "Nothing to paste");
+    showToast(skipped ? `Paste skipped ${itemWord(skipped, "item")}` : "Nothing to paste");
     return;
   }
   const result = await request("/api/transfer", {
@@ -7735,7 +8780,7 @@ async function pasteFileClipboard(paneName) {
   const count = result.transferred?.length || result.copied?.length || result.moved?.length || clipboard.paths.length;
   const skipped = result.skipped?.length || 0;
   const suffix = skipped ? ` / skipped ${skipped}` : "";
-  showToast(`${clipboardModeLabel(clipboard.mode)} pasted ${count} item(s)${suffix}`);
+  showToast(`${clipboardModeLabel(clipboard.mode)} pasted ${itemWord(count, "item")}${suffix}`);
 }
 
 function copyNamesTargetsForPane(paneName = app.activePane) {
@@ -7938,21 +8983,28 @@ function checksumSummaryText(report) {
   }
   const summary = report.summary || {};
   if (report.verification) {
-    return `OK ${summary.ok || 0} / mismatch ${summary.mismatch || 0} / missing ${summary.missing || 0} / skipped ${
-      summary.skipped || 0
-    }`;
+    return `${summary.ok || 0} verified / ${itemWord(summary.mismatch || 0, "mismatch", "mismatches")} / ${itemWord(
+      summary.missing || 0,
+      "missing file"
+    )} / ${itemWord(summary.skipped || 0, "skipped entry", "skipped entries")}`;
   }
-  return `Hashed ${summary.hashed || 0} / skipped ${summary.skipped || 0} / ${formatSize(summary.bytes || 0)}`;
+  const hashed = Number(summary.hashed || 0);
+  const folderSkips = (report.skipped || []).filter((item) => /folder/i.test(item.reason || "")).length;
+  const fileSkips = Math.max(0, Number(summary.skipped || 0) - folderSkips);
+  const pieces = hashed ? [`Hashed ${itemWord(hashed, "file")}`, formatSize(summary.bytes || 0)] : [];
+  if (fileSkips) pieces.push(`Skipped ${itemWord(fileSkips, "file")}`);
+  if (folderSkips) pieces.push(`Skipped ${itemWord(folderSkips, "folder")}`);
+  return pieces.join(" / ") || "No files hashed";
 }
 
 function likelyChecksumManifestTarget(target) {
   const name = labelForPath(target?.path || "").toLowerCase();
-  return /\.(sha256|sha1|md5|checksums|checksum|csv|json|txt)$/i.test(name);
+  return /\.(sha256|sha1|md5|checksums|checksum|csv|json)$/i.test(name);
 }
 
 function checksumManifestTarget() {
   const targets = app.checksums?.targets || [];
-  return targets.find(likelyChecksumManifestTarget) || (targets.length === 1 ? targets[0] : null);
+  return targets.find(likelyChecksumManifestTarget) || null;
 }
 
 function renderChecksumsDialog(message = null) {
@@ -7965,11 +9017,17 @@ function renderChecksumsDialog(message = null) {
   const note = document.getElementById("checksums-target-note");
   if (note) {
     const manifest = checksumManifestTarget();
+    const fileCount = targets.filter((target) => !target.isDirectory).length;
     note.textContent = manifest
-      ? `Verify reads ${manifest.name}; Generate hashes selected files.`
-      : app.checksums?.fromSelection
-        ? "Hashes selected files. Select a manifest file to verify."
-        : "No selection; the active folder is listed as a skipped target.";
+      ? `Verify checks ${manifest.name}; Generate hashes the selected file.`
+      : fileCount
+        ? "Generates checksums for selected files. Select a checksum manifest to verify."
+        : "Select one or more files; folders are not hashed.";
+    const verifyButton = document.querySelector('[data-checksums-action="verify"]');
+    if (verifyButton) {
+      verifyButton.disabled = !manifest;
+      verifyButton.title = manifest ? `Verify ${manifest.name}` : "Select a checksum manifest to verify";
+    }
   }
   const list = document.getElementById("checksums-target-list");
   if (list) {
@@ -7978,7 +9036,7 @@ function renderChecksumsDialog(message = null) {
           .map(
             (target) =>
               `<div class="checksums-target-row">
-                <span>${target.isDirectory ? "DIR" : "FILE"}</span>
+                <span>${target.isDirectory ? "Folder" : "File"}</span>
                 <strong title="${escapeHtml(target.path)}">${escapeHtml(target.name)}</strong>
                 <small>${escapeHtml(target.path)}</small>
               </div>`
@@ -7991,7 +9049,14 @@ function renderChecksumsDialog(message = null) {
   if (resultRows) {
     const hashedRows = report?.verification
       ? (report.items || []).map((item) => {
-          const status = String(item.status || "skipped").toUpperCase();
+          const status =
+            item.status === "ok"
+              ? "Verified"
+              : item.status === "mismatch"
+                ? "Mismatch"
+                : item.status === "missing"
+                  ? "Missing"
+                  : "Skipped";
           const code = item.status === "ok" ? item.actualHash : item.status === "mismatch" ? item.actualHash : item.reason;
           const tail =
             item.status === "mismatch"
@@ -8000,7 +9065,7 @@ function renderChecksumsDialog(message = null) {
                 ? formatSize(item.size)
                 : "";
           return `<div class="checksums-result-row ${escapeHtml(item.status || "skipped")}">
-            <span>${escapeHtml(status === "MISMATCH" ? "BAD" : status === "MISSING" ? "MISS" : status)}</span>
+            <span>${escapeHtml(status)}</span>
             <strong title="${escapeHtml(item.path)}">${escapeHtml(item.name || labelForPath(item.path))}</strong>
             <code title="${escapeHtml(code || "")}">${escapeHtml(code || "")}</code>
             <small title="${escapeHtml(item.expectedHash || "")}">${escapeHtml(tail)}</small>
@@ -8009,7 +9074,7 @@ function renderChecksumsDialog(message = null) {
       : (report?.items || []).map(
           (item) =>
             `<div class="checksums-result-row">
-              <span>OK</span>
+              <span>Verified</span>
               <strong title="${escapeHtml(item.path)}">${escapeHtml(item.name)}</strong>
               <code title="${escapeHtml(item.hash)}">${escapeHtml(item.hash)}</code>
               <small>${formatSize(item.size)}</small>
@@ -8020,7 +9085,7 @@ function renderChecksumsDialog(message = null) {
       : (report?.skipped || []).map(
           (item) =>
             `<div class="checksums-result-row skipped">
-              <span>SKIP</span>
+              <span>Skipped</span>
               <strong title="${escapeHtml(item.path)}">${escapeHtml(item.name || labelForPath(item.path))}</strong>
               <code>${escapeHtml(item.reason || "Skipped")}</code>
               <small>${item.size ? formatSize(item.size) : ""}</small>
@@ -8309,8 +9374,8 @@ function handleEntryDragStart(event) {
   const nativeDragStarted = startNativeFileDrag(event, paths);
   setStatus(
     nativeDragStarted
-      ? `Drag ${paths.length} item(s): drop in Explore Better or Windows`
-      : `Drag ${paths.length} item(s): drop to copy, hold Shift to move`
+      ? `Drag ${itemWord(paths.length, "item")}: drop in Explore Better or Windows`
+      : `Drag ${itemWord(paths.length, "item")}: drop to copy, hold Shift to move`
   );
 }
 
@@ -8505,7 +9570,7 @@ async function runDroppedFileTransfer({ paths, mode, targetDir, sourcePane, targ
   await syncStateAndChrome();
   renderAll();
   const count = result.copied?.length || result.moved?.length || paths.length;
-  const message = `${dragModeLabel(mode)} dropped ${count} item(s)`;
+  const message = `${dragModeLabel(mode)} dropped ${itemWord(count, "item")}`;
   showToast(message);
   setStatus(message);
   return result;
@@ -9536,7 +10601,7 @@ async function applySelectionSet(openFirst = false) {
   tab.focusedPath = presentPaths[0] || tab.focusedPath;
   tab.anchorPath = tab.focusedPath;
   commitSelectionChange(paneName);
-  renderSelectionSetsDialog(`${mode}: ${presentPaths.length} item(s)`);
+  renderSelectionSetsDialog(`${mode}: ${itemWord(presentPaths.length, "item")}`);
   focusPaneList(paneName);
   showToast(`${selectedPaths(paneName).length} selected`);
 }
@@ -10498,6 +11563,175 @@ function setupDockOverflow() {
   updateDockOverflow();
 }
 
+const topbarActionRegistry = {
+  search: { label: "Search", run: () => deepSearch(app.activePane) },
+  sizeAnalysis: { label: "Disk Map", run: () => openSizeAnalysisDialog(app.activePane, "map") },
+  ops: { label: "Operations", run: () => openOpsDialog() },
+  palette: { label: "Command", run: () => openCommandDialog() },
+  focus: { label: "Focus", run: () => toggleFocusMode() }
+};
+
+async function runTopbarAction(actionId) {
+  const action = topbarActionRegistry[actionId];
+  if (!action) return false;
+  await action.run();
+  return true;
+}
+
+let topbarOverflowFrame = 0;
+let topbarOverflowResizeObserver = null;
+let topbarOverflowMutationObserver = null;
+
+function closeTopbarMoreMenu(options = {}) {
+  const toggle = document.getElementById("topbar-more-toggle");
+  const menu = document.getElementById("topbar-more-menu");
+  if (!toggle || !menu) return;
+  menu.hidden = true;
+  toggle.setAttribute("aria-expanded", "false");
+  if (options.restoreFocus) toggle.focus();
+}
+
+function positionTopbarMoreMenu() {
+  const toggle = document.getElementById("topbar-more-toggle");
+  const menu = document.getElementById("topbar-more-menu");
+  if (!toggle || !menu || menu.hidden) return;
+  const rect = toggle.getBoundingClientRect();
+  const width = menu.getBoundingClientRect().width || 320;
+  menu.style.left = `${Math.round(Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)))}px`;
+  menu.style.top = `${Math.round(rect.bottom + 5)}px`;
+}
+
+function topbarOverflowActionMarkup(button) {
+  const actionId = button.dataset.topbarAction;
+  const registryItem = topbarActionRegistry[actionId];
+  const iconClass = [...(button.querySelector(".lucide-icon")?.classList || [])].find((name) => name.startsWith("icon-"));
+  return `<button type="button" role="menuitem" data-topbar-action="${escapeHtml(actionId)}" title="${escapeHtml(button.title || registryItem?.label || actionId)}">${
+    iconClass ? `<span class="lucide-icon ${escapeHtml(iconClass)}" aria-hidden="true"></span>` : ""
+  }<span>${escapeHtml(registryItem?.label || actionId)}</span></button>`;
+}
+
+function updateTopbarOverflow() {
+  topbarOverflowFrame = 0;
+  const topbar = document.querySelector(".topbar");
+  const rootStrip = document.getElementById("root-strip");
+  const status = document.getElementById("status-pill");
+  const toggle = document.getElementById("topbar-more-toggle");
+  const menu = document.getElementById("topbar-more-menu");
+  if (!topbar || !rootStrip || !status || !toggle || !menu) return;
+  closeTopbarMoreMenu();
+  const buttons = [...topbar.querySelectorAll(".topbar-actions [data-topbar-action]")];
+  buttons.forEach((button) => button.classList.remove("topbar-responsive-hidden", "topbar-label-collapsed"));
+  rootStrip.hidden = false;
+  status.hidden = false;
+  topbar.classList.remove("topbar-root-hidden", "topbar-status-hidden");
+  toggle.hidden = true;
+  menu.innerHTML = "";
+  const fits = () => {
+    const headerFits = topbar.scrollWidth <= topbar.clientWidth + 1;
+    const rootFits = rootStrip.hidden || rootStrip.clientWidth >= 80 || rootStrip.scrollWidth <= rootStrip.clientWidth + 1;
+    const statusFits = status.hidden || status.clientWidth >= 64;
+    return headerFits && rootFits && statusFits;
+  };
+  if (fits()) return;
+
+  for (const actionId of ["focus", "ops", "sizeAnalysis", "search", "palette"]) {
+    topbar.querySelector(`[data-topbar-action="${actionId}"]`)?.classList.add("topbar-label-collapsed");
+    if (fits()) return;
+  }
+
+  toggle.hidden = false;
+  const overflowed = [];
+  for (const actionId of ["focus", "ops", "sizeAnalysis"]) {
+    const button = topbar.querySelector(`[data-topbar-action="${actionId}"]`);
+    if (!button) continue;
+    button.classList.add("topbar-responsive-hidden");
+    overflowed.push(button);
+    if (fits()) break;
+  }
+  if (!fits()) {
+    rootStrip.hidden = true;
+    topbar.classList.add("topbar-root-hidden");
+  }
+  if (!fits()) {
+    status.hidden = true;
+    topbar.classList.add("topbar-status-hidden");
+  }
+  for (const actionId of ["search", "palette"]) {
+    if (fits()) break;
+    const button = topbar.querySelector(`[data-topbar-action="${actionId}"]`);
+    if (!button) continue;
+    button.classList.add("topbar-responsive-hidden");
+    overflowed.push(button);
+  }
+  const context = [];
+  if (rootStrip.hidden) {
+    context.push(`<div class="topbar-overflow-context" role="note"><span>Current location</span><strong>${escapeHtml(document.getElementById("session-root")?.textContent || "Unknown")}</strong></div>`);
+  }
+  if (status.hidden) {
+    context.push(`<div class="topbar-overflow-context" role="status"><span>Status</span><strong>${escapeHtml(status.textContent || "Ready")}</strong></div>`);
+  }
+  menu.innerHTML = `${overflowed.map(topbarOverflowActionMarkup).join("")}${context.join("")}`;
+  toggle.hidden = !menu.children.length;
+  toggle.title = `${overflowed.length} more command${overflowed.length === 1 ? "" : "s"}${context.length ? " and current status" : ""}`;
+  toggle.setAttribute("aria-label", toggle.title);
+}
+
+function scheduleTopbarOverflowUpdate() {
+  if (topbarOverflowFrame) cancelAnimationFrame(topbarOverflowFrame);
+  topbarOverflowFrame = requestAnimationFrame(updateTopbarOverflow);
+}
+
+function setupTopbarOverflow() {
+  const topbar = document.querySelector(".topbar");
+  const toggle = document.getElementById("topbar-more-toggle");
+  const menu = document.getElementById("topbar-more-menu");
+  if (!topbar || !toggle || !menu) return;
+  toggle.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (menu.hidden) {
+      menu.hidden = false;
+      toggle.setAttribute("aria-expanded", "true");
+      positionTopbarMoreMenu();
+      menu.querySelector("button")?.focus();
+    } else {
+      closeTopbarMoreMenu({ restoreFocus: true });
+    }
+  });
+  menu.addEventListener("keydown", (event) => {
+    const items = [...menu.querySelectorAll("button")];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      items[(index + offset + items.length) % items.length]?.focus();
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      items[event.key === "Home" ? 0 : items.length - 1]?.focus();
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("#topbar-more-menu, #topbar-more-toggle")) closeTopbarMoreMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !menu.hidden) {
+      event.preventDefault();
+      closeTopbarMoreMenu({ restoreFocus: true });
+    }
+  });
+  window.addEventListener("resize", scheduleTopbarOverflowUpdate);
+  topbarOverflowResizeObserver?.disconnect();
+  topbarOverflowResizeObserver = new ResizeObserver(scheduleTopbarOverflowUpdate);
+  topbarOverflowResizeObserver.observe(topbar);
+  topbarOverflowMutationObserver?.disconnect();
+  topbarOverflowMutationObserver = new MutationObserver(scheduleTopbarOverflowUpdate);
+  for (const target of [document.getElementById("root-strip"), document.getElementById("session-root"), document.getElementById("status-pill")]) {
+    if (target) topbarOverflowMutationObserver.observe(target, { childList: true, subtree: true, characterData: true });
+  }
+  updateTopbarOverflow();
+}
+
 function renderToolbarDialog() {
   const dialog = document.getElementById("toolbar-dialog");
   if (!dialog) {
@@ -10573,35 +11807,122 @@ async function openToolbarDialog() {
   document.getElementById("toolbar-dialog").showModal();
 }
 
+const preferenceSectionSettingKeys = Object.freeze({
+  files: ["density", "openGesture", "startupMode", "startupLayoutId", "pasteConflictMode", "navigator", "inspector", "inspectorAutoCollapse", "autoRefresh", "showHidden", "linkedNavigation", "confirmTrash"],
+  windows: ["launchMode", "shellOpenMode"],
+  terminal: ["terminalDefaultProfile", "terminalDefaultElevation", "terminalFollowDirectory", "terminalTheme", "terminalFontSize", "terminalCursor", "terminalScrollback"]
+});
+
+const preferenceSectionLabels = Object.freeze({ files: "Files and folders", windows: "Windows integration", terminal: "Terminal" });
+
+function applyPreferenceDraftSettings(settings, sectionId = null) {
+  const applies = (key) => !sectionId || preferenceSectionSettingKeys[sectionId]?.includes(key);
+  const setValue = (id, key) => { if (applies(key)) document.getElementById(id).value = settings[key]; };
+  const setChecked = (id, key) => { if (applies(key)) document.getElementById(id).checked = Boolean(settings[key]); };
+  setValue("preference-density", "density");
+  setValue("preference-open-gesture", "openGesture");
+  setValue("preference-startup-mode", "startupMode");
+  if (applies("startupLayoutId")) {
+    renderStartupLayoutPicker(settings);
+    document.getElementById("preference-startup-layout").value = settings.startupLayoutId || "";
+  }
+  setValue("preference-paste-conflict", "pasteConflictMode");
+  setChecked("preference-navigator", "navigator");
+  setChecked("preference-inspector", "inspector");
+  setChecked("preference-inspector-auto-collapse", "inspectorAutoCollapse");
+  setChecked("preference-auto-refresh", "autoRefresh");
+  setChecked("preference-show-hidden", "showHidden");
+  setChecked("preference-linked-navigation", "linkedNavigation");
+  setChecked("preference-confirm-trash", "confirmTrash");
+  setValue("preference-launch-mode", "launchMode");
+  setValue("preference-shell-open-mode", "shellOpenMode");
+  if (applies("terminalDefaultProfile")) {
+    renderTerminalProfileChoices();
+    document.getElementById("preference-terminal-profile").value = settings.terminalDefaultProfile;
+  }
+  setValue("preference-terminal-elevation", "terminalDefaultElevation");
+  setValue("preference-terminal-theme", "terminalTheme");
+  setValue("preference-terminal-font-size", "terminalFontSize");
+  setValue("preference-terminal-cursor", "terminalCursor");
+  setValue("preference-terminal-scrollback", "terminalScrollback");
+  setChecked("preference-terminal-follow", "terminalFollowDirectory");
+}
+
+function preferenceSectionChanged(sectionId, draft = preferencesSettingsFromForm(), saved = currentSettings()) {
+  return (preferenceSectionSettingKeys[sectionId] || []).some((key) => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]));
+}
+
+function renderPreferenceChangedBadges() {
+  if (!app.state || !document.getElementById("preferences-form")) return;
+  const draft = preferencesSettingsFromForm();
+  const saved = currentSettings();
+  for (const sectionId of Object.keys(preferenceSectionSettingKeys)) {
+    const badge = document.querySelector(`[data-preference-changed="${sectionId}"]`);
+    if (badge) badge.hidden = !preferenceSectionChanged(sectionId, draft, saved);
+  }
+}
+
+function applyPreferencesSearch() {
+  const input = document.getElementById("preferences-search");
+  const noResults = document.getElementById("preferences-no-results");
+  if (!input || !noResults) return;
+  const query = input.value.trim().toLocaleLowerCase();
+  let visibleSections = 0;
+  for (const section of document.querySelectorAll("[data-preference-section]")) {
+    const head = section.querySelector(":scope > .preference-section-head");
+    const headerText = [...(head?.querySelectorAll("strong, small") || [])].map((item) => item.textContent || "").join(" ");
+    const headerMatch = !query || headerText.toLocaleLowerCase().includes(query);
+    let visibleRows = 0;
+    for (const row of [...section.children].filter((child) => child !== head)) {
+      const helpText = [...(row.querySelectorAll?.("[title], [aria-label], [placeholder]") || [])]
+        .flatMap((item) => [item.getAttribute("title"), item.getAttribute("aria-label"), item.getAttribute("placeholder")])
+        .filter(Boolean)
+        .join(" ");
+      const rowText = `${row.textContent || ""} ${helpText}`.replace(/\s+/g, " ").trim().toLocaleLowerCase();
+      const rowMatch = headerMatch || rowText.includes(query);
+      row.classList.toggle("preference-search-hidden", !rowMatch);
+      if (rowMatch) visibleRows += 1;
+    }
+    const sectionVisible = headerMatch || visibleRows > 0;
+    section.classList.toggle("preference-search-hidden", !sectionVisible);
+    if (sectionVisible) visibleSections += 1;
+  }
+  noResults.hidden = visibleSections > 0;
+  document.getElementById("preferences-search-clear").disabled = !query;
+}
+
+function setPreferencesSearchQuery(query = "") {
+  const input = document.getElementById("preferences-search");
+  if (!input) return;
+  input.value = String(query).slice(0, 200);
+  applyPreferencesSearch();
+}
+
+function resetPreferenceSectionDraft(sectionId) {
+  const label = preferenceSectionLabels[sectionId];
+  if (!label || !window.confirm(`Reset ${label} settings to their defaults? Changes will remain a draft until you save.`)) {
+    if (label) showToast(`${label} reset canceled`);
+    return false;
+  }
+  applyPreferenceDraftSettings(defaultPreferenceSettings(), sectionId);
+  renderPreferencesSummary(preferencesSettingsFromForm());
+  renderPreferencesDirtyState();
+  applyPreferencesSearch();
+  showToast(`${label} defaults applied to the draft`);
+  return true;
+}
+
 function renderPreferencesDialog() {
   const dialog = document.getElementById("preferences-dialog");
   if (!dialog) {
     return;
   }
   const settings = currentSettings();
-  document.getElementById("preference-density").value = settings.density;
-  document.getElementById("preference-open-gesture").value = settings.openGesture;
-  document.getElementById("preference-startup-mode").value = settings.startupMode;
-  renderStartupLayoutPicker(settings);
-  document.getElementById("preference-paste-conflict").value = settings.pasteConflictMode;
-  document.getElementById("preference-navigator").checked = settings.navigator;
-  document.getElementById("preference-inspector").checked = settings.inspector;
-  document.getElementById("preference-inspector-auto-collapse").checked = settings.inspectorAutoCollapse;
-  document.getElementById("preference-auto-refresh").checked = settings.autoRefresh;
-  document.getElementById("preference-show-hidden").checked = settings.showHidden;
-  document.getElementById("preference-linked-navigation").checked = settings.linkedNavigation;
-  document.getElementById("preference-confirm-trash").checked = settings.confirmTrash;
-  document.getElementById("preference-launch-mode").value = settings.launchMode;
-  document.getElementById("preference-shell-open-mode").value = settings.shellOpenMode;
-  renderTerminalProfileChoices();
-  document.getElementById("preference-terminal-elevation").value = settings.terminalDefaultElevation;
-  document.getElementById("preference-terminal-theme").value = settings.terminalTheme;
-  document.getElementById("preference-terminal-font-size").value = settings.terminalFontSize;
-  document.getElementById("preference-terminal-cursor").value = settings.terminalCursor;
-  document.getElementById("preference-terminal-scrollback").value = settings.terminalScrollback;
-  document.getElementById("preference-terminal-follow").checked = settings.terminalFollowDirectory;
+  applyPreferenceDraftSettings(settings);
   renderAiBridgePreferences();
   renderPreferencesSummary(settings);
+  renderPreferencesDirtyState();
+  applyPreferencesSearch();
 }
 
 function selectedAiBridgeProfile() {
@@ -10647,6 +11968,16 @@ function renderAiBridgePreferences() {
         return `<label class="check-row" title="${escapeHtml(tool.description)}"><input type="checkbox" data-ai-tool="${escapeHtml(tool.name)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} /><span>${escapeHtml(tool.title || tool.name)}</span></label>`;
       }).join("")
     : `<span class="ai-bridge-muted">${bridge ? "Loading tools" : "Desktop app required"}</span>`;
+  const selectedToolCount = document.querySelectorAll("[data-ai-tool]:checked").length;
+  const newlyAvailableTools = profile
+    ? ["list_ui_actions", "invoke_ui_action", "wait_for_ui"].filter((name) => tools.some((tool) => tool.name === name) && !(profile.tools || []).includes(name))
+    : [];
+  const toolSummary = document.getElementById("preference-ai-tools-summary");
+  if (toolSummary) {
+    toolSummary.textContent = tools.length
+      ? `${selectedToolCount} enabled / ${tools.length} available${newlyAvailableTools.length ? ` / ${newlyAvailableTools.length} new permissions available` : ""}`
+      : bridge ? "Loading" : "Desktop app required";
+  }
 
   const deployment = status?.deployment;
   const clients = deployment?.clients || [];
@@ -10660,6 +11991,7 @@ function renderAiBridgePreferences() {
     ? JSON.stringify({ command: generic.command, args: generic.args.map((item) => item === "PROFILE_ID" ? profileId : item) }, null, 2)
     : "";
   renderAiBridgeAudit();
+  renderPreferencesDirtyState();
 }
 
 function renderAiBridgeAudit() {
@@ -10773,13 +12105,11 @@ function preferenceSettingsDraftFromForm() {
 }
 
 function renderPreferencesSummary(settings = currentSettings()) {
-  document.getElementById("preferences-summary").textContent = `${densityLabels[settings.density]} / ${
-    openGestureLabels[settings.openGesture]
-  }`;
+  document.getElementById("preferences-summary").textContent = savedPreferencesSummary(settings);
   const generated = app.state?.integration?.generatedAt;
   const regenText = generated
-    ? "Changing launch or shell-open defaults regenerates the Explorer integration files."
-    : "Generate integration files after choosing replacement defaults.";
+    ? "Changing these Windows integration choices regenerates the Explorer integration files."
+    : "Generate Windows integration files after choosing how Explorer requests should open.";
   document.getElementById("preferences-readout").textContent = `${
     startupSettingLabel(settings)
   } on normal launch. ${launchModeLabels[settings.launchMode]} / ${
@@ -10817,6 +12147,95 @@ function preferencesSettingsFromForm() {
     toolbarActions: currentSettings().toolbarActions,
     toolbarOrder: currentSettings().toolbarOrder
   });
+}
+
+function comparableAiBridgeProfile(profile = {}) {
+  const access = profile.access === "read-write" ? "read-write" : "read-only";
+  return {
+    name: String(profile.name || "").trim(),
+    clientType: String(profile.clientType || "generic"),
+    access,
+    roots: (profile.roots || []).map((item) => String(item).trim()).filter(Boolean),
+    tools: [...new Set((profile.tools || []).map(String))].sort(),
+    allowPermanentDelete: access === "read-write" && profile.allowPermanentDelete === true
+  };
+}
+
+function preferencesSettingsHaveUnsavedChanges() {
+  const form = document.getElementById("preferences-form");
+  if (!form || !app.state) return false;
+  return JSON.stringify(preferencesSettingsFromForm()) !== JSON.stringify(currentSettings());
+}
+
+function aiBridgeProfileHasUnsavedChanges() {
+  if (!desktopAiBridge() || !app.aiBridge.status) return false;
+  if (app.aiBridge.draftNew) return true;
+  const profile = selectedAiBridgeProfile();
+  if (!profile) return false;
+  return JSON.stringify(comparableAiBridgeProfile(aiBridgeProfileDraft())) !== JSON.stringify(comparableAiBridgeProfile(profile));
+}
+
+function preferencesHaveUnsavedChanges() {
+  return preferencesSettingsHaveUnsavedChanges() || aiBridgeProfileHasUnsavedChanges();
+}
+
+function savedPreferencesSummary(settings = currentSettings()) {
+  return `${densityLabels[settings.density]} / ${openGestureLabels[settings.openGesture]}`;
+}
+
+function renderPreferencesDirtyState() {
+  const dialog = document.getElementById("preferences-dialog");
+  const summary = document.getElementById("preferences-summary");
+  const saveStatus = document.getElementById("preferences-save-status");
+  const saveButton = document.querySelector('#preferences-form button[type="submit"]');
+  if (!dialog || !summary || !saveStatus || !saveButton || !app.state) return;
+  const settingsDirty = preferencesSettingsHaveUnsavedChanges();
+  const aiDirty = aiBridgeProfileHasUnsavedChanges();
+  summary.textContent = settingsDirty && aiDirty
+    ? "Unsaved app and AI changes"
+    : settingsDirty
+      ? "Unsaved app preference changes"
+      : aiDirty
+        ? "Unsaved AI profile changes"
+        : savedPreferencesSummary();
+  saveStatus.textContent = settingsDirty
+    ? "App preference changes are not saved yet"
+    : aiDirty
+      ? "Use Save Profile in AI Bridge to keep those changes"
+      : "All app preferences saved";
+  saveButton.disabled = !settingsDirty;
+  renderPreferenceChangedBadges();
+  const toolSummary = document.getElementById("preference-ai-tools-summary");
+  if (toolSummary) {
+    const tools = document.querySelectorAll("[data-ai-tool]");
+    const selected = document.querySelectorAll("[data-ai-tool]:checked");
+    const profile = selectedAiBridgeProfile();
+    const contractTools = app.aiBridge.status?.contract?.tools || [];
+    const newCount = profile
+      ? ["list_ui_actions", "invoke_ui_action", "wait_for_ui"].filter((name) => contractTools.some((tool) => tool.name === name) && !(profile.tools || []).includes(name)).length
+      : 0;
+    if (tools.length) toolSummary.textContent = `${selected.length} enabled / ${tools.length} available${newCount ? ` / ${newCount} new permissions available` : ""}`;
+  }
+}
+
+function confirmDiscardAiBridgeDraft() {
+  if (!aiBridgeProfileHasUnsavedChanges()) return true;
+  return window.confirm("Discard the unsaved AI Bridge profile changes?");
+}
+
+function requestClosePreferencesDialog({ prompt = true } = {}) {
+  const dialog = document.getElementById("preferences-dialog");
+  if (!dialog?.open) return true;
+  if (preferencesHaveUnsavedChanges()) {
+    if (!prompt) return false;
+    if (!window.confirm("Discard the unsaved Preferences changes?")) return false;
+  }
+  app.aiBridge.draftNew = false;
+  if (!app.aiBridge.selectedProfileId) {
+    app.aiBridge.selectedProfileId = app.aiBridge.status?.configuration?.profiles?.[0]?.id || null;
+  }
+  dialog.close();
+  return true;
 }
 
 function defaultPreferenceSettings() {
@@ -10936,12 +12355,12 @@ async function applyPreferencesFromForm() {
   });
 }
 
-async function resetPreferencesToDefaults() {
-  await saveSettingsPatch(defaultPreferenceSettings(), {
-    regenerateIntegration: true,
-    refreshHidden: true,
-    message: "Preferences reset"
-  });
+function resetPreferencesToDefaults() {
+  applyPreferenceDraftSettings(defaultPreferenceSettings());
+  renderPreferencesSummary(preferencesSettingsFromForm());
+  renderPreferencesDirtyState();
+  applyPreferencesSearch();
+  showToast("All defaults applied to the draft");
 }
 
 async function openPreferencesDialog() {
@@ -11163,12 +12582,18 @@ async function renderInspector(options = {}) {
         preview.name
       )}</h3><div class="preview-meta"><span>${escapeHtml(
         preview.path
-      )}</span><span>${preview.count} items</span></div>${labelPanel}`;
+      )}</span><span>${itemWord(preview.count, "item")}</span></div>${labelPanel}`;
       return;
     }
+    const unavailableMessage =
+      preview.type === "binary"
+        ? "Preview unavailable for binary files"
+        : preview.type === "large"
+          ? "This file is too large for an in-app preview"
+          : "Preview unavailable for this file type";
     body.innerHTML = `<h3 class="preview-name">${escapeHtml(
       preview.name
-    )}</h3>${meta}${labelPanel}<div class="muted">${preview.type}</div>`;
+    )}</h3>${meta}${labelPanel}<div class="muted">${escapeHtml(unavailableMessage)}</div>`;
   } catch (error) {
     if (isAbortError(error) || renderToken !== app.inspectorRenderToken) {
       return;
@@ -11473,6 +12898,52 @@ function textEditorContent() {
   return document.getElementById("text-editor-content").value;
 }
 
+function textEditorIsDirty() {
+  return Boolean(app.textEditor) && textEditorContent() !== app.textEditor.originalContent;
+}
+
+function setTextEditorConflictAction(visible) {
+  const button = document.querySelector('[data-text-editor-action="force-save"]');
+  if (button) {
+    button.hidden = !visible;
+  }
+}
+
+function applyTextEditorPreview(paneName, preview, message = "") {
+  app.textEditor = {
+    paneName,
+    path: preview.path,
+    originalContent: preview.content,
+    modified: preview.modified,
+    size: preview.size
+  };
+  document.getElementById("text-editor-path").value = preview.path;
+  document.getElementById("text-editor-content").value = preview.content;
+  document.getElementById("text-editor-title").textContent = preview.name;
+  setTextEditorConflictAction(false);
+  updateTextEditorSummary(message);
+}
+
+function textEditorSaveError(error) {
+  const conflict = /changed on disk/i.test(error?.message || "");
+  setTextEditorConflictAction(conflict);
+  updateTextEditorSummary(error.message);
+  showToast(error.message);
+}
+
+function closeTextEditor() {
+  const dialog = document.getElementById("text-editor-dialog");
+  if (!dialog?.open) {
+    return true;
+  }
+  if (textEditorIsDirty() && !confirm("Discard unsaved edits and close the editor?")) {
+    showToast("Editor kept open");
+    return false;
+  }
+  dialog.close();
+  return true;
+}
+
 function updateTextEditorSummary(message = "") {
   const summary = document.getElementById("text-editor-summary");
   if (!summary) {
@@ -11508,18 +12979,11 @@ async function openTextEditor(paneName = app.activePane, itemPath = null) {
   if (preview.type !== "text") {
     return showToast("Select a small text file");
   }
-  app.textEditor = {
-    paneName,
-    path: preview.path,
-    originalContent: preview.content,
-    modified: preview.modified,
-    size: preview.size
-  };
-  document.getElementById("text-editor-path").value = preview.path;
-  document.getElementById("text-editor-content").value = preview.content;
-  document.getElementById("text-editor-title").textContent = preview.name;
-  updateTextEditorSummary();
-  document.getElementById("text-editor-dialog").showModal();
+  applyTextEditorPreview(paneName, preview);
+  const dialog = document.getElementById("text-editor-dialog");
+  if (!dialog.open) {
+    dialog.showModal();
+  }
   document.getElementById("text-editor-content").focus();
 }
 
@@ -11527,7 +12991,17 @@ async function reloadTextEditor() {
   if (!app.textEditor?.path) {
     return showToast("No text file loaded");
   }
-  await openTextEditor(app.textEditor.paneName || app.activePane, app.textEditor.path);
+  if (textEditorIsDirty() && !confirm("Discard unsaved edits and reload the file from disk?")) {
+    return showToast("Reload canceled");
+  }
+  const paneName = app.textEditor.paneName || app.activePane;
+  const preview = await request(`/api/preview?path=${encodeURIComponent(app.textEditor.path)}`);
+  if (preview.type !== "text") {
+    return showToast("This file can no longer be edited as text");
+  }
+  applyTextEditorPreview(paneName, preview, "Reloaded");
+  document.getElementById("text-editor-content").focus();
+  showToast("Text reloaded from disk");
 }
 
 async function saveTextEditor(force = false) {
@@ -11547,6 +13021,7 @@ async function saveTextEditor(force = false) {
   app.textEditor.originalContent = textEditorContent();
   app.textEditor.modified = result.modified;
   app.textEditor.size = result.bytes;
+  setTextEditorConflictAction(false);
   await refreshPane(app.textEditor.paneName || app.activePane);
   await syncStateAndChrome();
   renderInspector();
@@ -12393,7 +13868,7 @@ function bulkCountsText(counts = {}) {
 function renderBulkRenamePlan(plan) {
   app.bulkRename.plan = plan;
   const total = plan.items.length;
-  document.getElementById("bulk-summary").textContent = `${total} item(s) / ${bulkCountsText(
+  document.getElementById("bulk-summary").textContent = `${itemWord(total, "item")} / ${bulkCountsText(
     plan.counts
   )}`;
   document.getElementById("bulk-apply").disabled = !plan.canApply;
@@ -12449,7 +13924,7 @@ async function applyBulkRename() {
   await refreshPane(app.bulkRename.paneName);
   await syncStateAndChrome();
   document.getElementById("bulk-dialog").close();
-  showToast(`Renamed ${result.renamed.length} item(s)`);
+  showToast(`Renamed ${itemWord(result.renamed.length, "item")}`);
 }
 
 async function operationPreview(type, payload) {
@@ -12484,7 +13959,7 @@ async function copyToOther(paneName) {
   }
   const targetDir = tabOf(otherPane(paneName)).path;
   const preview = await operationPreview("copy", { paths, targetDir, conflictMode: "unique" });
-  if (shouldOpenTransferPreflight(preview)) {
+  if (normalizePaneLayout(app.paneLayout) === "single" || shouldOpenTransferPreflight(preview)) {
     return openTransferPreflight(paneName, paths, {
       targetDir,
       mode: "copy",
@@ -12508,7 +13983,7 @@ async function moveToOther(paneName) {
   }
   const targetDir = tabOf(otherPane(paneName)).path;
   const preview = await operationPreview("move", { paths, targetDir, conflictMode: "unique" });
-  if (shouldOpenTransferPreflight(preview)) {
+  if (normalizePaneLayout(app.paneLayout) === "single" || shouldOpenTransferPreflight(preview)) {
     return openTransferPreflight(paneName, paths, {
       targetDir,
       mode: "move",
@@ -12605,7 +14080,7 @@ function transferPolicyControl(item, plan) {
 
 function renderTransferPlan(plan) {
   app.transfer.plan = plan;
-  document.getElementById("transfer-summary").textContent = `${plan.items.length} item(s) / ${plan.mode} / ${
+  document.getElementById("transfer-summary").textContent = `${itemWord(plan.items.length, "item")} / ${plan.mode} / ${
     plan.conflictMode
   } / ${transferCountsText(plan.counts, plan.actionCounts)}`;
   document.getElementById("transfer-apply").disabled = !plan.canApply;
@@ -12666,7 +14141,7 @@ async function applyTransfer() {
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   document.getElementById("transfer-dialog").close();
-  showToast(`${result.mode === "move" ? "Moved" : "Copied"} ${result.transferred.length} item(s)`);
+  showToast(`${result.mode === "move" ? "Moved" : "Copied"} ${itemWord(result.transferred.length, "item")}`);
 }
 
 function destinationKindLabel(kind) {
@@ -12816,7 +14291,7 @@ function renderDestinationDialog(message = "") {
   document.getElementById("destination-heading").textContent = `${app.destination.paths.length} selected`;
   document.getElementById("destination-summary").textContent =
     message ||
-    `${app.destination.paths.length} item(s) / ${payload.mode} / ${payload.conflictMode} / ${
+    `${itemWord(app.destination.paths.length, "item")} / ${payload.mode} / ${payload.conflictMode} / ${
       targetPath ? labelForPath(targetPath) : "No target"
     }`;
   document.getElementById("destination-send").disabled = !targetPath;
@@ -12928,7 +14403,7 @@ async function applyDestinationTransfer() {
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   document.getElementById("destination-dialog")?.close();
-  showToast(`${result.mode === "move" ? "Moved" : "Copied"} ${result.transferred.length} item(s)`);
+  showToast(`${result.mode === "move" ? "Moved" : "Copied"} ${itemWord(result.transferred.length, "item")}`);
 }
 
 function isZipPath(itemPath) {
@@ -13021,7 +14496,7 @@ function openPropertiesDialog(paneName) {
   document.getElementById("properties-hash-algorithm").value = "sha256";
   document.getElementById("properties-max-entries").value = "20000";
   document.getElementById("properties-max-hash").value = "128";
-  document.getElementById("properties-summary").textContent = `${paths.length} item(s) ready`;
+  document.getElementById("properties-summary").textContent = `${itemWord(paths.length, "item")} ready`;
   document.getElementById("properties-diagnostics").innerHTML = "";
   document.getElementById("properties-results").innerHTML = "";
   document.getElementById("properties-dialog").showModal();
@@ -13329,7 +14804,7 @@ function renderPropertiesReport(report) {
               </span>
               <span>${escapeHtml(item.kind)}</span>
               <span>${formatSize(item.size)}</span>
-              <span>${item.fileCount} files / ${item.folderCount} folders</span>
+              <span>${itemWord(item.fileCount, "file")} / ${itemWord(item.folderCount, "folder")}</span>
               <span>${formatDate(item.modified)}</span>
               <code title="${escapeHtml(propertyHashText(item))}">${escapeHtml(propertyHashText(item))}</code>
             </div>`
@@ -13407,7 +14882,16 @@ function renderPathDiagnostics(report) {
   const metrics = [
     ["Kind", pathDiagnosticKindText(report)],
     ["Reach", report.reachable ? "Reachable" : report.check ? "Unavailable" : "Not checked"],
-    ["Entries", Number.isFinite(Number(report.entryCount)) ? `${report.entryCount}` : report.isDirectory ? "Unknown" : report.targetKind],
+    [
+      "Entries",
+      report.entryCount !== null && report.entryCount !== undefined && Number.isFinite(Number(report.entryCount))
+        ? `${report.entryCount}`
+        : report.isDirectory
+          ? "Unknown"
+          : report.targetKind
+            ? readableIdText(report.targetKind)
+            : "File"
+    ],
     ["Watcher", pathDiagnosticWatchText(report)],
     ["Space", pathDiagnosticSpaceText(report)],
     ["Timing", pathDiagnosticTimingText(report)]
@@ -13481,7 +14965,7 @@ async function trashSelected(paneName) {
   if (!paths.length) {
     return showToast("Select items first");
   }
-  if (confirmTrashEnabled() && !confirm(`Move ${paths.length} item(s) to app trash?`)) {
+  if (confirmTrashEnabled() && !confirm(`Move ${itemWord(paths.length, "item")} to App Trash?`)) {
     return;
   }
   const result = await request("/api/trash", {
@@ -13490,7 +14974,7 @@ async function trashSelected(paneName) {
   });
   await refreshPane(paneName);
   await syncStateAndChrome();
-  showToast(`Moved to ${result.trashDir}`);
+  showToast(`Moved ${itemWord(result.moved?.length || paths.length, "item")} to App Trash`);
 }
 
 async function recycleSelected(paneName) {
@@ -13499,7 +14983,7 @@ async function recycleSelected(paneName) {
     return showToast("Select items first");
   }
   const ok = confirm(
-    `Move ${paths.length} item(s) to the Windows Recycle Bin? Restore them from Windows if needed.`
+    `Move ${itemWord(paths.length, "item")} to the Windows Recycle Bin? You can restore them here or in File Explorer.`
   );
   if (!ok) return;
   const result = await request("/api/recycle", {
@@ -13508,7 +14992,7 @@ async function recycleSelected(paneName) {
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
-  showToast(`Recycled ${result.recycled?.length || paths.length} item(s)`);
+  showToast(`Moved ${itemWord(result.recycled?.length || paths.length, "item")} to Windows Recycle Bin`);
 }
 
 async function deleteSelectedPermanently(paneName) {
@@ -13517,7 +15001,7 @@ async function deleteSelectedPermanently(paneName) {
     return showToast("Select items first");
   }
   const typed = prompt(
-    `Permanently delete ${paths.length} item(s)? This cannot be restored from App Trash or Windows Recycle Bin. Type DELETE to confirm.`
+    `Permanently delete ${itemWord(paths.length, "item")}? This cannot be restored from App Trash or Windows Recycle Bin. Type DELETE to confirm.`
   );
   if (typed !== "DELETE") {
     return showToast("Permanent delete canceled");
@@ -13528,7 +15012,7 @@ async function deleteSelectedPermanently(paneName) {
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
-  showToast(`Deleted ${result.deleted?.length || paths.length} item(s) permanently`);
+  showToast(`Permanently deleted ${itemWord(result.deleted?.length || paths.length, "item")}`);
 }
 
 function selectedTrashPaths() {
@@ -13619,7 +15103,9 @@ function renderTrashBrowser() {
   const restoreButton = document.querySelector("[data-trash-action='restore']");
   const deleteButton = document.querySelector("[data-trash-action='delete']");
   const openWindowsButton = document.querySelector("[data-trash-action='open-windows']");
-  if (restoreButton) restoreButton.textContent = mode === "windows" ? "Restore In Windows" : "Restore To Active";
+  const title = document.getElementById("trash-dialog-title");
+  if (title) title.textContent = mode === "windows" ? "Windows Recycle Bin" : "App Trash";
+  if (restoreButton) restoreButton.textContent = mode === "windows" ? "Restore to Original Folder" : "Restore to Active Folder";
   if (deleteButton) deleteButton.hidden = mode === "windows";
   if (openWindowsButton) openWindowsButton.hidden = mode !== "windows";
   if (mode === "windows") {
@@ -13700,7 +15186,7 @@ async function restoreSelectedTrash() {
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   await loadAppTrash();
-  showToast(`Restored ${result.restored?.length || paths.length} item(s)`);
+  showToast(`Restored ${itemWord(result.restored?.length || paths.length, "item")}`);
 }
 
 async function restoreSelectedWindowsRecycle() {
@@ -13716,7 +15202,7 @@ async function restoreSelectedWindowsRecycle() {
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   await loadWindowsRecycleBin();
-  showToast(`Restored ${result.restored?.length || paths.length} item(s)`);
+  showToast(`Restored ${itemWord(result.restored?.length || paths.length, "item")}`);
 }
 
 async function openWindowsRecycleInExplorer() {
@@ -13728,8 +15214,11 @@ async function deleteSelectedTrash() {
   if (!paths.length) {
     return showToast("Select trash items first");
   }
-  if (confirmTrashEnabled() && !confirm(`Permanently delete ${paths.length} app trash item(s)?`)) {
-    return;
+  const typed = prompt(
+    `Permanently delete ${itemWord(paths.length, "App Trash item")}? This cannot be undone. Type DELETE to confirm.`
+  );
+  if (typed !== "DELETE") {
+    return showToast("Permanent delete canceled");
   }
   const result = await request("/api/app-trash/delete", {
     method: "POST",
@@ -13738,7 +15227,7 @@ async function deleteSelectedTrash() {
   app.trashBrowser.selected = new Set();
   await syncStateAndChrome();
   await loadAppTrash();
-  showToast(`Deleted ${result.deleted?.length || paths.length} item(s)`);
+  showToast(`Permanently deleted ${itemWord(result.deleted?.length || paths.length, "item")}`);
 }
 
 function duplicateTab(paneName) {
@@ -14302,7 +15791,6 @@ function searchCriteriaLabel(options) {
     parts.push(`${options.dateField || "modified"} ${options.dateOp} ${options.dateDays}d`);
   }
   if (options.attribute && options.attribute !== "any") parts.push(`attr:${options.attribute}`);
-  if (options.backgroundCache) parts.push("warm-cache");
   return parts.join(" / ") || "*";
 }
 
@@ -14466,15 +15954,25 @@ async function deleteActiveSearchPreset() {
 }
 
 function renderSearchResults(result) {
+  const matchCount = result.entries.length;
+  const source = String(result.source || "").startsWith("Warm")
+    ? result.indexed === false ? "No search index" : "Search index"
+    : result.source || "";
+  const scanned = Number(result.scanned || 0);
+  const contentScanned = Number(result.contentScanned || 0);
+  const contentHits = Number(result.contentHits || 0);
   const summary = [
-    result.source ? result.source : "",
+    `${matchCount} match${matchCount === 1 ? "" : "es"}`,
     Number.isFinite(Number(result.timing?.searchMs)) ? formatMilliseconds(result.timing.searchMs) : "",
-    `${result.entries.length} matches`,
-    `${result.scanned} scanned`,
+    source,
+    scanned > matchCount ? `${scanned.toLocaleString()} items checked` : "",
     result.criteriaSummary ? result.criteriaSummary : "",
-    result.content && !String(result.source || "").startsWith("Warm cache") ? `${result.contentScanned} content reads` : "",
-    result.contentHits ? `${result.contentHits} content hits` : "",
-    result.truncated ? "truncated" : ""
+    result.content && !String(result.source || "").startsWith("Warm") && contentScanned
+      ? `${contentScanned.toLocaleString()} text file${contentScanned === 1 ? "" : "s"} read`
+      : "",
+    contentHits ? `${contentHits} content match${contentHits === 1 ? "" : "es"}` : "",
+    result.freshness?.stale ? "Index updating" : "",
+    result.truncated ? `Showing first ${matchCount.toLocaleString()}` : ""
   ]
     .filter(Boolean)
     .join(" / ");
@@ -14551,25 +16049,19 @@ function normalizeBackgroundSearchEntry(entry) {
 function backgroundSearchResultFromResponse(response, options) {
   const entries = (response.results || []).map(normalizeBackgroundSearchEntry);
   const contentHits = entries.filter((entry) => entry.matchSource === "content").length;
-  const pieces = [
-    "Warm cache",
-    response.indexed ? `${response.stores || 0}/${response.roots || 0} root stores` : "no indexed root",
-    response.freshness?.stale ? `${response.freshness.staleRoots || 0} stale root(s)` : "",
-    response.criteriaSummary || ""
-  ].filter(Boolean);
   return {
     root: response.root || options.path,
     query: options.query || "",
     content: options.content || "",
     kind: options.kind || "all",
-    source: response.indexed ? "Warm cache" : "Warm cache (no index)",
+    source: response.indexed ? "Search index" : "No search index",
     scanned: response.timing?.scanned || 0,
     contentScanned: 0,
     contentHits,
     limit: options.limit || 200,
     maxScanned: response.timing?.scanned || 0,
     criteria: response.criteria || null,
-    criteriaSummary: pieces.join(" / "),
+    criteriaSummary: response.criteriaSummary || "",
     truncated: response.truncated === true,
     skipped: [],
     entries,
@@ -14582,6 +16074,15 @@ function backgroundSearchResultFromResponse(response, options) {
 }
 
 function applySearchResultToPane(paneName, result, label) {
+  const pane = panes[paneName];
+  const current = tabOf(paneName);
+  if (current.locked) {
+    const insertIndex = pane.activeTab + 1;
+    pane.tabs.splice(insertIndex, 0, tabShellForPath(current, result.root || current.path));
+    pane.activeTab = insertIndex;
+    app.activePane = paneName;
+    showToast("Search results opened in a new tab");
+  }
   const tab = tabOf(paneName);
   tab.entries = result.entries;
   tab.selected = new Set();
@@ -14602,18 +16103,18 @@ async function runBackgroundSearch(options, label, paneName) {
   const result = backgroundSearchResultFromResponse(response, options);
   applySearchResultToPane(paneName, result, label);
   if (!result.indexed) {
-    setStatus("No warm search index for this root");
-    showToast("No warm search index for this root");
+    setStatus("No search index for this folder");
+    showToast("No search index for this folder");
     return;
   }
   if (result.freshness?.stale) {
     const autoRepairing = Number(result.freshness.autoRebuilds || 0) + Number(result.freshness.activeRebuilds || 0) > 0;
-    setStatus(`${result.entries.length} warm-cache matches / cache stale${autoRepairing ? " / repair running" : ""}`);
-    showToast(autoRepairing ? "Warm cache is stale; rebuilding in the background" : "Warm cache may be stale");
+    setStatus(`${result.entries.length} indexed matches / index updating${autoRepairing ? " in the background" : ""}`);
+    showToast(autoRepairing ? "Search index is updating in the background" : "Search index may be out of date");
     return;
   }
   const timing = Number.isFinite(Number(result.timing?.searchMs)) ? ` in ${formatMilliseconds(result.timing.searchMs)}` : "";
-  setStatus(`${result.entries.length} warm-cache matches${timing}`);
+  setStatus(`${result.entries.length} indexed matches${timing}`);
 }
 
 async function runAdvancedSearch() {
@@ -14755,8 +16256,8 @@ function duplicateSummaryText(result) {
   const skipped = result.skipped?.length ? `${result.skipped.length} skipped` : "";
   const hashScanned = result.mode === "hash" ? `${result.hashScanned} hashed` : "size match";
   return [
-    `${result.groupCount} groups`,
-    `${result.duplicateFiles} files`,
+    itemWord(result.groupCount, "group"),
+    itemWord(result.duplicateFiles, "file"),
     `${formatSize(result.wastedBytes)} reclaimable`,
     `${result.scanned} scanned`,
     hashScanned,
@@ -14842,7 +16343,7 @@ async function runDuplicateScan() {
   });
   openDuplicateResultsInPane(result, paneName);
   renderDuplicateResults(result);
-  setStatus(`${result.groupCount} duplicate groups`);
+  setStatus(`${itemWord(result.groupCount, "duplicate group")}`);
 }
 
 async function openCompareDialog() {
@@ -15046,10 +16547,29 @@ async function deleteActiveSyncProfile() {
 }
 
 function compareCountsText(counts = {}) {
-  const parts = ["leftOnly", "rightOnly", "newerLeft", "newerRight", "different", "typeMismatch"]
-    .map((key) => (counts[key] ? `${key}: ${counts[key]}` : ""))
+  const labels = {
+    leftOnly: "only on left",
+    rightOnly: "only on right",
+    newerLeft: "newer on left",
+    newerRight: "newer on right",
+    different: "different",
+    typeMismatch: "file/folder mismatch"
+  };
+  const parts = Object.keys(labels)
+    .map((key) => (counts[key] ? `${counts[key]} ${labels[key]}` : ""))
     .filter(Boolean);
   return parts.length ? parts.join(" / ") : "no differences";
+}
+
+function compareStatusText(status) {
+  return {
+    leftOnly: "Only on left",
+    rightOnly: "Only on right",
+    newerLeft: "Newer on left",
+    newerRight: "Newer on right",
+    different: "Different",
+    typeMismatch: "File/folder mismatch"
+  }[status] || status;
 }
 
 function shouldPreselectCompare(row) {
@@ -15083,9 +16603,7 @@ function renderCompareResults(result) {
                 <strong title="${escapeHtml(row.relative)}">${escapeHtml(row.relative)}</strong>
                 <small>${escapeHtml(row.kind || "")}</small>
               </span>
-              <span><span class="compare-status ${escapeHtml(row.status)}">${escapeHtml(
-                row.status
-              )}</span></span>
+              <span><span class="compare-status ${escapeHtml(row.status)}">${escapeHtml(compareStatusText(row.status))}</span></span>
               <span>${formatSize(row.sizeLeft)}</span>
               <span>${formatSize(row.sizeRight)}</span>
               <span>${formatDate(row.modifiedLeft)}</span>
@@ -15113,10 +16631,38 @@ function selectedCompareItems() {
 }
 
 function syncPreviewCountsText(actionCounts = {}) {
-  const parts = ["copy", "overwrite", "mirror-delete", "skip", "missing-source", "risky"]
-    .map((key) => (actionCounts[key] ? `${key}: ${actionCounts[key]}` : ""))
+  const labels = {
+    copy: "to copy",
+    overwrite: "to replace",
+    "mirror-delete": "extras to App Trash",
+    skip: "to skip",
+    "missing-source": "missing source",
+    risky: "need review"
+  };
+  const parts = Object.keys(labels)
+    .map((key) => (actionCounts[key] ? `${actionCounts[key]} ${labels[key]}` : ""))
     .filter(Boolean);
   return parts.length ? parts.join(" / ") : "no changes";
+}
+
+function syncPreviewActionText(action) {
+  return {
+    copy: "Copy",
+    overwrite: "Replace",
+    "mirror-delete": "Move extra to App Trash",
+    skip: "Skip",
+    "missing-source": "Missing source"
+  }[action] || action;
+}
+
+function syncPreviewStatusText(status) {
+  return {
+    ready: "Ready",
+    skip: "Skipped",
+    missing: "Missing",
+    invalid: "Blocked",
+    duplicate: "Conflict"
+  }[status] || status;
 }
 
 function syncPayload(direction, options = {}) {
@@ -15143,7 +16689,7 @@ function renderSyncPreview(plan, payload) {
   if (applySync) {
     applySync.disabled = !plan.canApply;
   }
-  document.getElementById("compare-summary").textContent = `${plan.items.length} planned / ${plan.direction} / ${syncPreviewCountsText(
+  document.getElementById("compare-summary").textContent = `${itemWord(plan.items.length, "change")} planned / ${plan.direction === "rightToLeft" ? "Right to left" : "Left to right"} / ${syncPreviewCountsText(
     plan.actionCounts
   )}`;
   const preview = document.getElementById("sync-preview");
@@ -15165,10 +16711,10 @@ function renderSyncPreview(plan, payload) {
                 <small title="${escapeHtml(item.source)}">${escapeHtml(item.source)}</small>
               </span>
               <span>
-                <strong>${escapeHtml(item.action)}</strong>
+                <strong>${escapeHtml(syncPreviewActionText(item.action))}</strong>
                 <small title="${escapeHtml(item.dest)}">${escapeHtml(item.dest)}</small>
               </span>
-              <span><span class="transfer-status ${escapeHtml(item.status)}">${escapeHtml(item.status)}</span></span>
+              <span><span class="transfer-status ${escapeHtml(item.status)}">${escapeHtml(syncPreviewStatusText(item.status))}</span></span>
               <span>${escapeHtml(item.reason || "")}</span>
             </div>`
         )
@@ -15208,7 +16754,9 @@ async function applySyncPreview() {
   await syncStateAndChrome();
   await runCompare();
   const deleted = result.deleted?.length || 0;
-  showToast(`Synced ${result.copied?.length || 0} item(s)${deleted ? ` / mirrored ${deleted} extra(s)` : ""}`);
+  showToast(
+    `Synced ${itemWord(result.copied?.length || 0, "item")}${deleted ? ` / mirrored ${itemWord(deleted, "extra item")}` : ""}`
+  );
 }
 
 async function revealSelected() {
@@ -17309,7 +18857,7 @@ function renderCollections() {
               collection.id
             )}">
               <span>${escapeHtml(collection.name)}</span>
-              <small>${collection.items?.length || 0} items${collection.description ? ` / ${escapeHtml(collection.description)}` : ""}</small>
+              <small>${itemWord(collection.items?.length || 0, "item")}${collection.description ? ` / ${escapeHtml(collection.description)}` : ""}</small>
             </button>`
         )
         .join("")
@@ -17361,7 +18909,7 @@ async function addSelectionToCollection(collectionId = app.activeCollectionId) {
   app.state.collections = result.collections;
   app.activeCollectionId = result.collection.id;
   renderCollections();
-  showToast(`Added ${paths.length} item(s)`);
+  showToast(`Added ${itemWord(paths.length, "item")}`);
 }
 
 async function removeFromActiveCollection(itemPath) {
@@ -17417,7 +18965,12 @@ async function openCollectionInPane(collectionId = app.activeCollectionId, paneN
   renderPane(paneName);
   renderRoots();
   renderInspector();
-  setStatus(`${result.available}/${result.total} collection items`);
+  setStatus(
+    result.available === result.total
+      ? itemWord(result.total, "collection item")
+      : `${result.available}/${result.total} collection items available`
+  );
+  document.getElementById("collections-dialog")?.close();
 }
 
 function newCollection() {
@@ -17472,7 +19025,7 @@ function basketActionPaths() {
 function basketSummaryText() {
   const count = fileBasketItems().length;
   const selected = app.fileBasket?.selected?.size || 0;
-  return selected ? `${count} item(s) / ${selected} selected` : `${count} item(s)`;
+  return selected ? `${itemWord(count, "item")} / ${selected} selected` : itemWord(count, "item");
 }
 
 function updateBasketButtons() {
@@ -17481,7 +19034,7 @@ function updateBasketButtons() {
   if (button) {
     button.textContent = count ? `Basket ${count}` : "Basket";
     button.classList.toggle("active", count > 0);
-    button.title = count ? `${count} basket item(s)` : "Open the file basket";
+    button.title = count ? itemWord(count, "basket item") : "Open the file basket";
   }
 }
 
@@ -17595,7 +19148,7 @@ async function copyBasketHere() {
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
-  showToast(`Copied ${paths.length} basket item(s)`);
+  showToast(`Copied ${itemWord(paths.length, "basket item")}`);
 }
 
 async function moveBasketHere() {
@@ -17611,7 +19164,7 @@ async function moveBasketHere() {
   await saveBasketItems(fileBasketItems().filter((item) => !moving.has(normalizedPathKey(item.path))));
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
-  showToast(`Moved ${paths.length} basket item(s)`);
+  showToast(`Moved ${itemWord(paths.length, "basket item")}`);
 }
 
 function removeBasketPaths(paths) {
@@ -17625,7 +19178,7 @@ async function removeSelectedBasketItems() {
     return showToast("Select basket rows first");
   }
   await removeBasketPaths(selected);
-  showToast(`Removed ${selected.length} basket item(s)`);
+  showToast(`Removed ${itemWord(selected.length, "basket item")}`);
 }
 
 async function clearFileBasket() {
@@ -18350,7 +19903,7 @@ async function applyLabelFromForm() {
   renderAll();
   renderLabelsDialog();
   renderInspector();
-  showToast(`Labeled ${result.applied.length} item(s)`);
+  showToast(`Labeled ${itemWord(result.applied.length, "item")}`);
 }
 
 async function clearLabelsFromSelection() {
@@ -18367,7 +19920,7 @@ async function clearLabelsFromSelection() {
   renderAll();
   renderLabelsDialog();
   renderInspector();
-  showToast(`Cleared ${result.cleared.length} item(s)`);
+  showToast(`Cleared ${itemWord(result.cleared.length, "item")}`);
 }
 
 async function showLabeledPath(itemPath) {
@@ -18600,7 +20153,7 @@ function renderTabGroups() {
             </div>
             <div class="tab-group-paths">
               <span title="${escapeHtml(group.tabs?.[0]?.path || "")}">${escapeHtml(tabGroupActiveText(group))}</span>
-              <small>${escapeHtml((group.sourcePane || "left").toUpperCase())} / ${tabGroupTabCount(group)} tab(s)</small>
+              <small>${escapeHtml((group.sourcePane || "left").toUpperCase())} / ${itemWord(tabGroupTabCount(group), "tab")}</small>
             </div>
             <small>${escapeHtml(formatDate(group.updatedAt))}</small>
             <div class="tab-group-actions">
@@ -19196,6 +20749,8 @@ function operationIsActive(operation) {
 }
 
 function updateOperationReadout() {
+  if (activeOperations().length) pauseListingPrefetch();
+  else scheduleListingPrefetchRun();
   const readout = document.getElementById("operation-readout");
   if (!readout) {
     return;
@@ -19533,6 +21088,61 @@ function operationDetailListMarkup(items, options = {}) {
     .join("")}</div>`;
 }
 
+function operationTimelineEvents(operation) {
+  const events = Array.isArray(operation?.events) ? operation.events.filter((event) => event?.at) : [];
+  if (events.length) return events.slice(-64);
+  const synthesized = [{ at: operation.createdAt, kind: "queued", status: "queued", phase: "Queued", message: "Operation queued." }];
+  if (operation.startedAt) synthesized.push({ at: operation.startedAt, kind: "started", status: "running", phase: "Started", message: "Operation started." });
+  if (operation.finishedAt) synthesized.push({
+    at: operation.finishedAt,
+    kind: operation.status || "finished",
+    status: operation.status,
+    phase: operation.status === "completed" ? "Completed" : operation.status === "canceled" ? "Canceled" : "Failed",
+    message: operation.status === "completed" ? "Operation completed." : operation.error || `Operation ${operation.status}.`
+  });
+  return synthesized.filter((event) => event.at);
+}
+
+function operationPhaseDescription(event = {}) {
+  const descriptions = {
+    queued: "Waiting for earlier file work to finish.",
+    started: "File work began.",
+    phase: event.phase || "Work phase changed.",
+    progress: event.phase || "Progress updated.",
+    paused: "Work is paused and can be resumed.",
+    resumed: "Work resumed from its saved checkpoint.",
+    "cancellation-requested": "The current safe stopping point is being reached.",
+    canceled: "Work stopped before completing.",
+    failed: "Work stopped because an error occurred.",
+    completed: "All planned work completed.",
+    retry: "A linked retry was created.",
+    undo: "A linked Undo operation was created.",
+    recovered: "The app recovered this record after an interrupted session."
+  };
+  return descriptions[event.kind] || event.message || event.phase || "Operation updated.";
+}
+
+function operationTimelineMarkup(operation) {
+  const events = operationTimelineEvents(operation);
+  if (!events.length) return "";
+  return `<section class="operation-timeline" aria-label="Operation timeline">
+    <div class="operation-details-section-head"><strong>Timeline</strong><span>${events.length} event${events.length === 1 ? "" : "s"}</span></div>
+    <ol>${events.map((event, index) => {
+      const at = Date.parse(event.at);
+      const previousAt = index ? Date.parse(events[index - 1].at) : Date.parse(operation.createdAt || event.at);
+      const elapsed = Number.isFinite(at) && Number.isFinite(previousAt) && at > previousAt ? formatMilliseconds(at - previousAt) : "";
+      const progress = Number.isFinite(Number(event.total)) && Number(event.total) > 0
+        ? `${Math.min(Number(event.completed || 0), Number(event.total))}/${Number(event.total)}`
+        : "";
+      return `<li class="status-${escapeHtml(event.status || event.kind || "update")}">
+        <span class="operation-timeline-dot" aria-hidden="true"></span>
+        <div><strong>${escapeHtml(event.phase || event.kind || "Update")}</strong><small>${escapeHtml(operationPhaseDescription(event))}</small></div>
+        <div class="operation-timeline-meta"><time>${escapeHtml(formatDate(at))}</time>${elapsed ? `<span>+${escapeHtml(elapsed)}</span>` : ""}${progress ? `<span>${escapeHtml(progress)}</span>` : ""}</div>
+      </li>`;
+    }).join("")}</ol>
+  </section>`;
+}
+
 function renderOperationDetails() {
   const operation = operationById(app.operationDetails?.id);
   const title = document.getElementById("operation-details-title");
@@ -19590,7 +21200,7 @@ function renderOperationDetails() {
         })}
       </section>`
     : "";
-  body.innerHTML = `<section class="operation-details-summary">
+  body.innerHTML = `${operationTimelineMarkup(operation)}<section class="operation-details-summary">
     <div><span>Status</span><strong>${escapeHtml(operation.status || "")}</strong></div>
     <div><span>Completed</span><strong>${escapeHtml(recovery?.completedCount || completed.length || 0)}</strong></div>
     <div><span>Remaining</span><strong>${escapeHtml(recovery?.remainingCount || remaining.length || 0)}</strong></div>
@@ -19655,7 +21265,7 @@ function renderOperationDetails() {
         <section class="operation-details-section">
           <div class="operation-details-section-head">
             <strong>Remaining Work</strong>
-            <span>${selectedCount} selected / ${remaining.length} item(s)</span>
+            <span>${selectedCount} selected / ${itemWord(remaining.length, "item")}</span>
             <div class="operation-details-actions">
               <button data-operation-details-action="select-all" ${remaining.length ? "" : "disabled"}>Select All</button>
               <button data-operation-details-action="select-none" ${remaining.length ? "" : "disabled"}>Clear</button>
@@ -19739,7 +21349,6 @@ function operationMeta(operation, canUndo) {
   const byteText = operationByteText(progress);
   const rateText = operationRateText(progress);
   return [
-    operation.type,
     operationTiming(operation),
     progressCount,
     byteText,
@@ -19963,13 +21572,16 @@ async function resumeOperation(operationId) {
 }
 
 async function undoOperation(operationId) {
-  await request("/api/operation/undo", {
+  const result = await request("/api/operation/undo", {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
-  showToast("Undo complete");
+  const restoredCount = Array.isArray(result.restored) ? result.restored.length : result.restored ? 1 : 0;
+  const revertedCount = Array.isArray(result.reverted) ? result.reverted.length : result.reverted ? 1 : 0;
+  const count = restoredCount || revertedCount;
+  showToast(count ? `Undo complete: restored ${itemWord(count, "item")}` : "Undo complete");
 }
 
 async function retryOperation(operationId) {
@@ -20030,7 +21642,7 @@ async function retrySelectedRemainingOperation(operationId, indexes) {
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   renderOperationDetails();
-  showToast(`${indexes.length} selected item(s) retried`);
+  showToast(`${itemWord(indexes.length, "selected item")} retried`);
 }
 
 function upsertOperationInState(operation) {
@@ -20059,7 +21671,7 @@ async function elevatedRetryOperation(operationId, indexes = []) {
   renderOperations();
   renderOperationDetails();
   if (result.launched) {
-    showToast(`Elevated helper launched for ${result.itemCount || selectedIndexes.length || 0} item(s)`);
+    showToast(`Elevated helper launched for ${itemWord(result.itemCount || selectedIndexes.length || 0, "item")}`);
     setTimeout(() => {
       Promise.all([refreshPane("left"), refreshPane("right")]).catch((error) => setStatus(error.message));
     }, 2500);
@@ -20999,7 +22611,7 @@ function speedMetricsHtml() {
     pushSpeedMetric(cells, "BG Roots", `${roots.length}`);
     pushSpeedMetric(cells, "BG Items", `${totalItems}`);
     if (totalContent) {
-      pushSpeedMetric(cells, "BG Text", `${totalContent} file(s)`);
+      pushSpeedMetric(cells, "BG Text", itemWord(totalContent, "file"));
     }
     const running = backgroundIndexRunningCount();
     if (running) {
@@ -21399,6 +23011,35 @@ function commandPaletteHotkeyMap() {
   return map;
 }
 
+const commandOutcomeLabels = {
+  inApp: "In Explore Better",
+  fileExplorer: "File Explorer",
+  externalApp: "External app",
+  systemDialog: "Windows dialog"
+};
+
+function commandOutcomeMetadata(command = {}, type = "command") {
+  const text = `${command.name || ""} ${command.detail || ""}`.toLowerCase();
+  let outcome = command.outcome;
+  if (!outcome) {
+    if (/file explorer|reveal in explorer/.test(text)) outcome = "fileExplorer";
+    else if (/windows propert|native windows property|system dialog/.test(text)) outcome = "systemDialog";
+    else if (type === "tool" || type === "script" || /external app|default app|custom executable/.test(text)) outcome = "externalApp";
+    else outcome = "inApp";
+  }
+  const resultDescription = command.resultDescription || {
+    inApp: "Completes or opens this action inside Explore Better.",
+    fileExplorer: "Starts a request for Windows File Explorer; another window is not guaranteed to open.",
+    externalApp: "Starts an external application request; launch completion is not guaranteed.",
+    systemDialog: "Requests a native Windows system dialog."
+  }[outcome];
+  return {
+    outcome,
+    outcomeLabel: commandOutcomeLabels[outcome] || commandOutcomeLabels.inApp,
+    resultDescription
+  };
+}
+
 function commandPaletteItems() {
   const hotkeyMap = commandPaletteHotkeyMap();
   const builtinItems = commands.map((command, index) => {
@@ -21411,6 +23052,7 @@ function commandPaletteItems() {
       name: command.name,
       detail: command.detail,
       meta: "Built in",
+      ...commandOutcomeMetadata(command, "command"),
       hotkeys: hotkeyMap.get(key) || [],
       run: command.run
     };
@@ -21424,6 +23066,7 @@ function commandPaletteItems() {
       name: tool.name || "Untitled Tool",
       detail: tool.description || tool.kind || "Saved trusted command",
       meta: tool.kind === "cmd" ? "Command Prompt" : "PowerShell",
+      ...commandOutcomeMetadata(tool, "tool"),
       hotkeys: hotkeyMap.get(key) || [],
       run: () => runTool(tool.id)
     };
@@ -21437,6 +23080,7 @@ function commandPaletteItems() {
       name: script.name || "Untitled Script",
       detail: script.description || "Saved trusted JavaScript snippet",
       meta: script.showInToolbar ? "Toolbar script" : "Saved script",
+      ...commandOutcomeMetadata(script, "script"),
       hotkeys: hotkeyMap.get(key) || [],
       run: () => runSavedScript(script.id)
     };
@@ -21592,12 +23236,13 @@ function commandPaletteItemMarkup(item, index, previousGroup) {
   const active = index === app.commandPalette.activeIndex ? " active" : "";
   const pinLabel = item.pinned ? `Unpin ${item.name}` : `Pin ${item.name}`;
   return `${groupHeading}<div class="command-row${active}" role="option" aria-selected="${index === app.commandPalette.activeIndex}">
-    <button class="command-item${active}" data-palette-index="${index}">
+    <button class="command-item${active}" data-palette-index="${index}" title="${escapeHtml(`${item.outcomeLabel}: ${item.resultDescription}`)}">
       <span class="command-item-main">
         <span>${escapeHtml(item.name)}</span>
         ${hotkeyMarkup}
       </span>
       <small>${escapeHtml(item.detail)}</small>
+      <span class="command-outcome-row"><span class="command-outcome outcome-${escapeHtml(item.outcome)}">${escapeHtml(item.outcomeLabel)}</span><small>${escapeHtml(item.resultDescription)}</small></span>
       <span class="command-item-meta"><span>${escapeHtml(item.category)}</span><span>${escapeHtml(item.meta)}</span></span>
     </button>
     <button type="button" class="command-pin${item.pinned ? " pinned" : ""}" data-command-pin="${escapeHtml(item.key)}" title="${escapeHtml(pinLabel)}" aria-label="${escapeHtml(pinLabel)}"></button>
@@ -22189,8 +23834,11 @@ function renderPaneTerminal(paneName) {
   adminButton?.classList.toggle("active", session?.elevation === "administrator");
   const title = document.querySelector(`[data-terminal-title="${paneName}"]`);
   if (title) {
-    const state = session?.starting ? "Starting" : session?.exited ? "Exited" : session?.busy ? "Busy" : "Ready";
-    title.textContent = session ? `${session.profileLabel || "Terminal"} / ${state}` : "Terminal";
+    const state = session?.starting ? "Starting" : session?.error ? "Error" : session?.exited ? "Exited" : session?.busy ? "Busy" : "Ready";
+    const profileLabel = session?.profileLabel || "Terminal";
+    title.textContent = session ? `${profileLabel} / ${state}` : "Terminal";
+    title.title = session?.error || title.textContent;
+    title.setAttribute("aria-label", session?.error ? `${profileLabel} terminal error: ${session.error}` : title.textContent);
   }
   const cwd = document.querySelector(`[data-terminal-cwd="${paneName}"]`);
   if (cwd) {
@@ -22206,7 +23854,7 @@ function renderPaneTerminal(paneName) {
     profile.value = selected;
     profile.disabled = session?.starting === true;
   }
-  if (host && session?.element) {
+  if (host && session?.element && session?.view) {
     if (host.firstElementChild !== session.element) host.replaceChildren(session.element);
     requestAnimationFrame(() => session.view?.fit());
   } else if (host) {
@@ -22370,8 +24018,9 @@ async function togglePaneTerminal(paneName = app.activePane, force = null) {
   }
   const opening = typeof force === "boolean" ? force : !app.terminals.visible[paneName];
   if (!opening) {
-    const closed = await closePaneTerminal(paneName, { hideDrawer: true });
-    if (!closed) return false;
+    app.terminals.visible[paneName] = false;
+    renderPaneTerminal(paneName);
+    focusPaneList(paneName);
   } else {
     app.terminals.visible[paneName] = true;
     renderPaneTerminal(paneName);
@@ -22919,28 +24568,12 @@ function wireEvents() {
       return;
     }
 
-    const shellOpenButton = event.target.closest("[data-shell-open]");
-    if (shellOpenButton) {
-      try {
-        await openShellLocation(shellOpenButton.dataset.shellOpen);
-      } catch (error) {
-        showToast(error.message);
-      }
-      return;
-    }
-
-    const shellNamespaceOpenButton = event.target.closest("[data-shell-namespace-open]");
-    if (shellNamespaceOpenButton) {
-      await openShellNamespaceDialog(shellNamespaceOpenButton.dataset.shellNamespaceOpen || "thisPc");
-      return;
-    }
-
     const shellNamespaceRootButton = event.target.closest("[data-shell-namespace-root]");
     if (shellNamespaceRootButton) {
       try {
         await loadShellNamespace(shellNamespaceRootButton.dataset.shellNamespaceRoot || "thisPc", { push: true });
       } catch (error) {
-        writeShellNamespaceError(error, "Shell namespace failed");
+        writeShellNamespaceError(error, "Windows locations failed");
       }
       return;
     }
@@ -22999,6 +24632,12 @@ function wireEvents() {
       return;
     }
 
+    const treeRetry = event.target.closest("[data-tree-retry]");
+    if (treeRetry) {
+      await retryFolderTree(treeRetry.dataset.treeRetry);
+      return;
+    }
+
     const treeOpenOther = event.target.closest("[data-tree-open-other]");
     if (treeOpenOther) {
       await loadPane(otherPane(app.activePane), treeOpenOther.dataset.treeOpenOther);
@@ -23025,6 +24664,50 @@ function wireEvents() {
       if (action === "clear-recents") await clearRecentLocations();
       if (action === "refresh-tree") await refreshFolderTree();
       if (action === "reveal-tree") await revealPathInFolderTree(tabOf(app.activePane).path);
+      if (action === "toggle-recents") {
+        app.recentsExpanded = !app.recentsExpanded;
+        renderRoots();
+      }
+      if (action === "open-devices") await openDevicesDialog();
+      return;
+    }
+
+    const deviceActionButton = event.target.closest("[data-device-action]");
+    if (deviceActionButton) {
+      await runDeviceAction(deviceActionButton.dataset.deviceAction, deviceActionButton.dataset.deviceId);
+      return;
+    }
+
+    if (event.target.closest("#devices-refresh")) {
+      await loadDevicesReport({ refresh: true });
+      return;
+    }
+
+    if (event.target.closest("#devices-load-network")) {
+      await loadDevicesReport({ refresh: true, includeNetwork: true });
+      return;
+    }
+
+    if (event.target.closest("#health-probe")) {
+      await loadHealthReport(true);
+      return;
+    }
+
+    if (event.target.closest("#health-export")) {
+      await exportSupportBundle();
+      return;
+    }
+
+    const deviceNavPath = event.target.closest("[data-device-nav-path]");
+    if (deviceNavPath) {
+      await loadPane(app.activePane, deviceNavPath.dataset.deviceNavPath);
+      showToast(`Opened device in ${app.activePane} pane`);
+      return;
+    }
+
+    const deviceNavItem = event.target.closest("[data-device-nav-id]");
+    if (deviceNavItem) {
+      await openDevicesDialog({ focusId: deviceNavItem.dataset.deviceNavId });
       return;
     }
 
@@ -23309,12 +24992,8 @@ function wireEvents() {
 
     const topbarButton = event.target.closest("[data-topbar-action]");
     if (topbarButton) {
-      const action = topbarButton.dataset.topbarAction;
-      if (action === "search") await deepSearch(app.activePane);
-      if (action === "sizeAnalysis") openSizeAnalysisDialog(app.activePane, "map");
-      if (action === "ops") await openOpsDialog();
-      if (action === "palette") await openCommandDialog();
-      if (action === "focus") await toggleFocusMode();
+      closeTopbarMoreMenu();
+      await runTopbarAction(topbarButton.dataset.topbarAction);
       return;
     }
 
@@ -23987,6 +25666,7 @@ function wireEvents() {
       try {
         const action = textEditorActionButton.dataset.textEditorAction;
         if (action === "reload") await reloadTextEditor();
+        if (action === "force-save") await saveTextEditor(true);
         if (action === "reveal" && app.textEditor?.path) {
           await request("/api/open", {
             method: "POST",
@@ -23994,8 +25674,7 @@ function wireEvents() {
           });
         }
       } catch (error) {
-        updateTextEditorSummary(error.message);
-        showToast(error.message);
+        textEditorSaveError(error);
       }
       return;
     }
@@ -24515,15 +26194,31 @@ function wireEvents() {
     if (preferencesActionButton) {
       try {
         const action = preferencesActionButton.dataset.preferencesAction;
-        if (action === "reset") await resetPreferencesToDefaults();
+        if (action === "reset") {
+          if (!window.confirm("Reset all app preferences to their defaults?")) {
+            showToast("Preference reset canceled");
+            return;
+          }
+          await resetPreferencesToDefaults();
+        }
         if (action === "integration") {
-          document.getElementById("preferences-dialog").close();
+          if (!requestClosePreferencesDialog()) return;
           await openIntegrationDialog();
+        }
+        if (action === "health") {
+          if (!requestClosePreferencesDialog()) return;
+          await openHealthDialog();
         }
       } catch (error) {
         document.getElementById("preferences-summary").textContent = error.message;
         showToast(error.message);
       }
+    }
+
+    const preferencesSectionReset = event.target.closest("[data-preferences-reset-section]");
+    if (preferencesSectionReset) {
+      resetPreferenceSectionDraft(preferencesSectionReset.dataset.preferencesResetSection);
+      return;
     }
 
     const toolbarPresetButton = event.target.closest("[data-toolbar-preset]");
@@ -24853,6 +26548,14 @@ function wireEvents() {
       if (button.dataset.closeDialog === "size-analysis-dialog" && app.sizeAnalysis.loading) {
         cancelSizeAnalysis("Scan canceled");
       }
+      if (button.dataset.closeDialog === "text-editor-dialog") {
+        closeTextEditor();
+        return;
+      }
+      if (button.dataset.closeDialog === "preferences-dialog") {
+        requestClosePreferencesDialog();
+        return;
+      }
       document.getElementById(button.dataset.closeDialog).close();
     });
   });
@@ -24867,6 +26570,24 @@ function wireEvents() {
     sizeAnalysisDialog.addEventListener("cancel", cancelActiveSizeAnalysis);
     sizeAnalysisDialog.addEventListener("close", cancelActiveSizeAnalysis);
   }
+
+  const textEditorDialog = document.getElementById("text-editor-dialog");
+  if (textEditorDialog) {
+    textEditorDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeTextEditor();
+    });
+    textEditorDialog.addEventListener("close", () => {
+      app.textEditor = null;
+      setTextEditorConflictAction(false);
+    });
+  }
+
+  const preferencesDialog = document.getElementById("preferences-dialog");
+  preferencesDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    requestClosePreferencesDialog();
+  });
 
   document.getElementById("tool-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -24910,6 +26631,19 @@ function wireEvents() {
     }
   });
 
+  const schedulePreferencesDraftRender = () => queueMicrotask(() => {
+    if (!document.getElementById("preferences-dialog")?.open) return;
+    renderPreferencesSummary(preferencesSettingsFromForm());
+    renderPreferencesDirtyState();
+  });
+  document.getElementById("preferences-form").addEventListener("input", schedulePreferencesDraftRender);
+  document.getElementById("preferences-form").addEventListener("change", schedulePreferencesDraftRender);
+  document.getElementById("preferences-search").addEventListener("input", applyPreferencesSearch);
+  document.getElementById("preferences-search-clear").addEventListener("click", () => {
+    setPreferencesSearchQuery("");
+    document.getElementById("preferences-search").focus();
+  });
+
   document.getElementById("preferences-dialog").addEventListener("click", async (event) => {
     const actionButton = event.target.closest("[data-ai-bridge-action]");
     const installButton = event.target.closest("[data-ai-bridge-install]");
@@ -24918,9 +26652,11 @@ function wireEvents() {
     event.preventDefault();
     try {
       if (actionButton?.dataset.aiBridgeAction === "new-profile") {
+        if (!confirmDiscardAiBridgeDraft()) return;
         app.aiBridge.draftNew = true;
         app.aiBridge.selectedProfileId = null;
         renderAiBridgePreferences();
+        renderPreferencesDirtyState();
         document.getElementById("preference-ai-name").focus();
       }
       if (actionButton?.dataset.aiBridgeAction === "save-profile") await saveAiBridgeProfile();
@@ -24949,9 +26685,14 @@ function wireEvents() {
   });
 
   document.getElementById("preference-ai-profile").addEventListener("change", (event) => {
+    if (!confirmDiscardAiBridgeDraft()) {
+      event.target.value = app.aiBridge.selectedProfileId || "";
+      return;
+    }
     app.aiBridge.draftNew = false;
     app.aiBridge.selectedProfileId = event.target.value || null;
     renderAiBridgePreferences();
+    renderPreferencesDirtyState();
   });
 
   document.getElementById("preference-ai-access").addEventListener("change", (event) => {
@@ -25345,8 +27086,7 @@ function wireEvents() {
     try {
       await saveTextEditor();
     } catch (error) {
-      updateTextEditorSummary(error.message);
-      showToast(error.message);
+      textEditorSaveError(error);
     }
   });
 
@@ -25414,8 +27154,22 @@ function wireEvents() {
 async function init() {
   const startupStartedAt = performance.now();
   wireEvents();
-  desktopAiBridge()?.onAction?.(handleMcpUiAction);
+  initializeMcpUiObservation();
+  desktopAiBridge()?.onAction?.(async (action) => {
+    try {
+      return await handleMcpUiAction(action);
+    } catch (error) {
+      return {
+        __exploreBetterUiError: {
+          code: error?.code || "UI_ACTION_FAILED",
+          message: error?.message || String(error)
+        }
+      };
+    }
+  });
   setupDockOverflow();
+  setupTopbarOverflow();
+  setupForegroundActivityCoordinator();
   const urlParams = new URL(window.location.href).searchParams;
   const bootstrap = window.__exploreBetterBootstrap || Promise.all([
     request("/api/roots"),
@@ -25512,6 +27266,11 @@ async function init() {
     completedAt: Date.now()
   };
   scheduleMcpContextPublish(true);
+  scheduleDeviceRefresh();
+  setTimeout(() => loadDevicesReport().catch((error) => console.warn(`Could not load devices: ${error.message}`)), 0);
+  window.addEventListener("focus", () => {
+    if (document.visibilityState === "visible") loadDevicesReport({ refresh: true }).catch(() => {});
+  });
   initializeAppUpdates().catch((error) => console.warn(`Could not initialize app updates: ${error.message}`));
   setTimeout(() => {
     requestIdle(() => {

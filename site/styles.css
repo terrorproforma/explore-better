@@ -2989,6 +2989,7 @@ h3 {
 }
 
 .pitch-outcomes,
+.pitch-release,
 .pitch-proof,
 .pitch-download {
   color: var(--ink);
@@ -2997,6 +2998,246 @@ h3 {
 
 .pitch-outcomes {
   padding: 132px 0;
+}
+
+.pitch-release {
+  padding: 132px 0;
+  color: var(--ink);
+  background: #dce8f3;
+  border-top: 1px solid #b8cad8;
+  border-bottom: 1px solid #b8cad8;
+}
+
+.pitch-release-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 2px solid var(--ink);
+  border-left: 2px solid var(--ink);
+}
+
+.pitch-release-card {
+  position: relative;
+  min-width: 0;
+  min-height: 490px;
+  overflow: hidden;
+  padding: 40px;
+  background: var(--white);
+  border-right: 2px solid var(--ink);
+  border-bottom: 2px solid var(--ink);
+}
+
+.pitch-release-card > div:first-child > span {
+  display: block;
+  margin-bottom: 18px;
+  color: var(--muted);
+  font-family: "Bahnschrift", sans-serif;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pitch-release-card h3 {
+  max-width: 620px;
+  font-size: clamp(2rem, 3.3vw, 3.45rem);
+  line-height: 0.96;
+  text-transform: uppercase;
+}
+
+.pitch-release-card p {
+  max-width: 620px;
+  color: var(--muted);
+}
+
+.pitch-release-card--semantic {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(360px, 1.15fr);
+  grid-column: 1 / -1;
+  gap: 50px;
+  min-height: 430px;
+  color: var(--white);
+  background: var(--ink);
+}
+
+.pitch-release-card--semantic p,
+.pitch-release-card--semantic > div:first-child > span {
+  color: rgba(255, 255, 255, 0.64);
+}
+
+.semantic-flow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-self: center;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+}
+
+.semantic-flow li {
+  min-width: 0;
+  padding: 28px 18px;
+  border-right: 1px solid rgba(255, 255, 255, 0.24);
+}
+
+.semantic-flow li:last-child {
+  color: var(--ink);
+  background: var(--acid);
+  border-right: 0;
+}
+
+.semantic-flow b,
+.semantic-flow small {
+  display: block;
+}
+
+.semantic-flow b {
+  margin-bottom: 6px;
+  font-family: "Bahnschrift", sans-serif;
+  text-transform: uppercase;
+}
+
+.semantic-flow small {
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.semantic-flow li:last-child small {
+  color: rgba(17, 23, 21, 0.62);
+}
+
+.pitch-release-stats {
+  position: absolute;
+  right: 40px;
+  bottom: 34px;
+  left: calc(42.5% + 40px);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid rgba(255, 255, 255, 0.28);
+}
+
+.pitch-release-stats span {
+  padding: 16px 14px 0;
+  color: rgba(255, 255, 255, 0.62);
+  border-right: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.pitch-release-stats span:last-child {
+  border-right: 0;
+}
+
+.pitch-release-stats strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--acid);
+  font-family: "Bahnschrift", sans-serif;
+  font-size: 1.8rem;
+}
+
+.pitch-release-card--media {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  padding-bottom: 0;
+}
+
+.pitch-release-card--media img {
+  align-self: end;
+  width: calc(100% + 80px);
+  max-width: none;
+  height: auto;
+  margin-left: -40px;
+  border-top: 1px solid var(--line);
+}
+
+.pitch-release-card--timeline {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(260px, 1.1fr);
+  gap: 36px;
+  align-items: center;
+}
+
+.release-timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.release-timeline li {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 14px;
+  min-height: 70px;
+}
+
+.release-timeline i {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  margin-top: 5px;
+  background: var(--teal);
+  border: 3px solid var(--white);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--ink);
+}
+
+.release-timeline li:not(:last-child) i::after {
+  position: absolute;
+  top: 15px;
+  left: 3px;
+  width: 2px;
+  height: 54px;
+  background: var(--ink);
+  content: "";
+}
+
+.release-timeline b,
+.release-timeline small {
+  display: block;
+}
+
+.release-timeline small {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.pitch-release-card--scheduler {
+  color: var(--white);
+  background: #166e64;
+}
+
+.pitch-release-card--scheduler p,
+.pitch-release-card--scheduler > div:first-child > span {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.scheduler-proof {
+  position: absolute;
+  right: 40px;
+  bottom: 40px;
+  left: 40px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.38);
+}
+
+.scheduler-proof strong,
+.scheduler-proof span {
+  display: block;
+}
+
+.scheduler-proof strong {
+  margin-bottom: 6px;
+  color: var(--acid);
+  font-family: "Bahnschrift", sans-serif;
+  font-size: 3.8rem;
+  line-height: 1;
+}
+
+.scheduler-proof span {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .pitch-section-heading--ink .eyebrow {
@@ -3288,7 +3529,7 @@ h3 {
 
 .pitch-proof__grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   border-top: 2px solid var(--ink);
   border-left: 2px solid var(--ink);
 }
@@ -3306,7 +3547,8 @@ h3 {
   background: var(--ink);
 }
 
-.pitch-proof__grid article:nth-child(4) {
+.pitch-proof__grid article:nth-child(4),
+.pitch-proof__grid article:nth-child(6) {
   background: var(--acid);
 }
 
@@ -3455,6 +3697,8 @@ h3 {
   }
 
   .pitch-ai__layout,
+  .pitch-release-card--semantic,
+  .pitch-release-card--timeline,
   .pitch-trust__layout {
     gap: 56px;
   }
@@ -3472,6 +3716,8 @@ h3 {
 
   .pitch-section-heading,
   .pitch-ai__layout,
+  .pitch-release-card--semantic,
+  .pitch-release-card--timeline,
   .pitch-trust__layout {
     grid-template-columns: 1fr;
   }
@@ -3500,6 +3746,11 @@ h3 {
   .pitch-ai__proof {
     max-width: 720px;
     margin-right: 20px;
+  }
+
+  .pitch-release-stats {
+    position: static;
+    grid-column: 1 / -1;
   }
 
   .pitch-proof__grid {
@@ -3564,6 +3815,7 @@ h3 {
 
   .pitch-demo,
   .pitch-outcomes,
+  .pitch-release,
   .pitch-ai,
   .pitch-proof,
   .pitch-trust,
@@ -3596,6 +3848,54 @@ h3 {
 
   .pitch-outcome-grid {
     grid-template-columns: 1fr;
+  }
+
+  .pitch-release-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pitch-release-card,
+  .pitch-release-card--semantic,
+  .pitch-release-card--timeline {
+    grid-column: auto;
+    grid-template-columns: minmax(0, 1fr);
+    min-height: auto;
+    padding: 30px;
+  }
+
+  .semantic-flow {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .semantic-flow li:nth-child(2) {
+    border-right: 0;
+  }
+
+  .semantic-flow li:nth-child(-n + 2) {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.24);
+  }
+
+  .pitch-release-card--media {
+    padding-bottom: 0;
+  }
+
+  .pitch-release-card--media img {
+    width: calc(100% + 60px);
+    margin-left: -30px;
+  }
+
+  .pitch-release-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .pitch-release-stats span {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+  }
+
+  .scheduler-proof {
+    position: static;
+    margin-top: 52px;
   }
 
   .pitch-outcome-card,

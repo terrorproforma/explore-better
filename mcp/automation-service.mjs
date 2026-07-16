@@ -171,6 +171,116 @@ function resultEnvelope(data, { status = "ok", warnings = [], contextRevision = 
   };
 }
 
+function cleanMcpUiText(value, maxLength = 500) {
+  let text = boundedString(value, maxLength).replace(/\s+/g, " ");
+  text = text
+    .replace(/[A-Za-z]:[\\/].*?(?=\s+\/\s+|$)/g, "[redacted path]")
+    .replace(/\\\\[^\r\n]*?(?=\s+\/\s+|$)/g, "[redacted path]")
+    .replace(/\bfile:\/\/[^\s]*/gi, "[redacted path]")
+    .replace(/(^|\s)\/(?:mnt|home|Users|tmp|var|etc)\/.*$/i, "$1[redacted path]");
+  return text;
+}
+
+function cleanMcpUiControl(input = {}) {
+  return {
+    id: cleanMcpUiText(input.id, 100),
+    tag: cleanMcpUiText(input.tag, 30),
+    role: cleanMcpUiText(input.role, 40),
+    label: cleanMcpUiText(input.label, 260),
+    action: cleanMcpUiText(input.action, 100),
+    actionValue: cleanMcpUiText(input.actionValue, 100),
+    disabled: input.disabled === true,
+    checked: input.checked === true,
+    pressed: input.pressed === true,
+    expanded: input.expanded === true,
+    selected: input.selected === true
+  };
+}
+
+function cleanMcpUiScroll(input = {}) {
+  const clientHeight = Math.max(0, Math.min(1_000_000, Number(input.clientHeight || 0)));
+  const scrollHeight = Math.max(0, Math.min(1_000_000, Number(input.scrollHeight || 0)));
+  return {
+    clientHeight,
+    scrollHeight,
+    overflowY: ["auto", "scroll", "visible", "hidden", "clip"].includes(input.overflowY) ? input.overflowY : "visible",
+    scrollOwner: input.scrollOwner === true && scrollHeight > clientHeight + 1
+  };
+}
+
+function cleanMcpUiCount(value, maximum = 100_000) {
+  return Math.max(0, Math.min(maximum, Math.floor(Number(value || 0))));
+}
+
+function cleanMcpUiContext(input = {}) {
+  const lastInteraction = input.lastInteraction && typeof input.lastInteraction === "object"
+    ? {
+        kind: ["click", "keyboard"].includes(input.lastInteraction.kind) ? input.lastInteraction.kind : "interaction",
+        controlId: cleanMcpUiText(input.lastInteraction.controlId, 100),
+        tag: cleanMcpUiText(input.lastInteraction.tag, 30),
+        action: cleanMcpUiText(input.lastInteraction.action, 100),
+        actionValue: cleanMcpUiText(input.lastInteraction.actionValue, 100),
+        dialogId: cleanMcpUiText(input.lastInteraction.dialogId, 100),
+        key: cleanMcpUiText(input.lastInteraction.key, 40),
+        source: input.lastInteraction.source === "mcp" ? "mcp" : "user",
+        correlationId: cleanMcpUiText(input.lastInteraction.correlationId, 120),
+        at: cleanMcpUiText(input.lastInteraction.at, 40)
+      }
+    : null;
+  return {
+    status: cleanMcpUiText(input.status),
+    toast: {
+      visible: input.toast?.visible === true,
+      text: cleanMcpUiText(input.toast?.text)
+    },
+    openDialogs: (Array.isArray(input.openDialogs) ? input.openDialogs : []).slice(0, 12).map((dialog) => ({
+      id: cleanMcpUiText(dialog?.id, 100),
+      title: cleanMcpUiText(dialog?.title, 260),
+      summary: cleanMcpUiText(dialog?.summary),
+      state: ["loading", "ready", "error"].includes(dialog?.state) ? dialog.state : "ready",
+      modal: dialog?.modal === true,
+      controls: (Array.isArray(dialog?.controls) ? dialog.controls : []).slice(0, 80).map(cleanMcpUiControl)
+    })),
+    activeControl: input.activeControl && typeof input.activeControl === "object" ? cleanMcpUiControl(input.activeControl) : null,
+    lastInteraction,
+    navigator: {
+      visible: input.navigator?.visible === true,
+      scroll: cleanMcpUiScroll(input.navigator?.scroll),
+      folderTree: input.navigator?.folderTree && typeof input.navigator.folderTree === "object"
+        ? {
+            renderedNodes: cleanMcpUiCount(input.navigator.folderTree.renderedNodes),
+            expandedNodes: cleanMcpUiCount(input.navigator.folderTree.expandedNodes),
+            loadingNodes: cleanMcpUiCount(input.navigator.folderTree.loadingNodes),
+            errorCount: cleanMcpUiCount(input.navigator.folderTree.errorCount),
+            activeNodeVisible: input.navigator.folderTree.activeNodeVisible === true,
+            truncated: input.navigator.folderTree.truncated === true,
+            messages: (Array.isArray(input.navigator.folderTree.messages) ? input.navigator.folderTree.messages : [])
+              .slice(0, 8)
+              .map((message) => cleanMcpUiText(message, 180))
+          }
+        : null,
+      sections: (Array.isArray(input.navigator?.sections) ? input.navigator.sections : []).slice(0, 30).map((section) => ({
+        id: cleanMcpUiText(section?.id, 100),
+        title: cleanMcpUiText(section?.title, 100),
+        itemCount: Math.max(0, Math.min(10_000, Number(section?.itemCount || 0))),
+        scroll: cleanMcpUiScroll(section?.scroll)
+      }))
+    },
+    terminals: (Array.isArray(input.terminals) ? input.terminals : []).slice(0, 2).map((terminal) => ({
+      pane: terminal?.pane === "right" ? "right" : "left",
+      visible: terminal?.visible === true,
+      session: terminal?.session === true,
+      state: ["idle", "starting", "ready", "busy", "exited", "error"].includes(terminal?.state) ? terminal.state : "idle",
+      elevated: terminal?.elevated === true
+    })),
+    update: {
+      visible: input.update?.visible === true,
+      title: cleanMcpUiText(input.update?.title, 260),
+      message: cleanMcpUiText(input.update?.message)
+    }
+  };
+}
+
 function cleanContext(context, fallback) {
   const raw = context && typeof context === "object" ? context : fallback || {};
   const panes = {};
@@ -189,10 +299,11 @@ function cleanContext(context, fallback) {
   return {
     live: raw.live === true,
     activePane: raw.activePane === "right" ? "right" : "left",
-    paneLayout: ["vertical", "horizontal", "single-left", "single-right"].includes(raw.paneLayout) ? raw.paneLayout : "vertical",
+    paneLayout: ["vertical", "horizontal", "single", "single-left", "single-right"].includes(raw.paneLayout) ? raw.paneLayout : "vertical",
     panes,
     selection: (Array.isArray(raw.selection) ? raw.selection : []).slice(0, 100).map(String),
     focusedPath: boundedString(raw.focusedPath, 32768),
+    ui: cleanMcpUiContext(raw.ui),
     contextRevision: Number.isInteger(raw.contextRevision) ? raw.contextRevision : 0
   };
 }
@@ -703,16 +814,72 @@ export async function createMcpAutomationService(deps) {
     return { planId: record.id, result: data };
   }
 
+  async function contextForPrincipal(principal, source) {
+    const context = cleanContext(source, null);
+    let redactedPaths = 0;
+    const authorizationCache = new Map();
+    const authorizeContextPath = async (value) => {
+      if (!value) return { path: "", authorized: null };
+      const key = String(value);
+      if (!authorizationCache.has(key)) {
+        authorizationCache.set(key, (async () => {
+          try {
+            return { path: await authorizePath(principal, value), authorized: true };
+          } catch {
+            redactedPaths += 1;
+            return { path: "", authorized: false };
+          }
+        })());
+      }
+      return authorizationCache.get(key);
+    };
+    const panes = {};
+    for (const paneId of ["left", "right"]) {
+      const pane = context.panes[paneId];
+      const panePath = await authorizeContextPath(pane.path);
+      const tabs = [];
+      for (const tab of pane.tabs) {
+        const tabPath = await authorizeContextPath(tab.path);
+        tabs.push({
+          id: tab.id,
+          path: tabPath.path,
+          title: tabPath.authorized === false ? "" : tab.title,
+          pathAuthorized: tabPath.authorized
+        });
+      }
+      panes[paneId] = {
+        activeTabId: pane.activeTabId,
+        path: panePath.path,
+        pathAuthorized: panePath.authorized,
+        tabs
+      };
+    }
+    const selection = [];
+    for (const item of context.selection) {
+      const authorized = await authorizeContextPath(item);
+      if (authorized.authorized === true) selection.push(authorized.path);
+    }
+    const focused = await authorizeContextPath(context.focusedPath);
+    return {
+      context: {
+        ...context,
+        panes,
+        selection: selection.slice(0, 100),
+        focusedPath: focused.path
+      },
+      warnings: redactedPaths > 0
+        ? [`Redacted ${redactedPaths} path${redactedPaths === 1 ? "" : "s"} outside this profile's effective authorized roots.`]
+        : []
+    };
+  }
+
   async function invokeTool(principal, name, args, request) {
     const revision = principal.context.contextRevision;
     if (name === "get_context") {
       const fallback = cleanContext(await deps.persistedContext(), null);
-      const context = principal.context.live ? principal.context : fallback;
-      context.selection = (await Promise.all(context.selection.map(async (item) => {
-        try { return await authorizePath(principal, item); } catch { return null; }
-      }))).filter(Boolean).slice(0, 100);
-      try { context.focusedPath = context.focusedPath ? await authorizePath(principal, context.focusedPath) : ""; } catch { context.focusedPath = ""; }
-      return resultEnvelope(context, { contextRevision: context.contextRevision });
+      const source = principal.context.live ? principal.context : fallback;
+      const { context, warnings } = await contextForPrincipal(principal, source);
+      return resultEnvelope(context, { contextRevision: context.contextRevision, warnings });
     }
     if (name === "list_locations") {
       const roots = await deps.getRoots();
@@ -744,6 +911,132 @@ export async function createMcpAutomationService(deps) {
       const action = { type: "show", path: itemPath, pane: args.pane || "active", mode: args.mode || "replace", select: args.select || null, expectedContextRevision: revision };
       const data = await uiDispatcher(action);
       return resultEnvelope(data, { contextRevision: data?.contextRevision ?? revision });
+    }
+    if (name === "set_ui_view") {
+      if (!uiDispatcher) bridgeError("UI_UNAVAILABLE", "No Explore Better renderer is currently available.", null, true);
+      const action = {
+        type: "view",
+        view: args.view,
+        visible: args.visible !== false,
+        pane: args.pane || "active",
+        expectedContextRevision: revision
+      };
+      const data = await uiDispatcher(action);
+      return resultEnvelope(data, { contextRevision: data?.contextRevision ?? revision });
+    }
+    if (name === "list_ui_actions") {
+      if (!uiDispatcher) bridgeError("UI_UNAVAILABLE", "No Explore Better renderer is currently available.", null, true);
+      const data = await uiDispatcher({
+        type: "listActions",
+        pane: args.pane || "active",
+        view: boundedString(args.view, 100),
+        includeDisabled: args.includeDisabled !== false,
+        expectedContextRevision: revision,
+        signal: request.signal
+      });
+      return resultEnvelope(data, { contextRevision: data?.contextRevision ?? revision });
+    }
+    if (name === "invoke_ui_action") {
+      if (!uiDispatcher) bridgeError("UI_UNAVAILABLE", "No Explore Better renderer is currently available.", null, true);
+      const inputs = clone(args.inputs || {});
+      if (inputs.path !== undefined) inputs.path = await authorizePath(principal, inputs.path);
+      if (Array.isArray(inputs.paths)) inputs.paths = await authorizePaths(principal, inputs.paths);
+      const correlationId = crypto.randomUUID();
+      const expectedContextRevision = Number.isInteger(args.expectedContextRevision)
+        ? args.expectedContextRevision
+        : revision;
+      if (Number.isInteger(args.expectedContextRevision) && args.expectedContextRevision !== revision) {
+        bridgeError("STALE_CONTEXT", "The Explore Better context changed. Read context and retry the semantic action.", {
+          expectedContextRevision: args.expectedContextRevision,
+          currentContextRevision: revision
+        }, true);
+      }
+      const data = await uiDispatcher({
+        type: "semantic",
+        actionId: args.actionId,
+        pane: args.pane || "active",
+        inputs,
+        correlationId,
+        expectedContextRevision,
+        signal: request.signal
+      });
+      return resultEnvelope({
+        actionId: args.actionId,
+        correlationId,
+        ...data,
+        startingContextRevision: expectedContextRevision
+      }, { contextRevision: data?.finalContextRevision ?? data?.contextRevision ?? revision });
+    }
+    if (name === "wait_for_ui") {
+      if (!uiDispatcher) bridgeError("UI_UNAVAILABLE", "No Explore Better renderer is currently available.", null, true);
+      const timeoutMs = Math.max(100, Math.min(30_000, Number(args.timeoutMs || 10_000)));
+      const condition = clone(args.condition || {});
+      const operationId = boundedString(condition.operationId, 120);
+      const operationStatus = boundedString(condition.operationStatus, 40);
+      delete condition.operationId;
+      delete condition.operationStatus;
+      if (request.signal?.aborted) bridgeError("REQUEST_CANCELED", "The AI Bridge wait was canceled.", null, true);
+      let operation = operationId ? await deps.getOperation(operationId) : null;
+      const operationAuthorized = !operation || operation.mcpProfileId === principal.profileId;
+      if (!operationAuthorized) operation = null;
+      const hasUiCondition = Object.keys(condition).length > 0 || !operationId;
+      const uiWait = hasUiCondition
+        ? uiDispatcher({
+            type: "wait",
+            afterRevision: Number(args.afterRevision || 0),
+            timeoutMs,
+            condition,
+            signal: request.signal
+          })
+        : Promise.resolve({ matched: true, reason: "no-ui-condition", context: principal.context });
+      const operationWait = !operationId
+        ? Promise.resolve(null)
+        : operation && (!operationStatus || operation.status === operationStatus)
+          ? Promise.resolve(operation)
+          : operationAuthorized && operation
+            ? deps.waitForOperation(operationId, operationStatus, timeoutMs, request.signal)
+            : new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                  request.signal?.removeEventListener?.("abort", onAbort);
+                  resolve(null);
+                }, timeoutMs);
+                const onAbort = () => {
+                  clearTimeout(timeout);
+                  request.signal?.removeEventListener?.("abort", onAbort);
+                  const error = new Error("The AI Bridge wait was canceled.");
+                  error.code = "REQUEST_CANCELED";
+                  error.retryable = true;
+                  reject(error);
+                };
+                if (request.signal?.aborted) onAbort();
+                else request.signal?.addEventListener?.("abort", onAbort, { once: true });
+              });
+      const [data, waitedOperation] = await Promise.all([uiWait, operationWait]);
+      if (waitedOperation) operation = waitedOperation.mcpProfileId === principal.profileId ? waitedOperation : null;
+      const latest = await uiDispatcher({ type: "wait", afterRevision: 0, timeoutMs: 100, condition: {}, signal: request.signal });
+      const operationMatched = !operationId || Boolean(operation && (!operationStatus || operation.status === operationStatus));
+      const matched = data?.matched === true && operationMatched;
+      const authorized = await contextForPrincipal(principal, latest.context || data.context || principal.context);
+      return resultEnvelope({
+        matched,
+        reason: matched ? "condition-matched" : "timeout",
+        context: authorized.context,
+        ...(operation ? { operation: {
+          id: operation.id,
+          type: operation.type,
+          label: operation.label,
+          status: operation.status,
+          progress: operation.progress || null,
+          createdAt: operation.createdAt || null,
+          startedAt: operation.startedAt || null,
+          finishedAt: operation.finishedAt || null,
+          updatedAt: operation.updatedAt || null
+        } } : {})
+      }, {
+        status: matched ? "ok" : "partial",
+        warnings: authorized.warnings,
+        contextRevision: authorized.context.contextRevision
+      });
     }
     if (name === "list_directory") {
       const itemPath = await authorizePath(principal, args.path);
@@ -910,6 +1203,11 @@ export async function createMcpAutomationService(deps) {
     const uri = String(request.uri || "");
     if (uri === "explore-better://context/current") return invoke({ ...request, tool: "get_context", args: {} });
     if (uri === "explore-better://roots") return invoke({ ...request, tool: "list_locations", args: { includeShell: true } });
+    if (uri === "explore-better://health/current") {
+      const tool = toolMap.get("get_context");
+      await principalFor(request, tool);
+      return resultEnvelope(await deps.healthReport({ probe: false, signal: request.signal }));
+    }
     const jobMatch = uri.match(/^explore-better:\/\/jobs\/([^/]+)$/);
     if (jobMatch) return invoke({ ...request, tool: "get_job", args: { jobId: decodeURIComponent(jobMatch[1]), limit: 200 } });
     const operationMatch = uri.match(/^explore-better:\/\/operations\/([^/]+)$/);

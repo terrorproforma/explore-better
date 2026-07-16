@@ -1438,7 +1438,7 @@ async function main() {
       countFailedChecks(searchBackgroundUi) === 0 &&
       Number(searchBackgroundUi?.layout?.issues?.length || 0) === 0 &&
       Number(searchBackgroundUi?.endpointCounts?.["/api/background-indexes/search"] || 0) >= 2 &&
-      !Number(searchBackgroundUi?.endpointCounts?.["/api/search"] || 0),
+      Number(searchBackgroundUi?.endpointCounts?.["/api/search"] || 0) >= 2,
     `Search UI status=${searchBackgroundUi?.status || "missing"}; layoutIssues=${searchBackgroundUi?.layout?.issues?.length || 0}.`
   );
   addMetric(

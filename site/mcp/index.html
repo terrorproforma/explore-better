@@ -44,7 +44,7 @@
             "name": "Explore Better MCP Server",
             "alternateName": "Explore Better AI Bridge",
             "url": "https://terrorproforma.github.io/explore-better/mcp/",
-            "softwareVersion": "0.2.3",
+            "softwareVersion": "0.2.4",
             "operatingSystem": "Windows 11 x64",
             "applicationCategory": "DeveloperApplication",
             "applicationSubCategory": "Local MCP server for file management",
@@ -68,7 +68,7 @@
             "description": "Architecture, security model, tool catalogue, benchmark, setup, and limitations for the Explore Better local MCP server.",
             "url": "https://terrorproforma.github.io/explore-better/mcp/",
             "datePublished": "2026-07-14",
-            "dateModified": "2026-07-14",
+            "dateModified": "2026-07-17",
             "inLanguage": "en",
             "about": { "@id": "https://terrorproforma.github.io/explore-better/mcp/#server" },
             "image": "https://terrorproforma.github.io/explore-better/assets/ai-bridge.png"
@@ -137,9 +137,9 @@
       <section class="mcp-stat-band" aria-label="MCP benchmark summary">
         <div class="page-shell mcp-stat-grid">
           <div><strong>3 / 3</strong><span>shared tasks correct</span></div>
-          <div><strong>6 / 6</strong><span>MCP controls proven</span></div>
-          <div><strong>17</strong><span>read-only profile tools</span></div>
-          <div><strong>28</strong><span>complete contract tools</span></div>
+          <div><strong>7 / 7</strong><span>MCP controls proven</span></div>
+          <div><strong>21</strong><span>safe-default profile tools</span></div>
+          <div><strong>32</strong><span>complete contract tools</span></div>
         </div>
       </section>
 
@@ -165,7 +165,7 @@
           <div class="section-heading section-heading--dark reveal">
             <p class="eyebrow light">Real sidecar / same fixture / known answers</p>
             <h2 id="evidence-title">Proved against PowerShell.</h2>
-            <p>The benchmark starts the actual Electron host and bundled Go stdio sidecar. Equivalent PowerShell scripts run against the same 379-file fixture. Both must match ground truth.</p>
+            <p>The benchmark starts the actual Electron host and bundled Go stdio sidecar. Equivalent PowerShell scripts run against the same 380-file fixture. Both must match ground truth.</p>
           </div>
 
           <div class="mcp-benchmark-table-wrap reveal">
@@ -174,9 +174,9 @@
                 <tr><th scope="col">Workflow</th><th scope="col">MCP</th><th scope="col">PowerShell</th><th scope="col">MCP median</th><th scope="col">PowerShell median</th></tr>
               </thead>
               <tbody>
-                <tr><th scope="row">Find matching reports</th><td><span class="proof-pass">Correct</span></td><td><span class="proof-pass">Correct</span></td><td data-benchmark="filename-search:mcp">9.8 ms</td><td data-benchmark="filename-search:powershell">536.1 ms</td></tr>
-                <tr><th scope="row">Find content duplicates</th><td><span class="proof-pass">Correct</span></td><td><span class="proof-pass">Correct</span></td><td data-benchmark="duplicate-space:mcp">130.4 ms</td><td data-benchmark="duplicate-space:powershell">580.5 ms</td></tr>
-                <tr><th scope="row">Measure disk usage</th><td><span class="proof-pass">Correct</span></td><td><span class="proof-pass">Correct</span></td><td data-benchmark="disk-usage:mcp">72.3 ms</td><td data-benchmark="disk-usage:powershell">445.4 ms</td></tr>
+                <tr><th scope="row">Find matching reports</th><td><span class="proof-pass">Correct</span></td><td><span class="proof-pass">Correct</span></td><td data-benchmark="filename-search:mcp">1.5 ms</td><td data-benchmark="filename-search:powershell">222.4 ms</td></tr>
+                <tr><th scope="row">Find content duplicates</th><td><span class="proof-pass">Correct</span></td><td><span class="proof-pass">Correct</span></td><td data-benchmark="duplicate-space:mcp">46.5 ms</td><td data-benchmark="duplicate-space:powershell">247.6 ms</td></tr>
+                <tr><th scope="row">Measure disk usage</th><td><span class="proof-pass">Correct</span></td><td><span class="proof-pass">Correct</span></td><td data-benchmark="disk-usage:mcp">51.4 ms</td><td data-benchmark="disk-usage:powershell">239.9 ms</td></tr>
               </tbody>
             </table>
           </div>
@@ -186,12 +186,13 @@
           </p>
 
           <div class="mcp-proof-list reveal" aria-label="MCP-specific proof results">
-            <article><span>01</span><div><strong>Typed discovery</strong><p>17 permitted tools exposed with JSON schemas; destructive tools were absent from the read-only profile.</p></div><b>PASS</b></article>
+            <article><span>01</span><div><strong>Typed discovery</strong><p>Safe-default tools exposed with JSON schemas; destructive tools were absent from the read-only profile.</p></div><b>PASS</b></article>
             <article><span>02</span><div><strong>Bounded pagination</strong><p>A 360-entry folder returned exactly 25 items and an opaque continuation cursor.</p></div><b>PASS</b></article>
             <article><span>03</span><div><strong>Live pane context</strong><p>The AI read the open tabs, opened a new left-pane tab, and observed the revised context.</p></div><b>PASS</b></article>
             <article><span>04</span><div><strong>Authorized roots</strong><p>An attempted read outside the profile folder was rejected with OUTSIDE_ROOTS.</p></div><b>PASS</b></article>
             <article><span>05</span><div><strong>Capability reduction</strong><p>Delete, transfer, text-write, and apply tools were hidden from read-only discovery.</p></div><b>PASS</b></article>
             <article><span>06</span><div><strong>Allocation semantics</strong><p>The Analyzer returned explicitly labeled exact allocated bytes; the generic shell baseline did not.</p></div><b>PASS</b></article>
+            <article><span>07</span><div><strong>Semantic UI control</strong><p>The AI listed selector-free actions, activated the other pane, waited for the structured result, and traced the correlation ID into live context.</p></div><b>PASS</b></article>
           </div>
 
           <div class="mcp-evidence-links reveal">
@@ -210,13 +211,14 @@
           </div>
 
           <div class="mcp-tool-groups reveal">
-            <article><span>Context</span><h3>Work with what is open</h3><p><code>get_context</code>, <code>list_locations</code>, and <code>show_in_explore_better</code> connect the model to panes, tabs, selection, and navigation.</p></article>
+            <article><span>Context</span><h3>Work with what is open</h3><p><code>get_context</code>, <code>list_locations</code>, <code>show_in_explore_better</code>, and <code>set_ui_view</code> connect the model to panes, tabs, selection, navigation, and 43 named app views.</p></article>
             <article><span>Discovery</span><h3>Find without flooding context</h3><p><code>list_directory</code>, <code>search_files</code>, <code>inspect_paths</code>, <code>read_text</code>, checksums, and index status return bounded typed results.</p></article>
             <article><span>Analysis</span><h3>Use the file manager's engines</h3><p>Disk analysis, duplicate discovery, folder comparison, durable jobs, pagination, and cancellation reuse Explore Better's native provider and caches.</p></article>
-            <article><span>Operations</span><h3>Preview before any write</h3><p>Transfer, rename, delete, archive, create, and text-write planners issue short-lived one-use tokens for journalled apply, recovery, and undo.</p></article>
+            <article><span>Operations</span><h3>Preview before any write</h3><p>Transfer, rename, delete, archive, create, and text-write planners issue short-lived one-use tokens for journalled apply, recovery, timeline inspection, and undo.</p></article>
+            <article><span>Semantic UI</span><h3>Act without screen scraping</h3><p><code>list_ui_actions</code>, <code>invoke_ui_action</code>, and <code>wait_for_ui</code> provide validated actions, stale-context protection, visible outcomes, and event-driven observation without selectors or scripts.</p></article>
           </div>
 
-          <a class="text-link" href="https://github.com/terrorproforma/explore-better/blob/master/mcp/contracts-v1.json">Read all 28 tool schemas <img src="../assets/icons/arrow-right.svg" alt="" width="17" height="17" /></a>
+          <a class="text-link" href="https://github.com/terrorproforma/explore-better/blob/master/mcp/contracts-v1.json">Read all 32 tool schemas <img src="../assets/icons/arrow-right.svg" alt="" width="17" height="17" /></a>
         </div>
       </section>
 

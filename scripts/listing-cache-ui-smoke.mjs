@@ -268,7 +268,7 @@ async function main() {
     await pathInput.fill(missingPath);
     await pathInput.press("Enter");
     await page.waitForFunction(
-      () => document.querySelector("#status-pill")?.textContent?.includes("Could not open"),
+      () => /(?:Could not open|Folder not found)/.test(document.querySelector("#status-pill")?.textContent || ""),
       { timeout: 10000 }
     );
     const missingPathState = await page.evaluate(() => ({
@@ -276,7 +276,7 @@ async function main() {
       path: document.querySelector('[data-path-input="left"]')?.value || "",
       rows: document.querySelectorAll('.pane[data-pane="left"] [data-entry-path]').length
     }));
-    check(checks, "missing-path-status", /Could not open/.test(missingPathState.status), missingPathState.status);
+    check(checks, "missing-path-status", /(?:Could not open|Folder not found)/.test(missingPathState.status), missingPathState.status);
     check(checks, "missing-path-restores-current", missingPathState.path === leftFixture, missingPathState.path);
     check(checks, "missing-path-preserves-list", missingPathState.rows === 4, `${missingPathState.rows} rows`);
     check(checks, "browser-console-clean", pageErrors.length === 0, `${pageErrors.length} page error(s).`);

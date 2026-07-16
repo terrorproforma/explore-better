@@ -30,7 +30,14 @@ ipcRenderer.on("explore-better:mcp-ui-action", (_event, payload) => {
     .then(async () => {
       if (!listeners.length) throw Object.assign(new Error("No renderer AI action handler is registered."), { code: "UI_UNAVAILABLE" });
       let result = null;
-      for (const listener of listeners) result = await listener(payload.action);
+      for (const listener of listeners) {
+        result = await listener(payload.action);
+        if (result?.__exploreBetterUiError) {
+          throw Object.assign(new Error(result.__exploreBetterUiError.message), {
+            code: result.__exploreBetterUiError.code || "UI_ACTION_FAILED"
+          });
+        }
+      }
       ipcRenderer.send("explore-better:mcp-ui-action-result", { requestId: payload.requestId, result });
     })
     .catch((error) => {

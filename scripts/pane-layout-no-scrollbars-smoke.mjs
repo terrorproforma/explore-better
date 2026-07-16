@@ -112,6 +112,16 @@ async function inspectPaneChrome(page) {
           if (childRect.width <= 0 || childRect.height <= 0) return false;
           return childRect.left < rect.left - 4 || childRect.right > rect.right + 4;
         }).length;
+        const currentBreadcrumbRect = element.querySelector(".breadcrumb-button.current")?.getBoundingClientRect();
+        const currentBreadcrumbVisible =
+          selector !== ".breadcrumb-strip" ||
+          Boolean(
+            currentBreadcrumbRect &&
+              currentBreadcrumbRect.left >= rect.left - 1 &&
+              currentBreadcrumbRect.right <= rect.right + 1
+          );
+        const intentionalBreadcrumbScroll =
+          selector === ".breadcrumb-strip" && xScrollable && style.scrollbarWidth === "none" && currentBreadcrumbVisible;
         const sample = {
           pane: paneName,
           selector,
@@ -123,16 +133,19 @@ async function inspectPaneChrome(page) {
           scrollHeight: element.scrollHeight,
           overflowX: style.overflowX,
           overflowY: style.overflowY,
+          scrollbarWidth: style.scrollbarWidth,
           gridTemplateColumns: style.gridTemplateColumns,
           configuredColumns: element.style.getPropertyValue("--file-columns"),
           childWidths: [...element.children].map((child) => Math.round(child.getBoundingClientRect().width)),
           xScrollable,
           yScrollable,
           cramped,
-          childrenOutside
+          childrenOutside,
+          currentBreadcrumbVisible,
+          intentionalBreadcrumbScroll
         };
         reports.push(sample);
-        if (xScrollable || yScrollable || cramped || childrenOutside) {
+        if ((xScrollable && !intentionalBreadcrumbScroll) || yScrollable || cramped || (childrenOutside && !intentionalBreadcrumbScroll)) {
           issues.push(sample);
         }
       }
