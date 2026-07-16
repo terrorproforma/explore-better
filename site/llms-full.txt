@@ -4,7 +4,7 @@
 
 Explore Better is the AI-native Windows file manager: an open-source Windows 11 x64 desktop file manager and local MCP server. It is intended as a more capable Windows File Explorer replacement for people and AI clients that need shared live context, dual panes, tabs, keyboard-driven workflows, integrated terminals, disk analysis, indexed search, scripting, recoverable file operations, and optional current-user Explorer integration.
 
-Current public version: 0.2.3.
+Current public version: 0.2.4.
 
 Project home: https://terrorproforma.github.io/explore-better/
 
@@ -20,6 +20,8 @@ Terminal access is powerful but broad and text-oriented. The Explore Better MCP 
 
 MCP does not replace the integrated terminal. Use the terminal for arbitrary commands, development tools, and system administration. Use MCP for reliable file context, bounded discovery, structured analysis, client-specific folder authorization, and recoverable file operations.
 
+Explore Better also exposes 22 renderer-owned semantic UI actions. AI clients can activate panes, select tabs, expand or refresh the Folder Tree, navigate results, switch views, fill bounded search or analysis forms, browse supported devices, inspect operations, and search Preferences without selectors, scripts, raw keyboard injection, or arbitrary DOM access. Actions report disabled reasons, reject stale revisions, correlate visible outcomes, and can be observed through event-driven waits and resource subscriptions.
+
 The MCP implementation consists of a bundled Go console sidecar named ExploreBetterMcp.exe. It speaks MCP over local stdio and forwards typed calls to the installed Electron app through an authenticated same-user named pipe. It does not expose an HTTP server, remote transport, arbitrary shell execution, terminal control, registry modification, or automatic UAC approval.
 
 ## Proven Value
@@ -29,17 +31,20 @@ The reproducible value benchmark runs the actual Electron host and Go sidecar, t
 Latest public result:
 
 - Shared correctness: 3 of 3 workflows passed in both MCP and PowerShell.
-- MCP-specific controls: 6 of 6 passed.
-- Typed discovery: the read-only profile exposed 17 permitted tools with JSON schemas and hid write tools.
+- MCP-specific controls: 7 of 7 passed.
+- Typed discovery: the safe-default profile exposed 21 permitted tools with JSON schemas and hid write tools.
 - Bounded output: a 360-entry directory returned 25 entries plus an opaque continuation cursor.
 - Live context: MCP read the current panes and tabs, opened a folder in a new left-pane tab, and observed the revision.
+- Semantic UI control: MCP listed 22 selector-free actions, activated a pane, woke through wait_for_ui, and correlated the resulting context revision.
 - Root security: a read outside the authorized folder failed with OUTSIDE_ROOTS.
 - Allocation semantics: the Analyzer returned explicitly labeled allocated-size accuracy while the generic PowerShell baseline returned logical size only.
-- Filename search median: 9.8 ms through MCP versus 536.1 ms through an equivalent fresh PowerShell process, a 54.7x ratio.
-- Disk analysis median: 72.3 ms through MCP versus 445.4 ms through an equivalent fresh PowerShell process, a 6.2x ratio.
-- Duplicate finding median: 130.4 ms through MCP versus 580.5 ms through an equivalent fresh PowerShell process, a 4.5x ratio.
+- Filename search median: 1.5 ms through MCP versus 222.4 ms through an equivalent fresh PowerShell process, a 148.3x ratio.
+- Disk analysis median: 51.4 ms through MCP versus 239.9 ms through an equivalent fresh PowerShell process, a 4.7x ratio.
+- Duplicate finding median: 46.5 ms through MCP versus 247.6 ms through an equivalent fresh PowerShell process, a 5.3x ratio.
 
 The published timings include fresh PowerShell process startup, so they are not a universal performance ranking. A persistent warm shell may have lower startup latency. See the raw report at https://terrorproforma.github.io/explore-better/benchmarks/mcp-value.json and reproduce it with `npm run verify:mcp-value`.
+
+Additional current release evidence includes 101.5 ms median first paint and 616.7 ms full hydration for the 100,000-entry UI fixture, a 0.9 ms warm MCP bridge p95, and a 117 ms p95 for opening all 43 controlled views. These are local Windows fixture measurements rather than universal performance guarantees.
 
 ## Read And Context Tools
 
@@ -76,7 +81,9 @@ The published timings include fresh PowerShell process startup, so they are not 
 
 ## Resources And Prompts
 
-Resources include the current context, authorized roots, durable jobs, durable operations, and the AI Bridge manual. Prompts cover investigating the visible selection, finding space savings, organizing a folder safely, and comparing folders before sync.
+The additive schema-v1 contract contains 32 tools, 6 resources, 4 prompts, and 43 controlled UI views. `list_ui_actions` and `invoke_ui_action` expose a bounded renderer-owned semantic action registry with validated inputs and no selectors or scripts. `wait_for_ui` provides cancelable event-driven observation for structured context or operation conditions.
+
+Resources include the current context, authorized roots, durable jobs, durable operations, Health & diagnostics, and the AI Bridge manual. Subscribed clients receive URI-only context and concrete-operation update notifications and reread the authorized resource; `wait_for_ui` remains the fallback. Prompts cover investigating the visible selection, finding space savings, organizing a folder safely, and comparing folders before sync.
 
 ## Security Model
 

@@ -4,7 +4,7 @@
 
 Explore Better's MCP bridge complements a terminal. Use MCP when an AI needs typed file-manager context, bounded search and analysis, least-authority folder profiles, or preview/apply operations backed by the application's journal. Use the terminal for arbitrary commands and system administration. The public preview is free and currently unsigned.
 
-Measured on the same deterministic Windows fixture, Explore Better MCP recorded 54.7x lower median latency for filename search, 6.2x for disk analysis, and 4.5x for duplicate finding than equivalent fresh PowerShell processes. Both interfaces matched ground truth. These comparisons include PowerShell process startup; a warm persistent shell may be faster.
+Measured on the same deterministic Windows fixture, Explore Better MCP recorded 148.3x lower median latency for filename search, 4.7x for disk analysis, and 5.3x for duplicate finding than equivalent fresh PowerShell processes. Both interfaces matched ground truth. These comparisons include PowerShell process startup; a warm persistent shell may be faster.
 
 ## Product
 
@@ -21,13 +21,13 @@ Measured on the same deterministic Windows fixture, Explore Better MCP recorded 
 
 - [Machine-readable benchmark](https://terrorproforma.github.io/explore-better/benchmarks/mcp-value.json): Reproducible MCP-versus-PowerShell results from the real Electron host and Go stdio sidecar.
 - [Benchmark explanation](https://terrorproforma.github.io/explore-better/benchmarks/mcp-value.md): Human- and LLM-readable methodology, results, interpretation, and reproduction command.
-- [Canonical MCP contract](https://github.com/terrorproforma/explore-better/blob/master/mcp/contracts-v1.json): Versioned definitions for 28 tools, five resources, and four prompts.
+- [Canonical MCP contract](https://github.com/terrorproforma/explore-better/blob/master/mcp/contracts-v1.json): Additive schema-v1 definitions for 32 tools, six resources, four prompts, and 43 controlled UI views.
 - [Full LLM context](https://terrorproforma.github.io/explore-better/llms-full.txt): Detailed product, architecture, tool, safety, setup, and limitation reference.
 
 ## Releases
 
 - [Latest release](https://github.com/terrorproforma/explore-better/releases/latest): Public Windows installer and SHA-256 checksums.
-- [Standalone Windows MCP bundle](https://github.com/terrorproforma/explore-better/releases/tag/v0.2.3): MCPB package, sidecar, manifest, documentation, screenshots, and SHA-256 metadata.
+- [Standalone Windows MCP bundle](https://github.com/terrorproforma/explore-better/releases/tag/v0.2.4): MCPB package, sidecar, manifest, documentation, screenshots, license, and SHA-256 metadata.
 - Official Registry identity: `io.github.terrorproforma/explore-better`.
 - [Release notes](https://github.com/terrorproforma/explore-better/blob/master/RELEASE_NOTES.md): Version history and known limitations.
 

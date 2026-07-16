@@ -81,7 +81,7 @@ assert(manifest.compatibility?.platforms?.length === 1 && manifest.compatibility
 assert(manifest.user_config?.profile_id?.required === true, "MCPB must require an explicit revocable profile ID.");
 assert(manifest.server.mcp_config.args.includes("${user_config.profile_id}"), "MCPB command does not bind the configured profile ID.");
 assert(manifest.privacy_policies?.includes("https://terrorproforma.github.io/explore-better/privacy/"), "MCPB privacy policy is missing.");
-assert(manifest.tools.length === contract.tools.length && manifest.tools.length === 28, "MCPB tool inventory is incomplete.");
+assert(manifest.tools.length === contract.tools.length && manifest.tools.length === 32, "MCPB tool inventory is incomplete.");
 assert(manifest.prompts.length === contract.prompts.length && manifest.prompts.length >= 3, "MCPB prompt inventory is incomplete.");
 for (const tool of contract.tools) {
   assert(typeof tool.annotations?.readOnlyHint === "boolean", `${tool.name} is missing readOnlyHint.`);
@@ -99,7 +99,7 @@ assert(serverJson.packages[0].identifier.endsWith(`/v${pkg.version}/${artifactNa
 const contractResult = spawnSync(sidecarPath, ["--self-test-contract"], { encoding: "utf8", windowsHide: true });
 assert(contractResult.status === 0, `Sidecar contract self-test failed: ${contractResult.stderr}`);
 const contractReport = JSON.parse(contractResult.stdout.trim());
-assert(contractReport.ok === true && contractReport.tools === 28, "Sidecar contract self-test reported an incomplete contract.");
+assert(contractReport.ok === true && contractReport.tools === 32 && contractReport.resources === 6, "Sidecar contract self-test reported an incomplete contract.");
 
 const discoveryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "eb-mcpb-discovery-"));
 try {

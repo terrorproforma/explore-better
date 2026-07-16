@@ -185,14 +185,14 @@ ${rows}
 | Started while held | ${report.prefetch.startedWhileHeld} |
 | Max active budget | ${report.prefetch.maxActive} |
 | Target request delta on open | ${report.prefetch.targetOpenRequestDelta} |
-| Target source after open | ${report.snapshots.afterOpen.source} |
+| Target source after open | ${report.snapshots.afterOpen?.source || "n/a"} |
 
 ## Snapshots
 
 | Phase | Source | Live Load | Status |
 | --- | --- | ---: | --- |
-| Initial | ${report.snapshots.initial.source} | ${report.snapshots.initial.liveLoadMs ?? "n/a"} ms | ${report.snapshots.initial.statusText.replace(/\|/g, "\\|")} |
-| After Prefetch Open | ${report.snapshots.afterOpen.source} | ${report.snapshots.afterOpen.liveLoadMs ?? "n/a"} ms | ${report.snapshots.afterOpen.statusText.replace(/\|/g, "\\|")} |
+| Initial | ${report.snapshots.initial?.source || "n/a"} | ${report.snapshots.initial?.liveLoadMs ?? "n/a"} ms | ${String(report.snapshots.initial?.statusText || "n/a").replace(/\|/g, "\\|")} |
+| After Prefetch Open | ${report.snapshots.afterOpen?.source || "n/a"} | ${report.snapshots.afterOpen?.liveLoadMs ?? "n/a"} ms | ${String(report.snapshots.afterOpen?.statusText || "n/a").replace(/\|/g, "\\|")} |
 `;
 }
 

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 
 const workspace = process.cwd();
@@ -20,6 +21,18 @@ function optionValue(name, fallback = "") {
 
 function keepFixture() {
   return process.argv.includes("--keep-fixture") || process.env.EB_WINDOWS_RECYCLE_KEEP_FIXTURE === "1";
+}
+
+async function freePort() {
+  const probe = net.createServer();
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const address = probe.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
 }
 
 function assert(condition, message) {
@@ -114,7 +127,7 @@ async function main() {
   const filePath = path.join(fixture, fileName);
   await fs.writeFile(filePath, "windows recycle smoke\n", "utf8");
 
-  const port = Number(optionValue("--port", process.env.PORT || 57000 + Math.floor(Math.random() * 3000)));
+  const port = Number(optionValue("--port", process.env.PORT || "")) || await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const server = spawn(process.execPath, ["server.mjs"], {
     cwd: workspace,

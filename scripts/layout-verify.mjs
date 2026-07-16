@@ -13,9 +13,11 @@ const fixture = path.join(runRoot, "fixture");
 const appData = path.join(runRoot, "appdata");
 
 const viewports = [
+  { name: "wide-desktop", width: 1920, height: 1080 },
   { name: "desktop", width: 1440, height: 920 },
   { name: "small-desktop", width: 1024, height: 760 },
   { name: "tablet", width: 820, height: 900 },
+  { name: "narrow", width: 600, height: 844 },
   { name: "mobile", width: 390, height: 844 }
 ];
 
@@ -247,6 +249,63 @@ async function inspectLayout(page, mode = "workbench") {
   }, mode);
 }
 
+async function inspectNavigatorScroll(page) {
+  return page.evaluate(() => {
+    const navigator = document.querySelector(".nav-rail");
+    const folderTree = document.getElementById("folder-tree");
+    const recentList = document.getElementById("nav-recents");
+    const issues = [];
+    if (!navigator || !folderTree || !recentList) {
+      return {
+        mode: "navigator-scroll",
+        issues: [{ area: "navigator-scroll", reason: "missing-container" }]
+      };
+    }
+    const metrics = (element) => {
+      const style = getComputedStyle(element);
+      return {
+        overflowY: style.overflowY,
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        flexShrink: style.flexShrink
+      };
+    };
+    const navigatorMetrics = metrics(navigator);
+    const folderTreeMetrics = metrics(folderTree);
+    const recentListMetrics = metrics(recentList);
+    const nestedScrollOwners = [...navigator.querySelectorAll("*")]
+      .filter((element) => {
+        const overflowY = getComputedStyle(element).overflowY;
+        return overflowY === "auto" || overflowY === "scroll";
+      })
+      .map((element) => ({
+        id: element.id || "",
+        className: element.className || "",
+        ...metrics(element)
+      }));
+    if (!["auto", "scroll"].includes(navigatorMetrics.overflowY)) {
+      issues.push({ area: "navigator-scroll", reason: "navigator-is-not-scroll-owner", ...navigatorMetrics });
+    }
+    if (nestedScrollOwners.length) {
+      issues.push({ area: "navigator-scroll", reason: "nested-scroll-owner", nestedScrollOwners });
+    }
+    if (folderTreeMetrics.clientHeight + 1 < folderTreeMetrics.scrollHeight) {
+      issues.push({ area: "folder-tree", reason: "tree-height-is-constrained", ...folderTreeMetrics });
+    }
+    if (recentListMetrics.clientHeight + 1 < recentListMetrics.scrollHeight) {
+      issues.push({ area: "recent-locations", reason: "recent-height-is-constrained", ...recentListMetrics });
+    }
+    return {
+      mode: "navigator-scroll",
+      issues,
+      navigator: navigatorMetrics,
+      folderTree: folderTreeMetrics,
+      recentList: recentListMetrics,
+      nestedScrollOwners
+    };
+  });
+}
+
 async function inspectTopbarReachability(page) {
   return page.evaluate(() => {
     const viewport = { width: window.innerWidth, height: window.innerHeight };
@@ -282,6 +341,44 @@ async function inspectTopbarReachability(page) {
         samples,
         counts: { roots: 0, fixed: 0 }
       };
+    }
+
+    const visibleActions = [...document.querySelectorAll(".topbar-actions [data-topbar-action]")]
+      .filter((element) => isVisible(element) && !element.classList.contains("topbar-responsive-hidden"))
+      .map((element) => element.dataset.topbarAction);
+    const overflowActions = [...document.querySelectorAll("#topbar-more-menu [data-topbar-action]")]
+      .map((element) => element.dataset.topbarAction);
+    const expectedActions = ["search", "sizeAnalysis", "ops", "palette", "focus"];
+    const reachableActions = [...new Set([...visibleActions, ...overflowActions])];
+    const missingActions = expectedActions.filter((id) => !reachableActions.includes(id));
+    const duplicateActions = expectedActions.filter((id) => visibleActions.includes(id) && overflowActions.includes(id));
+    const expectedOverflowOrder = ["focus", "ops", "sizeAnalysis", "search", "palette"].filter((id) => overflowActions.includes(id));
+    const rootHidden = rootStrip.hidden;
+    const status = document.getElementById("status-pill");
+    const statusHidden = status?.hidden === true;
+    const contextLabels = [...document.querySelectorAll("#topbar-more-menu .topbar-overflow-context > span")].map((item) => item.textContent.trim());
+    const moreToggle = document.getElementById("topbar-more-toggle");
+    const moreRect = moreToggle?.getBoundingClientRect();
+    if (Math.abs(topbarRect.height - 44) > 1) {
+      issues.push({ area: "topbar", reason: "height-not-44px", height: Math.round(topbarRect.height) });
+    }
+    if (missingActions.length || duplicateActions.length) {
+      issues.push({ area: "topbar-actions", reason: "lost-or-duplicated-action", missingActions, duplicateActions, visibleActions, overflowActions });
+    }
+    if (overflowActions.join(",") !== expectedOverflowOrder.join(",")) {
+      issues.push({ area: "topbar-actions", reason: "non-deterministic-overflow-order", overflowActions, expectedOverflowOrder });
+    }
+    if ((overflowActions.includes("search") || overflowActions.includes("palette")) && !["focus", "ops", "sizeAnalysis"].every((id) => overflowActions.includes(id))) {
+      issues.push({ area: "topbar-actions", reason: "primary-action-overflowed-too-early", overflowActions });
+    }
+    if (rootHidden && !contextLabels.includes("Current location")) {
+      issues.push({ area: "topbar-context", reason: "missing-current-location-in-more" });
+    }
+    if (statusHidden && !contextLabels.includes("Status")) {
+      issues.push({ area: "topbar-context", reason: "missing-status-in-more" });
+    }
+    if ((overflowActions.length || contextLabels.length) && (!moreToggle || !isVisible(moreToggle) || !moreRect || moreRect.left < -1 || moreRect.right > viewport.width + 1 || moreRect.top < -1 || moreRect.bottom > viewport.height + 1)) {
+      issues.push({ area: "topbar-more", reason: "more-toggle-unreachable", rect: moreRect ? rectData(moreRect) : null });
     }
 
     for (const element of fixedElements) {
@@ -340,6 +437,8 @@ async function inspectTopbarReachability(page) {
       issues,
       samples,
       counts: { roots: rootButtons.length, fixed: fixedElements.length },
+      actions: { visible: visibleActions, overflow: overflowActions, reachable: reachableActions },
+      context: { rootHidden, statusHidden, labels: contextLabels },
       scroll: {
         rootStrip: {
           clientWidth: rootStrip.clientWidth,
@@ -349,6 +448,42 @@ async function inspectTopbarReachability(page) {
       }
     };
   });
+}
+
+async function verifyTopbarMoreMenu(page) {
+  const toggle = page.locator("#topbar-more-toggle");
+  if (!(await toggle.isVisible())) return { issues: [], available: false };
+  const issues = [];
+  await toggle.evaluate((element) => element.click());
+  const opened = await page.evaluate(() => {
+    const menu = document.getElementById("topbar-more-menu");
+    return {
+      hidden: menu?.hidden !== false,
+      expanded: document.getElementById("topbar-more-toggle")?.getAttribute("aria-expanded"),
+      itemCount: menu?.querySelectorAll("button").length || 0,
+      focusedInMenu: Boolean(document.activeElement?.closest?.("#topbar-more-menu"))
+    };
+  });
+  if (opened.hidden || opened.expanded !== "true" || !opened.itemCount || !opened.focusedInMenu) {
+    issues.push({ area: "topbar-more", reason: "open-or-focus-failed", opened });
+  }
+  if (opened.itemCount > 1) {
+    const before = await page.evaluate(() => document.activeElement?.dataset?.topbarAction || "");
+    await page.keyboard.press("ArrowDown");
+    const after = await page.evaluate(() => document.activeElement?.dataset?.topbarAction || "");
+    if (!after || after === before) issues.push({ area: "topbar-more", reason: "arrow-navigation-failed", before, after });
+  }
+  await page.keyboard.press("Escape");
+  const escaped = await page.evaluate(() => ({
+    hidden: document.getElementById("topbar-more-menu")?.hidden === true,
+    focusRestored: document.activeElement?.id === "topbar-more-toggle"
+  }));
+  if (!escaped.hidden || !escaped.focusRestored) issues.push({ area: "topbar-more", reason: "escape-dismissal-failed", escaped });
+  await toggle.evaluate((element) => element.click());
+  await page.locator(".brand").evaluate((element) => element.click());
+  const outsideDismissed = await page.evaluate(() => document.getElementById("topbar-more-menu")?.hidden === true);
+  if (!outsideDismissed) issues.push({ area: "topbar-more", reason: "outside-click-dismissal-failed" });
+  return { issues, available: true, opened, escaped, outsideDismissed };
 }
 
 async function inspectChromeReachability(page) {
@@ -505,6 +640,18 @@ async function inspectPaneMoreMenu(page) {
   return report;
 }
 
+async function clickTopbarAction(page, actionId) {
+  const direct = page.locator(`.topbar-actions > [data-topbar-action="${actionId}"]`);
+  if (await direct.isVisible()) {
+    await direct.click();
+    return "visible";
+  }
+  const toggle = page.locator("#topbar-more-toggle");
+  await toggle.click();
+  await page.locator(`#topbar-more-menu [data-topbar-action="${actionId}"]`).click();
+  return "overflow";
+}
+
 async function verifyFocusWorkspace(page) {
   const before = await page.evaluate(() => ({
     viewportWidth: window.innerWidth,
@@ -512,7 +659,7 @@ async function verifyFocusWorkspace(page) {
     navDisplay: getComputedStyle(document.querySelector(".nav-rail")).display,
     inspectorDisplay: getComputedStyle(document.querySelector(".inspector")).display
   }));
-  await page.locator('[data-topbar-action="focus"]').click();
+  const firstPath = await clickTopbarAction(page, "focus");
   await page.waitForFunction(() => document.querySelector(".app-shell")?.classList.contains("focus-files"));
   const focused = await page.evaluate(() => ({
     paneWidth: [...document.querySelectorAll(".pane")].reduce((sum, pane) => sum + pane.getBoundingClientRect().width, 0),
@@ -520,7 +667,7 @@ async function verifyFocusWorkspace(page) {
     inspectorDisplay: getComputedStyle(document.querySelector(".inspector")).display,
     pressed: document.querySelector('[data-topbar-action="focus"]')?.getAttribute("aria-pressed")
   }));
-  await page.locator('[data-topbar-action="focus"]').click();
+  const secondPath = await clickTopbarAction(page, "focus");
   await page.waitForFunction(() => !document.querySelector(".app-shell")?.classList.contains("focus-files"));
   const restored = await page.evaluate(() => ({
     navDisplay: getComputedStyle(document.querySelector(".nav-rail")).display,
@@ -537,7 +684,7 @@ async function verifyFocusWorkspace(page) {
   if (restored.navDisplay === "none" || restored.inspectorDisplay === "none" || restored.pressed !== "false") {
     issues.push({ area: "focus-workspace", reason: "chrome-not-restored", restored });
   }
-  return { mode: "focus-workspace", before, focused, restored, issues };
+  return { mode: "focus-workspace", before, focused, restored, paths: [firstPath, secondPath], issues };
 }
 
 async function clickHorizontalLayoutToggle(page) {
@@ -810,7 +957,9 @@ async function main() {
       );
       await page.waitForSelector('.pane[data-pane="left"] [data-entry-path]', { timeout: 10000 });
       const workbenchReport = await inspectLayout(page, "workbench");
+      const navigatorScroll = await inspectNavigatorScroll(page);
       const topbarReachability = await inspectTopbarReachability(page);
+      const topbarMore = await verifyTopbarMoreMenu(page);
       const chromeReachability = await inspectChromeReachability(page);
       const paneMore = await inspectPaneMoreMenu(page);
       const focusWorkspace = await verifyFocusWorkspace(page);
@@ -826,7 +975,9 @@ async function main() {
       await page.screenshot({ path: speedScreenshot, fullPage: true });
       const issues = [
         ...workbenchReport.issues.map((issue) => ({ mode: "workbench", ...issue })),
+        ...navigatorScroll.issues.map((issue) => ({ mode: "navigator-scroll", ...issue })),
         ...topbarReachability.issues.map((issue) => ({ mode: "topbar-reachability", ...issue })),
+        ...topbarMore.issues.map((issue) => ({ mode: "topbar-more", ...issue })),
         ...chromeReachability.issues.map((issue) => ({ mode: "chrome-reachability", ...issue })),
         ...paneMore.issues.map((issue) => ({ mode: "pane-more", ...issue })),
         ...focusWorkspace.issues.map((issue) => ({ mode: "focus-workspace", ...issue })),
@@ -841,7 +992,9 @@ async function main() {
         speedTelemetry,
         issues,
         workbench: workbenchReport,
+        navigatorScroll,
         topbarReachability,
+        topbarMore,
         chromeReachability,
         paneMore,
         focusWorkspace,

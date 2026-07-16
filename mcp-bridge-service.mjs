@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 
-const protocolVersion = 1;
+const protocolVersion = 2;
 const maxFrameBytes = 4 * 1024 * 1024;
 const heartbeatTimeoutMs = 45_000;
 
@@ -72,11 +72,19 @@ export function createMcpBridgeService(options) {
       return;
     }
     if (frame.op === "cancel") {
-      connection.canceled.add(String(frame.requestId || ""));
-      writeFrame(connection.socket, { version: protocolVersion, id, type: "result", result: { canceled: true } });
+      const requestId = String(frame.requestId || "");
+      const controller = connection.inFlight.get(requestId);
+      if (controller) controller.abort();
+      writeFrame(connection.socket, {
+        version: protocolVersion,
+        id,
+        type: "result",
+        result: { canceled: Boolean(controller), requestId }
+      });
       return;
     }
-    connection.inFlight.add(id);
+    const controller = new AbortController();
+    connection.inFlight.set(id, controller);
     try {
       let result;
       if (frame.op === "invoke") {
@@ -87,7 +95,8 @@ export function createMcpBridgeService(options) {
           context: options.getContext(),
           requestId: id,
           tool: frame.tool,
-          args: frame.args || {}
+          args: frame.args || {},
+          signal: controller.signal
         });
       } else if (frame.op === "resource") {
         result = await options.backend.readMcpAutomationResource({
@@ -96,8 +105,19 @@ export function createMcpBridgeService(options) {
           clientRoots: frame.clientRoots || connection.clientRoots,
           context: options.getContext(),
           requestId: id,
-          uri: frame.uri
+          uri: frame.uri,
+          signal: controller.signal
         });
+      } else if (frame.op === "subscribe" || frame.op === "unsubscribe") {
+        const uri = String(frame.uri || "").slice(0, 2048);
+        if (!uri) {
+          const error = new Error("A resource URI is required.");
+          error.code = "INVALID_REQUEST";
+          throw error;
+        }
+        if (frame.op === "subscribe") connection.subscriptions.add(uri);
+        else connection.subscriptions.delete(uri);
+        result = { subscribed: frame.op === "subscribe", uri };
       } else if (frame.op === "contract") {
         result = await options.backend.getMcpProfileContract(connection.profileId);
       } else if (frame.op === "ping") {
@@ -107,13 +127,9 @@ export function createMcpBridgeService(options) {
         error.code = "INVALID_REQUEST";
         throw error;
       }
-      if (!connection.canceled.delete(id)) {
-        writeFrame(connection.socket, { version: protocolVersion, id, type: "result", result });
-      }
+      writeFrame(connection.socket, { version: protocolVersion, id, type: "result", result });
     } catch (error) {
-      if (!connection.canceled.delete(id)) {
-        writeFrame(connection.socket, { version: protocolVersion, id, type: "error", error: safeError(error) });
-      }
+      writeFrame(connection.socket, { version: protocolVersion, id, type: "error", error: safeError(error) });
     } finally {
       connection.inFlight.delete(id);
     }
@@ -128,6 +144,7 @@ export function createMcpBridgeService(options) {
     const close = () => {
       clearTimeout(handshakeTimer);
       if (connection) {
+        for (const controller of connection.inFlight.values()) controller.abort();
         connections.delete(connection.id);
         updateConnectionCount();
       }
@@ -168,8 +185,8 @@ export function createMcpBridgeService(options) {
             sessionId: String(frame.sessionId || crypto.randomUUID()).slice(0, 120),
             clientInfo: frame.clientInfo && typeof frame.clientInfo === "object" ? frame.clientInfo : {},
             clientRoots: Array.isArray(frame.clientRoots) ? frame.clientRoots.slice(0, 100) : [],
-            inFlight: new Set(),
-            canceled: new Set(),
+            inFlight: new Map(),
+            subscriptions: new Set(),
             lastHeartbeat: Date.now()
           };
           connections.set(connection.id, connection);
@@ -228,7 +245,10 @@ export function createMcpBridgeService(options) {
     if (disposed) return;
     disposed = true;
     clearInterval(heartbeat);
-    for (const connection of connections.values()) connection.socket.destroy();
+    for (const connection of connections.values()) {
+      for (const controller of connection.inFlight.values()) controller.abort();
+      connection.socket.destroy();
+    }
     connections.clear();
     updateConnectionCount();
     const active = server;
@@ -242,5 +262,21 @@ export function createMcpBridgeService(options) {
     }
   }
 
-  return { start, stop, status, manifestPath, pipeName };
+  function publishResourceUpdate(uri, revision = 0) {
+    const safeUri = String(uri || "").slice(0, 2048);
+    if (!safeUri) return 0;
+    let published = 0;
+    for (const connection of connections.values()) {
+      if (!connection.subscriptions.has(safeUri)) continue;
+      if (writeFrame(connection.socket, {
+        version: protocolVersion,
+        type: "resource_updated",
+        uri: safeUri,
+        revision: Math.max(0, Number(revision || 0))
+      })) published += 1;
+    }
+    return published;
+  }
+
+  return { start, stop, status, publishResourceUpdate, manifestPath, pipeName };
 }

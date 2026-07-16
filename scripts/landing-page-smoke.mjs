@@ -178,14 +178,19 @@ async function main() {
   const evidence = [];
   const errors = [];
   const release = await releaseExpectations();
-  const legacyHomepage = await fs.readFile(path.join(siteRoot, "legacy-2026-07-15.html"), "utf8");
-  addCheck(
-    checks,
-    "legacy-homepage-archive",
-    legacyHomepage.includes("Archived homepage from 15 July 2026") &&
-      legacyHomepage.includes('content="noindex,nofollow"'),
-    "Previous homepage is preserved with an archive notice and excluded from indexing"
-  );
+  for (const archive of [
+    { file: "legacy-2026-07-15.html", label: "15 July 2026" },
+    { file: "legacy-2026-07-17.html", label: "17 July 2026" }
+  ]) {
+    const legacyHomepage = await fs.readFile(path.join(siteRoot, archive.file), "utf8");
+    addCheck(
+      checks,
+      `legacy-homepage-archive-${archive.label.slice(0, 2)}`,
+      legacyHomepage.includes(`Archived homepage from ${archive.label}`) &&
+        legacyHomepage.includes('content="noindex,nofollow"'),
+      `${archive.label} homepage is preserved with an archive notice and excluded from indexing`
+    );
+  }
   const { server, baseUrl } = await startServer();
   let browser;
   try {
@@ -216,7 +221,7 @@ async function main() {
 
       const snapshot = await pageSnapshot(page, release.installerName);
       addCheck(checks, `${viewport.name}-title`, snapshot.title.includes("Explore Better"), snapshot.title);
-      addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === "Your files. Shared context.", snapshot.h1 || "Missing H1");
+      addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === "Your files. Shared control.", snapshot.h1 || "Missing H1");
       addCheck(
         checks,
         `${viewport.name}-brand-system`,

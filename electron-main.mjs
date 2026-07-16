@@ -94,9 +94,33 @@ let mcpRendererContext = {
   panes: { left: { activeTabId: "", path: "", tabs: [] }, right: { activeTabId: "", path: "", tabs: [] } },
   selection: [],
   focusedPath: "",
+  ui: {
+    status: "",
+    toast: { visible: false, text: "" },
+    openDialogs: [],
+    activeControl: null,
+    lastInteraction: null,
+    navigator: {
+      visible: false,
+      scroll: { clientHeight: 0, scrollHeight: 0, overflowY: "visible", scrollOwner: false },
+      folderTree: {
+        renderedNodes: 0,
+        expandedNodes: 0,
+        loadingNodes: 0,
+        errorCount: 0,
+        activeNodeVisible: false,
+        truncated: false,
+        messages: []
+      },
+      sections: []
+    },
+    terminals: [],
+    update: { visible: false, title: "", message: "" }
+  },
   contextRevision: 0
 };
 const mcpUiRequests = new Map();
+const mcpUiWaiters = new Set();
 const disableGpuMode =
   smokeMode ||
   terminalBrokerMode ||
@@ -505,6 +529,110 @@ function rendererIsTrusted(event) {
   return Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents);
 }
 
+function normalizeMcpUiText(value, maxLength = 500) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function normalizeMcpUiControl(input = {}) {
+  return {
+    id: normalizeMcpUiText(input.id, 100),
+    tag: normalizeMcpUiText(input.tag, 30),
+    role: normalizeMcpUiText(input.role, 40),
+    label: normalizeMcpUiText(input.label, 260),
+    action: normalizeMcpUiText(input.action, 100),
+    actionValue: normalizeMcpUiText(input.actionValue, 100),
+    disabled: input.disabled === true,
+    checked: input.checked === true,
+    pressed: input.pressed === true,
+    expanded: input.expanded === true,
+    selected: input.selected === true
+  };
+}
+
+function normalizeMcpUiScroll(input = {}) {
+  const clientHeight = Math.max(0, Math.min(1_000_000, Number(input.clientHeight || 0)));
+  const scrollHeight = Math.max(0, Math.min(1_000_000, Number(input.scrollHeight || 0)));
+  return {
+    clientHeight,
+    scrollHeight,
+    overflowY: ["auto", "scroll", "visible", "hidden", "clip"].includes(input.overflowY) ? input.overflowY : "visible",
+    scrollOwner: input.scrollOwner === true && scrollHeight > clientHeight + 1
+  };
+}
+
+function normalizeMcpUiCount(value, maximum = 100_000) {
+  return Math.max(0, Math.min(maximum, Math.floor(Number(value || 0))));
+}
+
+function normalizeMcpUiContext(input = {}) {
+  const lastInteraction = input.lastInteraction && typeof input.lastInteraction === "object"
+    ? {
+        kind: ["click", "keyboard"].includes(input.lastInteraction.kind) ? input.lastInteraction.kind : "interaction",
+        controlId: normalizeMcpUiText(input.lastInteraction.controlId, 100),
+        tag: normalizeMcpUiText(input.lastInteraction.tag, 30),
+        action: normalizeMcpUiText(input.lastInteraction.action, 100),
+        actionValue: normalizeMcpUiText(input.lastInteraction.actionValue, 100),
+        dialogId: normalizeMcpUiText(input.lastInteraction.dialogId, 100),
+        key: normalizeMcpUiText(input.lastInteraction.key, 40),
+        source: input.lastInteraction.source === "mcp" ? "mcp" : "user",
+        correlationId: normalizeMcpUiText(input.lastInteraction.correlationId, 120),
+        at: normalizeMcpUiText(input.lastInteraction.at, 40)
+      }
+    : null;
+  return {
+    status: normalizeMcpUiText(input.status),
+    toast: {
+      visible: input.toast?.visible === true,
+      text: normalizeMcpUiText(input.toast?.text)
+    },
+    openDialogs: (Array.isArray(input.openDialogs) ? input.openDialogs : []).slice(0, 12).map((dialog) => ({
+      id: normalizeMcpUiText(dialog?.id, 100),
+      title: normalizeMcpUiText(dialog?.title, 260),
+      summary: normalizeMcpUiText(dialog?.summary),
+      state: ["loading", "ready", "error"].includes(dialog?.state) ? dialog.state : "ready",
+      modal: dialog?.modal === true,
+      controls: (Array.isArray(dialog?.controls) ? dialog.controls : []).slice(0, 80).map(normalizeMcpUiControl)
+    })),
+    activeControl: input.activeControl && typeof input.activeControl === "object" ? normalizeMcpUiControl(input.activeControl) : null,
+    lastInteraction,
+    navigator: {
+      visible: input.navigator?.visible === true,
+      scroll: normalizeMcpUiScroll(input.navigator?.scroll),
+      folderTree: input.navigator?.folderTree && typeof input.navigator.folderTree === "object"
+        ? {
+            renderedNodes: normalizeMcpUiCount(input.navigator.folderTree.renderedNodes),
+            expandedNodes: normalizeMcpUiCount(input.navigator.folderTree.expandedNodes),
+            loadingNodes: normalizeMcpUiCount(input.navigator.folderTree.loadingNodes),
+            errorCount: normalizeMcpUiCount(input.navigator.folderTree.errorCount),
+            activeNodeVisible: input.navigator.folderTree.activeNodeVisible === true,
+            truncated: input.navigator.folderTree.truncated === true,
+            messages: (Array.isArray(input.navigator.folderTree.messages) ? input.navigator.folderTree.messages : [])
+              .slice(0, 8)
+              .map((message) => normalizeMcpUiText(message, 180))
+          }
+        : null,
+      sections: (Array.isArray(input.navigator?.sections) ? input.navigator.sections : []).slice(0, 30).map((section) => ({
+        id: normalizeMcpUiText(section?.id, 100),
+        title: normalizeMcpUiText(section?.title, 100),
+        itemCount: Math.max(0, Math.min(10_000, Number(section?.itemCount || 0))),
+        scroll: normalizeMcpUiScroll(section?.scroll)
+      }))
+    },
+    terminals: (Array.isArray(input.terminals) ? input.terminals : []).slice(0, 2).map((terminal) => ({
+      pane: terminal?.pane === "right" ? "right" : "left",
+      visible: terminal?.visible === true,
+      session: terminal?.session === true,
+      state: ["idle", "starting", "ready", "busy", "exited", "error"].includes(terminal?.state) ? terminal.state : "idle",
+      elevated: terminal?.elevated === true
+    })),
+    update: {
+      visible: input.update?.visible === true,
+      title: normalizeMcpUiText(input.update?.title, 260),
+      message: normalizeMcpUiText(input.update?.message)
+    }
+  };
+}
+
 function normalizeMcpRendererContext(input = {}) {
   const panes = {};
   for (const paneId of ["left", "right"]) {
@@ -528,11 +656,120 @@ function normalizeMcpRendererContext(input = {}) {
     panes,
     selection: (Array.isArray(input.selection) ? input.selection : []).slice(0, 100).map((item) => String(item).slice(0, 32768)),
     focusedPath: String(input.focusedPath || "").slice(0, 32768),
+    ui: normalizeMcpUiContext(input.ui),
     contextRevision: Math.max(mcpRendererContext.contextRevision + 1, Number(input.contextRevision || 0))
   };
 }
 
+const mcpViewDialogIds = Object.freeze({
+  operations: "ops-dialog",
+  appTrash: "trash-dialog",
+  windowsRecycleBin: "trash-dialog",
+  search: "search-dialog",
+  indexManager: "speed-dialog",
+  diskUsage: "size-analysis-dialog",
+  duplicates: "duplicates-dialog",
+  compare: "compare-dialog",
+  flat: "flat-dialog",
+  viewer: "viewer-dialog",
+  editor: "text-editor-dialog",
+  properties: "properties-dialog",
+  checksums: "checksums-dialog",
+  collections: "collections-dialog",
+  labels: "labels-dialog",
+  filters: "filters-dialog",
+  selectionSets: "selection-sets-dialog",
+  basket: "basket-dialog",
+  layouts: "layouts-dialog",
+  tabGroups: "tab-groups-dialog",
+  aliases: "aliases-dialog",
+  snapshots: "snapshots-dialog",
+  columns: "columns-dialog",
+  formats: "formats-dialog",
+  toolbar: "toolbar-dialog",
+  hotkeys: "hotkeys-dialog",
+  backup: "backup-dialog",
+  tools: "tools-dialog",
+  scripts: "script-dialog",
+  attributes: "attributes-dialog",
+  timestamps: "timestamps-dialog",
+  openWith: "open-with-dialog",
+  shellVerbs: "shell-verbs-dialog",
+  transfer: "transfer-dialog",
+  destination: "destination-dialog",
+  archive: "archive-dialog",
+  bulkRename: "bulk-dialog",
+  integration: "integration-dialog",
+  preferences: "preferences-dialog",
+  commandCenter: "command-dialog",
+  manual: "manual-dialog",
+  devices: "devices-dialog",
+  health: "health-dialog"
+});
+
+function mcpUiConditionMatches(context, condition = {}) {
+  const dialogs = context.ui?.openDialogs || [];
+  const requestedDialogId = String(condition.dialogId || mcpViewDialogIds[condition.view] || "");
+  const dialogVisible = requestedDialogId ? dialogs.some((dialog) => dialog.id === requestedDialogId) : null;
+  if (requestedDialogId) {
+    const expectedVisible = typeof condition.visible === "boolean" ? condition.visible : true;
+    if (dialogVisible !== expectedVisible) return false;
+  }
+  const includes = (value, query) => String(value || "").toLocaleLowerCase().includes(String(query || "").toLocaleLowerCase());
+  if (condition.statusIncludes && !includes(context.ui?.status, condition.statusIncludes)) return false;
+  if (condition.toastIncludes && !includes(context.ui?.toast?.text, condition.toastIncludes)) return false;
+  if (condition.activePane && context.activePane !== condition.activePane) return false;
+  if (Number.isInteger(condition.selectionCountAtLeast) && context.selection.length < condition.selectionCountAtLeast) return false;
+  return true;
+}
+
+function settleMcpUiWaiters() {
+  for (const waiter of [...mcpUiWaiters]) {
+    if (mcpRendererContext.contextRevision <= waiter.afterRevision) continue;
+    if (!mcpUiConditionMatches(mcpRendererContext, waiter.condition)) continue;
+    waiter.finish({ matched: true, reason: "condition-matched", context: mcpRendererContext });
+  }
+}
+
+function waitForMcpUi(action = {}) {
+  const afterRevision = Math.max(0, Number(action.afterRevision || 0));
+  const timeoutMs = Math.max(100, Math.min(30_000, Number(action.timeoutMs || 10_000)));
+  if (mcpRendererContext.contextRevision > afterRevision && mcpUiConditionMatches(mcpRendererContext, action.condition)) {
+    return Promise.resolve({ matched: true, reason: "condition-already-matched", context: mcpRendererContext });
+  }
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const waiter = {
+      afterRevision,
+      condition: action.condition || {},
+      finish(result, error) {
+        if (done) return;
+        done = true;
+        clearTimeout(timeout);
+        action.signal?.removeEventListener?.("abort", onAbort);
+        mcpUiWaiters.delete(waiter);
+        if (error) reject(error);
+        else resolve(result);
+      }
+    };
+    const onAbort = () => {
+      const error = new Error("The AI Bridge wait was canceled.");
+      error.code = "REQUEST_CANCELED";
+      error.retryable = true;
+      waiter.finish(null, error);
+    };
+    const timeout = setTimeout(() => {
+      waiter.finish({ matched: false, reason: "timeout", context: mcpRendererContext });
+    }, timeoutMs);
+    timeout.unref?.();
+    mcpUiWaiters.add(waiter);
+    if (action.signal?.aborted) onAbort();
+    else action.signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
+
 function dispatchMcpUiAction(action) {
+  if (action?.type === "wait") return waitForMcpUi(action);
   return new Promise(async (resolve, reject) => {
     try {
       if (!mainWindow || mainWindow.isDestroyed()) await showLister();
@@ -600,6 +837,7 @@ async function ensureMcpBridge() {
     dispatchUiAction: dispatchMcpUiAction,
     onConnectionCountChanged: handleMcpConnectionCount
   });
+  backend.setMcpResourceUpdatePublisher?.((uri, revision) => mcpBridgeService?.publishResourceUpdate?.(uri, revision));
   const bridgeStatus = await mcpBridgeService.start();
   ensureMcpTray();
   scheduleMcpHeadlessExit(bridgeStatus.clients);
@@ -609,6 +847,8 @@ async function ensureMcpBridge() {
 ipcMain.on("explore-better:mcp-context", (event, context) => {
   if (!rendererIsTrusted(event)) return;
   mcpRendererContext = normalizeMcpRendererContext(context);
+  settleMcpUiWaiters();
+  mcpBridgeService?.publishResourceUpdate?.("explore-better://context/current", mcpRendererContext.contextRevision);
 });
 
 ipcMain.on("explore-better:mcp-ui-action-result", (event, response) => {
@@ -1053,6 +1293,17 @@ async function showLister(targetPath = null, shellMode = null) {
     minWidth: 980,
     minHeight: 660,
     title: "Explore Better",
+    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",
+    autoHideMenuBar: true,
+    ...(process.platform !== "darwin"
+      ? {
+          titleBarOverlay: {
+            color: "#111a17",
+            symbolColor: "#f9faf8",
+            height: 44
+          }
+        }
+      : {}),
     icon: appIconPath,
     backgroundColor: "#f1f3ee",
     show: false,
@@ -1109,7 +1360,7 @@ async function showLister(targetPath = null, shellMode = null) {
   mainWindow.on("closed", () => {
     terminalService?.disposeWebContents(rendererWebContentsId);
     mainWindow = null;
-    mcpRendererContext = { ...mcpRendererContext, live: false, selection: [], focusedPath: "" };
+    mcpRendererContext = { ...mcpRendererContext, live: false, selection: [], focusedPath: "", ui: normalizeMcpUiContext({}) };
     handleMcpConnectionCount(mcpBridgeService?.status().clients || 0);
   });
   await mainWindow.loadURL(targetUrl);

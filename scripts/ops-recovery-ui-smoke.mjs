@@ -607,12 +607,22 @@ async function main() {
     const retryState = await waitForNodeCondition(async () => {
       const state = await requestJson(baseUrl, "/api/state");
       const operation = (state.operations || []).find((item) => item.retryOf === "running-copy");
+      const source = summarizeOperation(operationById(state, "running-copy"));
       return {
-        ok: operation?.status === "completed",
+        ok:
+          operation?.status === "completed" &&
+          source.recovery?.lastSelectedRetryOperationId === operation.id,
         operation: summarizeOperation(operation),
-        source: summarizeOperation(operationById(state, "running-copy"))
+        source
       };
     }, "selected recovery retry operation");
+    await waitForNodeCondition(
+      async () => ({
+        ok: apiEvents.some((event) => event.endpoint === "/api/operation/retry-selected" && event.status === 200),
+        events: apiEvents
+      }),
+      "selected recovery retry response"
+    );
     detailsAfterRetry = await detailsSnapshot(page);
     opsAfterRetry = await opsSnapshot(page);
 

@@ -861,7 +861,7 @@ const coverageAreas = [
           (item) => item.path === data.fixturePaths?.labelledPath && /aurora ledger/i.test(item.text || "")
         );
         const endpoints = data.endpointCounts || {};
-        const endpointsOk = endpoints["/api/background-indexes/search"] >= 2 && !endpoints["/api/search"];
+        const endpointsOk = endpoints["/api/background-indexes/search"] >= 2 && endpoints["/api/search"] >= 2;
         const layoutOk = !Array.isArray(data.layout?.issues) || data.layout.issues.length === 0;
         return contentHit && scopedOut && labelHit && endpointsOk && layoutOk
           ? pass("Search dialog used the warm background cache for scoped content and label-note results.")
@@ -1088,17 +1088,17 @@ const coverageAreas = [
           return fail(`Power-tools UI smoke status is ${data.status || "missing"} with ${countFailedChecks(data)} failures.`);
         }
         const flatOk = /items/.test(data.flat?.summary || "") && data.flat?.hasFlatTarget === true;
-        const duplicateOk = /1 groups/.test(data.duplicates?.summary || "") && data.duplicates?.hasBothDuplicates === true;
+        const duplicateOk = /1 groups?/.test(data.duplicates?.summary || "") && data.duplicates?.hasBothDuplicates === true;
         const compareRows = data.compare?.compare?.statuses || [];
         const compareOk =
-          compareRows.some((text) => String(text).includes("leftOnly")) &&
-          compareRows.some((text) => String(text).includes("rightOnly")) &&
-          compareRows.some((text) => String(text).includes("newerLeft"));
+          compareRows.some((text) => /(?:leftOnly|Only on left)/i.test(String(text))) &&
+          compareRows.some((text) => /(?:rightOnly|Only on right)/i.test(String(text))) &&
+          compareRows.some((text) => /(?:newerLeft|Newer on left)/i.test(String(text)));
         const previewRows = data.compare?.preview?.rows || [];
         const previewOk =
           /planned/.test(data.compare?.preview?.summary || "") &&
-          previewRows.some((text) => String(text).includes("copy")) &&
-          previewRows.some((text) => String(text).includes("overwrite")) &&
+          previewRows.some((text) => /copy/i.test(String(text))) &&
+          previewRows.some((text) => /(?:overwrite|replace)/i.test(String(text))) &&
           data.diskProof?.rightUpdateUnchanged === true &&
           data.diskProof?.leftOnlyNotCopied === true;
         if (!flatOk || !duplicateOk || !compareOk || !previewOk) {
@@ -1512,7 +1512,7 @@ const coverageAreas = [
         const foldersOk = (data.ui?.folders || []).some((row) => /media/i.test(row));
         const fileOk = (data.ui?.files || []).some((row) => /movie\.mkv/i.test(row));
         const extensionOk = (data.ui?.extensions || []).some((row) => /\.mkv/i.test(row));
-        const scanStripOk = /(Scan complete|Warm cache)/i.test(data.ui?.scanStrip || "");
+        const scanStripOk = /(Scan complete|Warm cache|Cached result)/i.test(data.ui?.scanStrip || "");
         const bandOk = (data.ui?.bands || []).length >= 4;
         const spaceOk = data.apiReport?.space?.available === true && Number(data.apiReport?.space?.totalBytes || 0) > 0;
         const treemapOk = Number(data.ui?.canvas?.coloredPixels || 0) > 500;

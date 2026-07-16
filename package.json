@@ -1,6 +1,6 @@
 {
   "name": "explore-better",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -32,6 +32,8 @@
     "build:mcp-server": "node scripts/build-mcp-server.mjs",
     "build:mcpb": "npm run build:icon && npm run build:mcp-server && node scripts/build-mcpb.mjs",
     "build:site-pages": "npm run build:icon && node scripts/build-site-discovery-pages.mjs",
+    "archive:site-homepage": "node scripts/archive-site-homepage.mjs",
+    "build:site-release": "node scripts/update-site-release.mjs",
     "build:app": "node scripts/build-app.mjs",
     "build:terminal": "node scripts/build-terminal.mjs",
     "build:renderer": "npm run build:app && npm run build:terminal",
@@ -61,6 +63,10 @@
     "verify:operations": "node scripts/operation-preview-smoke.mjs",
     "verify:operation-preview-scale": "node scripts/operation-preview-scale-smoke.mjs",
     "verify:power-tools-ui": "node scripts/power-tools-ui-smoke.mjs",
+    "verify:checksums-ui": "node scripts/checksums-ui-smoke.mjs",
+    "verify:organizer-ui": "node scripts/organizer-ui-smoke.mjs",
+    "verify:preview-editor-properties-ui": "node scripts/preview-editor-properties-ui-smoke.mjs",
+    "verify:preferences-ui": "node scripts/preferences-ui-smoke.mjs",
     "verify:operation-journal": "node scripts/operation-journal-integrity-smoke.mjs",
     "verify:transactional-operations": "node scripts/transactional-operations-smoke.mjs",
     "verify:operation-journal-concurrency": "node scripts/operation-journal-concurrency-smoke.mjs",
@@ -119,6 +125,7 @@
     "verify:native-shell-readiness": "node scripts/native-shell-readiness-smoke.mjs",
     "verify:shell": "node scripts/shell-locations-smoke.mjs",
     "verify:windows-recycle": "node scripts/windows-recycle-smoke.mjs",
+    "verify:trash-recovery-ui": "node scripts/trash-recovery-ui-smoke.mjs",
     "verify:zip-browse": "node scripts/zip-browse-smoke.mjs",
     "verify:background-index": "node scripts/background-index-smoke.mjs",
     "verify:background-index-freshness": "node scripts/background-index-freshness-smoke.mjs",
@@ -135,10 +142,12 @@
     "verify:search-background-ui": "node scripts/search-background-ui-smoke.mjs",
     "verify:interaction-resize": "node scripts/interaction-resize-smoke.mjs",
     "verify:default-explorer-ui": "node scripts/default-explorer-ui-smoke.mjs",
+    "verify:folder-tree-ui": "node scripts/folder-tree-ui-smoke.mjs",
     "verify:adaptive-pane-chrome": "node scripts/adaptive-pane-chrome-ui-smoke.mjs",
     "verify:workspace-panels-ui": "node scripts/workspace-panels-ui-smoke.mjs",
     "verify:pane-activity": "node scripts/pane-activity-ui-smoke.mjs",
     "verify:dual-pane-safety": "node scripts/dual-pane-safety-ui-smoke.mjs",
+    "verify:pane-navigation-ui": "node scripts/pane-navigation-ui-smoke.mjs",
     "verify:layout": "node scripts/layout-verify.mjs",
     "verify:pane-layout-no-scrollbars": "node scripts/pane-layout-no-scrollbars-smoke.mjs",
     "verify:size-analysis-ui": "node scripts/size-analysis-ui-smoke.mjs",
@@ -153,20 +162,26 @@
     "verify:mcp-contract": "node scripts/mcp-contract-smoke.mjs",
     "verify:mcp-security": "node scripts/mcp-security-smoke.mjs",
     "verify:mcp-context": "node scripts/mcp-context-smoke.mjs",
+    "verify:mcp-ui-views": "node scripts/mcp-ui-views-smoke.mjs",
     "verify:mcp-analysis": "node scripts/mcp-analysis-smoke.mjs",
     "verify:mcp-operations": "node scripts/mcp-operations-smoke.mjs",
     "verify:mcp-clients": "node scripts/mcp-clients-smoke.mjs",
     "verify:mcpb": "node scripts/mcpb-smoke.mjs",
     "verify:mcp-performance": "node scripts/mcp-performance-smoke.mjs",
+    "verify:mcp-semantic-ui": "node scripts/mcp-semantic-ui-smoke.mjs",
+    "verify:mcp-operation-wait": "node scripts/mcp-operation-wait-smoke.mjs",
     "verify:mcp-value": "node scripts/mcp-value-benchmark.mjs",
+    "verify:health-devices-support": "node scripts/health-devices-support-smoke.mjs",
+    "verify:navigator-product-ui": "node scripts/navigator-pinned-recent-ui-smoke.mjs",
+    "inspect:mcp-live": "node scripts/mcp-live-context.mjs --summary",
     "verify:packaged-mcp": "node scripts/packaged-mcp-smoke.mjs",
     "acceptance:mcp-inspector": "node scripts/mcp-inspector-smoke.mjs",
     "prepackage:dir": "npm run build:icon && npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
-    "package:dir": "electron-builder --dir",
+    "package:dir": "node scripts/run-electron-builder.mjs --dir",
     "prepackage:win": "npm run build:icon && npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
-    "package:win": "electron-builder --win portable",
+    "package:win": "node scripts/run-electron-builder.mjs --win portable",
     "prepackage:installer": "npm run build:icon && npm run build:renderer && npm run build:native-helper && npm run build:mcp-server",
-    "package:installer": "electron-builder --win nsis"
+    "package:installer": "node scripts/run-electron-builder.mjs --win nsis"
   },
   "engines": {
     "node": ">=20"
@@ -176,8 +191,7 @@
     "electron-builder": "^26.15.3",
     "esbuild": "0.28.1",
     "lucide-static": "^1.24.0",
-    "playwright-core": "^1.61.1",
-    "yazl": "3.3.1"
+    "playwright-core": "^1.61.1"
   },
   "build": {
     "appId": "io.github.terrorproforma.explorebetter",
@@ -258,6 +272,7 @@
     "electron-updater": "^6.8.9",
     "jsonc-parser": "3.3.1",
     "node-pty": "1.1.0",
-    "yauzl": "^3.4.0"
+    "yauzl": "^3.4.0",
+    "yazl": "3.3.1"
   }
 }

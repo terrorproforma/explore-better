@@ -174,6 +174,25 @@ async function updatePublicBenchmarkTable(report) {
     }
   }
   await fs.writeFile(pagePath, html, "utf8");
+
+  const homepagePath = path.join(root, "site", "index.html");
+  let homepage = await fs.readFile(homepagePath, "utf8");
+  for (const workflow of report.workflows) {
+    const values = {
+      [`${workflow.id}:mcp`]: `${workflow.mcp.medianMs} ms`,
+      [`${workflow.id}:powershell`]: `${workflow.powershell.medianMs} ms`
+    };
+    for (const [key, value] of Object.entries(values)) {
+      const pattern = new RegExp(`(<span data-benchmark="${key}">)[^<]*(</span>)`);
+      assert(pattern.test(homepage), `Homepage is missing benchmark value ${key}.`);
+      homepage = homepage.replace(pattern, `$1${value}$2`);
+    }
+    const ratio = Math.round((workflow.powershell.medianMs / workflow.mcp.medianMs) * 10) / 10;
+    const ratioPattern = new RegExp(`(<strong data-benchmark-ratio="${workflow.id}">)[^<]*(</strong>)`);
+    assert(ratioPattern.test(homepage), `Homepage is missing benchmark ratio ${workflow.id}.`);
+    homepage = homepage.replace(ratioPattern, `$1${ratio}×$2`);
+  }
+  await fs.writeFile(homepagePath, homepage, "utf8");
 }
 
 async function main() {
@@ -321,6 +340,32 @@ $top = @($files | Sort-Object Length -Descending | Select-Object -First 10 | For
       const context = await callTool("get_context");
       return context.structured?.data?.live ? context : null;
     }, 30_000, 200);
+    const semanticCatalogResponse = await callTool("list_ui_actions", { includeDisabled: true });
+    const semanticCatalog = semanticCatalogResponse.structured?.data?.actions || [];
+    const semanticTargetPane = liveContext.structured?.data?.activePane === "left" ? "right" : "left";
+    const semanticWaitStartedAt = performance.now();
+    const semanticWaitPromise = callTool("wait_for_ui", {
+      afterRevision: liveContext.structured?.data?.contextRevision,
+      timeoutMs: 5_000,
+      condition: { activePane: semanticTargetPane }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const semanticAction = await callTool("invoke_ui_action", {
+      actionId: "pane.activate",
+      pane: semanticTargetPane,
+      inputs: {},
+      expectedContextRevision: liveContext.structured?.data?.contextRevision
+    });
+    const semanticWait = await semanticWaitPromise;
+    const semanticWaitElapsedMs = roundMs(performance.now() - semanticWaitStartedAt);
+    const semanticCorrelationId = semanticAction.structured?.data?.correlationId || "";
+    const semanticContext = await waitFor(async () => {
+      const context = await callTool("get_context");
+      const data = context.structured?.data;
+      return data?.activePane === semanticTargetPane && data?.ui?.lastInteraction?.correlationId === semanticCorrelationId
+        ? context
+        : null;
+    }, 10_000, 100);
     const show = await callTool("show_in_explore_better", { path: canonicalContextFolder, pane: "left", mode: "newTab" });
     assert(!show.result.isError, `MCP UI navigation failed: ${JSON.stringify(show.structured?.error)}`);
     const navigatedContext = await waitFor(async () => {
@@ -448,6 +493,18 @@ $top = @($files | Sort-Object Length -Descending | Select-Object -First 10 | For
         label: "File-manager-specific allocation semantics",
         passed: mcpAnalysisRuns.every((item) => ["exact", "estimated", "unknown"].includes(item.allocationAccuracy)) && mcpAnalysisRuns.some((item) => Number.isFinite(item.allocatedBytes)),
         detail: `Analyzer returned labeled ${mcpAnalysisRuns[0].allocationAccuracy} allocation data; the generic PowerShell baseline reported logical bytes only.`
+      },
+      {
+        id: "semantic-ui-control",
+        label: "Selector-free semantic UI control",
+        passed:
+          semanticCatalog.length >= 20 &&
+          semanticCatalog.every((action) => action.id && action.inputSchema?.type === "object" && typeof action.enabled === "boolean") &&
+          semanticAction.result?.isError !== true &&
+          semanticWait.structured?.data?.matched === true &&
+          semanticWaitElapsedMs < 1_000 &&
+          semanticContext.structured?.data?.ui?.lastInteraction?.source === "mcp",
+        detail: `${semanticCatalog.length} stable actions were discoverable; pane.activate produced a correlated visible result and event-driven wait wake-up in ${semanticWaitElapsedMs} ms without selectors or scripts.`
       }
     ];
 

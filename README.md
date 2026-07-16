@@ -87,10 +87,11 @@ You can make the same change later from **Integrate** > **Make Default**, add th
 - Progressive first paint instead of waiting for an entire directory to hydrate.
 - Virtualized file lists that keep only a small visible row window in the DOM.
 - Shared listing work for matching panes, cached metadata, bounded prefetching, and background hydration.
+- An automatic foreground-activity coordinator pauses and aborts speculative work during navigation, search, analysis, file operations, or while the app is hidden, then resumes it without duplicating cached requests.
 - Native Win32 enumeration for local folders with a Node fallback for unsupported paths and platforms.
 - Persistent Speed Index and Background Index options for repeated searches.
 
-The current 100,000-entry acceptance fixture records a 403.3 ms median first visible window, 1,216.3 ms median full hydration, and 45 rendered rows.
+The current 100,000-entry acceptance fixture records a 101.5 ms median first visible window, 616.7 ms median full hydration, and 47 rendered rows.
 
 ### Transactional File Operations
 
@@ -98,6 +99,7 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 - Conflict previews with rename, overwrite, and skip policies before files are changed.
 - Destination-volume staging and overwrite backups for recoverable commits.
 - Operation queue with progress, transfer rate, ETA, pause, resume, cancel, retry, and undo metadata.
+- A bounded chronological timeline records queueing, phases, progress milestones, cancellation, retry, Undo, recovery, and completion, with related operations linked in both directions.
 - Startup reconciliation for interrupted operations and cross-volume moves awaiting source removal.
 - Protection against drive-root deletion, app-state deletion, recursive source/destination mistakes, and stale destructive previews.
 
@@ -132,7 +134,7 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 
 ### Organization And Workspaces
 
-- Favorites, path aliases, recent folders, and expandable folder trees.
+- A compact Pinned section presents Favorites and path aliases together without merging their persisted models, followed by the primary Folder Tree, meaningful connected Devices, Quick Access, Drives, and up to eight Recent locations with an explicit show-all control.
 - Named layouts that restore panes, tabs, filters, sorting, view modes, and panel sizes.
 - Folder Tab Groups, File Collections, Selection Sets, and Pane Snapshots.
 - File Basket for gathering paths from multiple locations before a batch action.
@@ -151,6 +153,8 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 ### Command Center And Automation
 
 - Searchable command palette with fuzzy matching, pins, history, and hotkey badges.
+- Every command identifies whether it stays in Explore Better, requests File Explorer, launches an external app, or opens a Windows dialog, and explains the expected result.
+- The Electron title bar stays on one 44 px row from 390 through 1920 px; measured overflow collapses labels and moves Focus, Operations, then Disk Map into a keyboard-accessible More menu before Search or Command.
 - Custom command dock profiles for frequently used actions.
 - Saved trusted PowerShell or Command Prompt tools with captured output.
 - Saved trusted scripts with a bounded file-management API.
@@ -172,6 +176,8 @@ The current 100,000-entry acceptance fixture records a 403.3 ms median first vis
 - A bundled `ExploreBetterMcp.exe` stdio server for Codex, Claude Desktop, Cursor, VS Code, ChatGPT-compatible clients, and generic MCP hosts.
 - Live structured context for active panes, stable tab IDs, visible selection, focused item, layout, and a monotonic context revision.
 - Typed tools for bounded listing, indexed search, path inspection, text reading, checksums, disk analysis, duplicates, folder comparison, collections, labels, and operation recovery.
+- A renderer-owned semantic UI registry exposes bounded, selector-free navigation and form actions through `list_ui_actions` and `invoke_ui_action`; `wait_for_ui` and MCP resource subscriptions provide cancelable, event-driven observation without polling.
+- The additive v1 contract contains 32 tools, 6 resources, 4 prompts, and 43 controlled views, including Devices and Health. Existing profiles keep their saved permissions; only newly created profiles receive the new safe defaults.
 - Durable background jobs with progress, cancellation, paginated results, and bounded output for very large folders.
 - Read-only profiles by default, separately revocable per client, with explicit authorized folders and individual tool permissions.
 - Every write uses a planner and a one-use 120-second apply token bound to the client session, paths, plan digest, conflict policy, and filesystem signatures.
@@ -186,8 +192,8 @@ Yes, for the parts of file work where a terminal is too broad or too text-orient
 The current evidence proves:
 
 - 3 of 3 shared search, duplicate, and disk-analysis workflows return the correct known result through both interfaces;
-- 6 of 6 MCP-specific controls pass, including schema discovery, bounded pagination, live pane navigation, authorized-root denial, read-only capability reduction, and labeled allocated-size data;
-- on the measured fixture, MCP recorded 54.7x lower median latency for filename search, 6.2x for disk analysis, and 4.5x for duplicate finding than equivalent fresh PowerShell processes;
+- 7 of 7 MCP-specific controls pass, including schema discovery, bounded pagination, live pane navigation, semantic UI action and wait correlation, authorized-root denial, read-only capability reduction, and labeled allocated-size data;
+- on the measured fixture, MCP recorded 148.3x lower median latency for filename search, 4.7x for disk analysis, and 5.3x for duplicate finding than equivalent fresh PowerShell processes;
 - the comparison discloses that PowerShell timings include fresh process startup and does not claim MCP is universally faster than a persistent warm shell.
 
 MCP complements the terminal. Use the terminal for arbitrary commands and system administration. Use MCP when an AI needs Explore Better's live panes, selections, indexes, Analyzer, client-specific folder authority, or preview/apply operations backed by the transaction journal.
@@ -198,9 +204,12 @@ Reproduce the focused proof on Windows:
 npm run verify:mcp-value
 ```
 
-### Windows Shell And Explorer Replacement
+### Devices, Health, And Windows Integration
 
-- Navigator access to This PC, drives, libraries, Network, Recycle Bin, and discovered shell locations.
+- A capability-aware Devices & Windows locations dashboard separates connected devices, drives, mapped network locations, libraries, and virtual Windows locations. Initial loading never waits for the slower Network provider.
+- Device actions say exactly whether they browse in Explore Better, open in the active pane, or request Windows File Explorer; unsupported actions are not rendered.
+- Health & diagnostics reports renderer, backend, native helper, MCP bridge, shell provider, cache, index, queue, updater, package, and adaptive scheduler state. A streamed support bundle is path-redacted by default, never includes file or terminal contents or secrets, and is capped at 10 MB.
+- Explorer replacement and Windows integration remain optional and reversible per user.
 - ZIP browsing as read-only virtual folders without extracting first.
 - Windows file clipboard and drag/drop interoperability with Explorer and the desktop.
 - Recycle Bin browsing and native restore support.
@@ -329,8 +338,12 @@ npm run verify:mcp-contract
 npm run verify:mcp-security
 npm run verify:mcp-context
 npm run verify:mcp-operations
+npm run verify:mcp-semantic-ui
+npm run verify:mcp-operation-wait
 npm run verify:packaged-mcp
 npm run verify:mcp-value
+npm run verify:health-devices-support
+npm run verify:navigator-product-ui
 npm run verify:seo-discovery
 npm run verify:layout
 npm run verify:speed-health

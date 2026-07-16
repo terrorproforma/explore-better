@@ -187,9 +187,9 @@ async function main() {
       { timeout: 10000 }
     );
     evidence.error = await activitySnapshot(page);
-    check(checks, "missing-path-pane-error", evidence.error.left.busy === "false" && /could not open/i.test(evidence.error.left.label), JSON.stringify(evidence.error.left));
+    check(checks, "missing-path-pane-error", evidence.error.left.busy === "false" && /(?:could not open|folder not found)/i.test(evidence.error.left.label), JSON.stringify(evidence.error.left));
     check(checks, "missing-path-preserves-pane", evidence.error.leftPath === leftFixture && evidence.error.left.rows === 2, JSON.stringify(evidence.error));
-    check(checks, "missing-path-global-error", /Could not open/.test(evidence.error.globalStatus), evidence.error.globalStatus);
+    check(checks, "missing-path-global-error", /(?:Could not open|Folder not found)/.test(evidence.error.globalStatus), evidence.error.globalStatus);
     const unexpectedConsoleErrors = consoleErrors.filter(
       (message) => !/Failed to load resource: the server responded with a status of 500/i.test(message)
     );

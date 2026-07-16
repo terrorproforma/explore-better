@@ -402,7 +402,7 @@ async function main() {
     await page.locator('[data-size-analysis-action="scan"]').click();
     await page.waitForFunction(
       () =>
-        /Warm cache/i.test(document.getElementById("size-analysis-scan-strip")?.textContent || "") &&
+        /Cached result/i.test(document.getElementById("size-analysis-scan-strip")?.textContent || "") &&
         document.getElementById("size-analysis-cancel")?.disabled === true,
       null,
       { timeout: 5000 }
@@ -553,9 +553,9 @@ async function main() {
       Number(warmRenderProbe?.wallMs || Infinity) <= 250,
       JSON.stringify(warmRenderProbe)
     );
-    check(checks, "ui-scan-strip-complete", /Scan complete|Warm cache/i.test(ui.scanStrip), ui.scanStrip);
+    check(checks, "ui-scan-strip-complete", /Scan complete|Cached result/i.test(ui.scanStrip) && !/win32|get-compressed|saved \d+ms|no skipped items/i.test(ui.scanStrip), ui.scanStrip);
     check(checks, "ui-drive-metric", ui.metrics.some((row) => /Drive Free/i.test(row)), ui.metrics.join(" | "));
-    check(checks, "ui-allocated-metric", ui.metrics.some((row) => /Allocated/i.test(row)), ui.metrics.join(" | "));
+    check(checks, "ui-allocated-metric", ui.metrics.some((row) => /Allocated/i.test(row)) && !ui.metrics.some((row) => /0\.00% of volume|win32|get-compressed/i.test(row)), ui.metrics.join(" | "));
     check(checks, "ui-top-folder-media", ui.folders.some((row) => row.includes("media")), ui.folders.slice(0, 4).join(" | "));
     check(checks, "ui-top-file-mkv", ui.files.some((row) => row.includes("movie.mkv")), ui.files.slice(0, 4).join(" | "));
     check(checks, "ui-extension-mkv", ui.extensions.some((row) => row.includes(".mkv")), ui.extensions.slice(0, 6).join(" | "));

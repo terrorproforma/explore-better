@@ -82,6 +82,9 @@ async function pageSnapshot(page) {
     leftRows: [...document.querySelectorAll('[data-list="left"] [data-entry-path]')].map((row) => row.textContent || ""),
     rightRows: [...document.querySelectorAll('[data-list="right"] [data-entry-path]')].map((row) => row.textContent || ""),
     rootsVisible: getComputedStyle(document.getElementById("root-strip")).display !== "none",
+    topbarHeight: Math.round(document.querySelector(".topbar")?.getBoundingClientRect().height || 0),
+    navigatorHidden: getComputedStyle(document.querySelector(".nav-rail")).display === "none",
+    inspectorHidden: getComputedStyle(document.querySelector(".inspector")).display === "none",
     rootScrollbarsHidden: getComputedStyle(document.getElementById("root-strip")).scrollbarWidth === "none",
     paneCommandWidths: [...document.querySelectorAll('.pane[data-pane="left"] .pane-command')].map(
       (button) => Math.round(button.getBoundingClientRect().width)
@@ -156,7 +159,12 @@ async function main() {
       recovered.ready && /^Left pane recovered to /i.test(recovered.status),
       recovered.status
     );
-    check(checks, "focus-hides-root-strip", recovered.rootsVisible === false, String(recovered.rootsVisible));
+    check(
+      checks,
+      "focus-preserves-one-row-topbar-context",
+      recovered.rootsVisible && recovered.topbarHeight === 44 && recovered.navigatorHidden && recovered.inspectorHidden,
+      JSON.stringify({ rootsVisible: recovered.rootsVisible, topbarHeight: recovered.topbarHeight, navigatorHidden: recovered.navigatorHidden, inspectorHidden: recovered.inspectorHidden })
+    );
     check(
       checks,
       "pane-commands-have-stable-icon-width",
@@ -184,7 +192,7 @@ async function main() {
     check(
       checks,
       "explicit-missing-target-is-not-rewritten",
-      explicit.leftPath !== existingParent && /could not open/i.test(explicit.leftActivity),
+      explicit.leftPath !== existingParent && /(?:could not open|folder not found)/i.test(explicit.leftActivity),
       `${explicit.leftPath || "empty"} / ${explicit.leftActivity}`
     );
     await explicitPage.close();

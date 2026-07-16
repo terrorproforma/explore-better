@@ -263,7 +263,8 @@ async function runToolbarScriptInBrowser(baseUrl) {
     });
     page.on("pageerror", (error) => pageErrors.push(error.message));
     const url = `${baseUrl}/?${new URLSearchParams({ left: leftDir, right: rightDir })}`;
-    await page.goto(url, { waitUntil: "networkidle" });
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => Boolean(window.__exploreBetterStartup?.completedAt), { timeout: 15000 });
     const button = page.locator('[data-run-script="toolbar-script-smoke"]');
     await button.waitFor({ state: "visible", timeout: 15000 });
     const label = await button.textContent();

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { chromium } from "playwright-core";
 import { clickDockAction } from "./ui-helpers.mjs";
@@ -16,6 +17,7 @@ const stateDir = path.join(appData, "ExploreBetter");
 const statePath = path.join(stateDir, "state.json");
 const latestJsonPath = path.join(artifactsDir, "search-background-ui-latest.json");
 const latestMdPath = path.join(artifactsDir, "search-background-ui-latest.md");
+const screenshotPath = path.join(artifactsDir, "search-dialog-latest.png");
 
 function optionValue(name, fallback = "") {
   const prefix = `${name}=`;
@@ -30,6 +32,18 @@ function edgePath() {
     optionValue("--browser", process.env.EB_SEARCH_BACKGROUND_UI_BROWSER || "") ||
     "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
   );
+}
+
+async function freePort() {
+  const probe = net.createServer();
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const address = probe.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
 }
 
 async function requestJson(baseUrl, route, options = {}) {
@@ -216,13 +230,15 @@ ${rows}
 | --- | --- | ---: |
 | Content | ${String(report.contentSearch?.summary || "n/a").replace(/\|/g, "\\|")} | ${report.contentSearch?.rowCount || 0} |
 | Label notes | ${String(report.labelSearch?.summary || "n/a").replace(/\|/g, "\\|")} | ${report.labelSearch?.rowCount || 0} |
+| Direct scan | ${String(report.scanSearch?.summary || "n/a").replace(/\|/g, "\\|")} | ${report.scanSearch?.rowCount || 0} |
+| No matches | ${String(report.emptySearch?.summary || "n/a").replace(/\|/g, "\\|")} | ${report.emptySearch?.rowCount || 0} |
 `;
 }
 
 async function main() {
   await fs.mkdir(artifactsDir, { recursive: true });
   const fixturePaths = await prepareFixture();
-  const port = Number(optionValue("--port", process.env.PORT || 49000 + Math.floor(Math.random() * 10000)));
+  const port = Number(optionValue("--port", process.env.PORT || "")) || await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const checks = [];
   const consoleMessages = [];
@@ -245,6 +261,8 @@ async function main() {
   let browser = null;
   let contentSearch = null;
   let labelSearch = null;
+  let scanSearch = null;
+  let emptySearch = null;
   let layout = null;
   let backgroundRoots = [];
   try {
@@ -274,6 +292,8 @@ async function main() {
       waitUntil: "domcontentloaded"
     });
     await page.waitForSelector('.pane[data-pane="left"] [data-entry-path]', { timeout: 10000 });
+    await page.locator('.pane[data-pane="left"] .tab.active .tab-lock').click();
+    await page.waitForFunction(() => document.querySelector('.pane[data-pane="left"] .tab.active')?.classList.contains("locked"));
     await clickDockAction(page, "search");
     await page.waitForSelector("#search-dialog[open]", { timeout: 10000 });
 
@@ -300,8 +320,8 @@ async function main() {
         );
         return {
           ok:
-            /Warm cache/i.test(summary) &&
-            /content hits/i.test(summary) &&
+            /Search index/i.test(summary) &&
+            /content match/i.test(summary) &&
             rows.some((row) => row.path === expectedPath && /obsidian invoice/i.test(row.text)) &&
             !rows.some((row) => row.path === excludedPath) &&
             paneRows.includes(expectedPath),
@@ -315,6 +335,14 @@ async function main() {
       12000,
       { expectedPath: fixturePaths.contentPath, excludedPath: fixturePaths.otherContentPath }
     );
+    const lockedSearchTabs = await page.evaluate(() => {
+      const tabs = [...document.querySelectorAll('.pane[data-pane="left"] .tab')];
+      return {
+        count: tabs.length,
+        locked: tabs.filter((tab) => tab.classList.contains("locked")).map((tab) => tab.getAttribute("title") || ""),
+        activeTitle: tabs.find((tab) => tab.classList.contains("active"))?.textContent?.trim() || ""
+      };
+    });
 
     await page.locator("#search-name").fill("aurora ledger");
     await page.locator("#search-content").fill("");
@@ -328,7 +356,7 @@ async function main() {
           text: row.textContent.trim().replace(/\s+/g, " ")
         }));
         return {
-          ok: /Warm cache/i.test(summary) && rows.some((row) => row.path === expectedPath && /aurora ledger/i.test(row.text)),
+          ok: /Search index/i.test(summary) && rows.some((row) => row.path === expectedPath && /aurora ledger/i.test(row.text)),
           summary,
           rowCount: rows.length,
           rows
@@ -337,6 +365,43 @@ async function main() {
       "warm cache label-note search",
       12000,
       { expectedPath: fixturePaths.labelledPath }
+    );
+
+    await page.locator("#search-background-cache").setChecked(false);
+    await page.locator("#search-name").fill("plain-root");
+    await page.locator('#search-form button[type="submit"]').click();
+    scanSearch = await waitForResult(
+      page,
+      ({ expectedPath }) => {
+        const summary = document.getElementById("search-summary")?.textContent?.trim() || "";
+        const rows = [...document.querySelectorAll("#search-results [data-search-path]")].map((row) => ({
+          path: row.getAttribute("data-search-path") || "",
+          text: row.textContent.trim().replace(/\s+/g, " ")
+        }));
+        return {
+          ok: rows.some((row) => row.path === expectedPath) && /^1 match\b/i.test(summary),
+          summary,
+          rowCount: rows.length,
+          rows
+        };
+      },
+      "direct scan search",
+      12000,
+      { expectedPath: path.join(fixture, "plain-root.txt") }
+    );
+    await page.screenshot({ path: screenshotPath });
+
+    await page.locator("#search-name").fill("definitely-no-result-needle");
+    await page.locator('#search-form button[type="submit"]').click();
+    emptySearch = await waitForResult(
+      page,
+      () => {
+        const summary = document.getElementById("search-summary")?.textContent?.trim() || "";
+        const rows = document.querySelectorAll("#search-results [data-search-path]").length;
+        const empty = document.querySelector("#search-results .empty-state")?.textContent?.trim() || "";
+        return { ok: /^0 matches\b/i.test(summary) && rows === 0 && empty === "No matches", summary, rowCount: rows, empty };
+      },
+      "empty direct search"
     );
 
     layout = await inspectSearchLayout(page);
@@ -353,15 +418,40 @@ async function main() {
     );
     check(
       checks,
+      "locked-tab-search-branches",
+      lockedSearchTabs.count === 2 && lockedSearchTabs.locked.length === 1 && lockedSearchTabs.locked[0] === fixture && /Search:/.test(lockedSearchTabs.activeTitle),
+      JSON.stringify(lockedSearchTabs)
+    );
+    check(
+      checks,
       "warm-label-note-search-visible",
       labelSearch.rows.some((row) => row.path === fixturePaths.labelledPath && /aurora ledger/i.test(row.text)),
       `${labelSearch.rowCount} row(s); summary=${labelSearch.summary}.`
     );
     check(
       checks,
+      "direct-scan-search-visible",
+      scanSearch.rows.some((row) => row.path === path.join(fixture, "plain-root.txt")) && !/\bscanned\b/i.test(scanSearch.summary),
+      `${scanSearch.rowCount} row(s); summary=${scanSearch.summary}.`
+    );
+    check(
+      checks,
+      "zero-results-state",
+      emptySearch.rowCount === 0 && emptySearch.empty === "No matches" && /^0 matches\b/i.test(emptySearch.summary),
+      `${emptySearch.summary}; empty=${emptySearch.empty}.`
+    );
+    check(
+      checks,
       "search-dialog-used-background-endpoint",
-      counts["/api/background-indexes/search"] >= 2 && searchEndpointHits === 0,
+      counts["/api/background-indexes/search"] >= 2 && searchEndpointHits >= 2,
       JSON.stringify(counts)
+    );
+    check(
+      checks,
+      "search-summary-is-plain-language",
+      (contentSearch.summary.match(/Search index/gi) || []).length === 1 &&
+        !/root stores|\bscanned\b|Warm cache/i.test(`${contentSearch.summary} ${labelSearch.summary}`),
+      `${contentSearch.summary} | ${labelSearch.summary}`
     );
     check(checks, "search-dialog-layout", layout.issues.length === 0, `${layout.issues.length} clipped/squished Search control(s).`);
     check(checks, "browser-console-clean", pageErrors.length === 0, `${pageErrors.length} page error(s).`);
@@ -393,6 +483,8 @@ async function main() {
     })),
     contentSearch,
     labelSearch,
+    scanSearch,
+    emptySearch,
     layout,
     apiEvents,
     endpointCounts: endpointCounts(apiEvents),
@@ -400,7 +492,8 @@ async function main() {
     pageErrors,
     serverOutput: serverOutput.slice(-4000),
     summary,
-    checks
+    checks,
+    screenshot: screenshotPath
   };
   await fs.writeFile(latestJsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   await fs.writeFile(latestMdPath, markdownReport(report), "utf8");

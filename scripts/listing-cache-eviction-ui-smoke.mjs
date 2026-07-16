@@ -226,10 +226,10 @@ ${rows}
 
 | Phase | Source | Live Load | Status |
 | --- | --- | ---: | --- |
-| Initial Cold | ${report.snapshots.initial.source} | ${report.snapshots.initial.liveLoadMs ?? "n/a"} ms | ${report.snapshots.initial.statusText.replace(/\|/g, "\\|")} |
-| Warm Before Churn | ${report.snapshots.warmBeforeChurn.source} | ${report.snapshots.warmBeforeChurn.liveLoadMs ?? "n/a"} ms | ${report.snapshots.warmBeforeChurn.statusText.replace(/\|/g, "\\|")} |
-| Old After Churn | ${report.snapshots.oldAfterChurn.source} | ${report.snapshots.oldAfterChurn.liveLoadMs ?? "n/a"} ms | ${report.snapshots.oldAfterChurn.statusText.replace(/\|/g, "\\|")} |
-| Recent After Churn | ${report.snapshots.recentAfterChurn.source} | ${report.snapshots.recentAfterChurn.liveLoadMs ?? "n/a"} ms | ${report.snapshots.recentAfterChurn.statusText.replace(/\|/g, "\\|")} |
+| Initial Cold | ${report.snapshots.initial?.source || "n/a"} | ${report.snapshots.initial?.liveLoadMs ?? "n/a"} ms | ${String(report.snapshots.initial?.statusText || "n/a").replace(/\|/g, "\\|")} |
+| Warm Before Churn | ${report.snapshots.warmBeforeChurn?.source || "n/a"} | ${report.snapshots.warmBeforeChurn?.liveLoadMs ?? "n/a"} ms | ${String(report.snapshots.warmBeforeChurn?.statusText || "n/a").replace(/\|/g, "\\|")} |
+| Old After Churn | ${report.snapshots.oldAfterChurn?.source || "n/a"} | ${report.snapshots.oldAfterChurn?.liveLoadMs ?? "n/a"} ms | ${String(report.snapshots.oldAfterChurn?.statusText || "n/a").replace(/\|/g, "\\|")} |
+| Recent After Churn | ${report.snapshots.recentAfterChurn?.source || "n/a"} | ${report.snapshots.recentAfterChurn?.liveLoadMs ?? "n/a"} ms | ${String(report.snapshots.recentAfterChurn?.statusText || "n/a").replace(/\|/g, "\\|")} |
 `;
 }
 

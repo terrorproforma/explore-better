@@ -13,6 +13,7 @@ import { pipeline } from "node:stream/promises";
 
 const require = createRequire(import.meta.url);
 const yauzl = require("yauzl");
+const yazl = require("yazl");
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 const workspaceRoot = path.resolve(process.env.EXPLORE_BETTER_WORKSPACE_ROOT || process.cwd());
@@ -71,7 +72,10 @@ let stateCache = {
   checkedAt: 0
 };
 let startupOperationRecoveryChecked = false;
+let mcpResourceUpdatePublisher = null;
+let mcpResourceRevision = 0;
 const operationControls = new Map();
+const operationChangeWaiters = new Set();
 const operationPreviewTokens = new Map();
 const folderIndexJobs = new Map();
 const folderIndexCache = new Map();
@@ -87,6 +91,14 @@ const backgroundIndexAutoRebuilds = new Map();
 const backgroundIndexWatchers = new Map();
 const backgroundIndexSearchStoreCache = new Map();
 const backgroundIndexSearchStoreInFlight = new Map();
+const foregroundActivityState = {
+  leases: new Map(),
+  listeners: new Set(),
+  pausedBackgroundJobs: 0,
+  resumptions: 0,
+  foregroundStarts: 0
+};
+let rendererSchedulerSnapshot = null;
 const stateCacheContentCheckTtlMs = 1000;
 const folderWatchers = new Map();
 const folderWatcherMaxEntries = 32;
@@ -566,6 +578,78 @@ function sendError(res, status, message, details) {
   sendJson(res, status, { error: message, details });
 }
 
+function beginForegroundActivity(kind = "request") {
+  const id = crypto.randomUUID();
+  foregroundActivityState.leases.set(id, { id, kind: String(kind).slice(0, 100), startedAt: Date.now() });
+  foregroundActivityState.foregroundStarts += 1;
+  for (const listener of foregroundActivityState.listeners) listener();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    foregroundActivityState.leases.delete(id);
+    for (const listener of foregroundActivityState.listeners) listener();
+  };
+}
+
+function foregroundActivitySnapshot() {
+  return {
+    activeForegroundLeases: foregroundActivityState.leases.size,
+    pausedBackgroundJobs: foregroundActivityState.pausedBackgroundJobs,
+    foregroundStarts: foregroundActivityState.foregroundStarts,
+    resumptions: foregroundActivityState.resumptions,
+    renderer: rendererSchedulerSnapshot
+  };
+}
+
+function updateRendererSchedulerSnapshot(value = {}) {
+  const number = (key) => Math.max(0, Math.min(1_000_000_000, Number(value[key] || 0)));
+  rendererSchedulerSnapshot = {
+    capturedAt: sanitizeOperationTimestamp(value.capturedAt, new Date().toISOString()),
+    activeForegroundLeases: number("activeForegroundLeases"),
+    queuedPrefetches: number("queuedPrefetches"),
+    activePrefetches: number("activePrefetches"),
+    paused: value.paused === true,
+    aborts: number("aborts"),
+    cacheHits: number("cacheHits"),
+    resumptions: number("resumptions"),
+    started: number("started"),
+    foregroundStarts: number("foregroundStarts")
+  };
+  return rendererSchedulerSnapshot;
+}
+
+async function waitForForegroundIdle(signal) {
+  if (!foregroundActivityState.leases.size) return false;
+  foregroundActivityState.pausedBackgroundJobs += 1;
+  try {
+    while (foregroundActivityState.leases.size) {
+      throwIfOperationCanceled(signal);
+      await new Promise((resolve) => {
+        let timeout = null;
+        const done = () => {
+          clearTimeout(timeout);
+          foregroundActivityState.listeners.delete(done);
+          resolve();
+        };
+        foregroundActivityState.listeners.add(done);
+        timeout = setTimeout(done, 100);
+      });
+    }
+    foregroundActivityState.resumptions += 1;
+    return true;
+  } finally {
+    foregroundActivityState.pausedBackgroundJobs = Math.max(0, foregroundActivityState.pausedBackgroundJobs - 1);
+  }
+}
+
+function requestIsForegroundWork(url, method = "GET") {
+  const pathname = String(url?.pathname || "");
+  if (pathname === "/api/list" || pathname === "/api/tree" || pathname === "/api/search" || pathname === "/api/size-analysis") return true;
+  if (pathname.startsWith("/api/operation/") || pathname === "/api/transfer" || pathname === "/api/copy" || pathname === "/api/move") return true;
+  return method !== "GET" && ["/api/rename", "/api/delete", "/api/recycle", "/api/trash", "/api/archive/create", "/api/archive/extract"].includes(pathname);
+}
+
 function cookieValue(req, name) {
   const prefix = `${name}=`;
   for (const part of String(req.headers.cookie || "").split(";")) {
@@ -870,6 +954,46 @@ function sanitizeOperationPayload(value, fallback = null) {
   return typeof value === "object" ? value : fallback;
 }
 
+function sanitizeOperationEvent(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return null;
+  return {
+    at: sanitizeOperationTimestamp(event.at, new Date().toISOString()),
+    kind: boundedOperationText(event.kind || "update", "update", 60),
+    status: boundedOperationText(event.status || "", "", 40),
+    phase: boundedOperationText(event.phase || "", "", 100),
+    message: boundedOperationText(event.message || "", "", 500),
+    completed:
+      event.completed !== null && event.completed !== undefined && Number.isFinite(Number(event.completed))
+        ? Math.max(0, Number(event.completed))
+        : null,
+    total:
+      event.total !== null && event.total !== undefined && Number.isFinite(Number(event.total))
+        ? Math.max(0, Number(event.total))
+        : null,
+    correlationId: sanitizeReferenceId(event.correlationId),
+    relatedOperationId: sanitizeReferenceId(event.relatedOperationId)
+  };
+}
+
+function appendOperationEvent(operation, event) {
+  const clean = sanitizeOperationEvent({
+    at: new Date().toISOString(),
+    status: operation.status,
+    phase: operation.progress?.phase || "",
+    completed: operation.progress?.completed,
+    total: operation.progress?.total,
+    ...event
+  });
+  if (!clean) return false;
+  const events = (Array.isArray(operation.events) ? operation.events : []).map(sanitizeOperationEvent).filter(Boolean);
+  const previous = events.at(-1);
+  if (previous && ["kind", "status", "phase", "message", "completed", "total", "correlationId", "relatedOperationId"].every((key) => previous[key] === clean[key])) {
+    return false;
+  }
+  operation.events = [...events, clean].slice(-64);
+  return true;
+}
+
 function sanitizeStoredOperation(operation) {
   if (!operation || typeof operation !== "object" || Array.isArray(operation)) {
     return null;
@@ -910,10 +1034,12 @@ function sanitizeStoredOperation(operation) {
     cancelRequestedAt: sanitizeOperationTimestamp(operation.cancelRequestedAt, null),
     retry: sanitizeOperationRetry(operation.retry),
     retryOf: sanitizeReferenceId(operation.retryOf),
+    relatedOperationId: sanitizeReferenceId(operation.relatedOperationId),
     mcpProfileId: sanitizeReferenceId(operation.mcpProfileId),
     mcpSessionId: sanitizeReferenceId(operation.mcpSessionId),
     pausedAt: sanitizeOperationTimestamp(operation.pausedAt, null),
-    resumedAt: sanitizeOperationTimestamp(operation.resumedAt, null)
+    resumedAt: sanitizeOperationTimestamp(operation.resumedAt, null),
+    events: (Array.isArray(operation.events) ? operation.events : []).map(sanitizeOperationEvent).filter(Boolean).slice(-64)
   };
 }
 
@@ -1341,7 +1467,7 @@ function recoverInterruptedOperationsOnStartup(state) {
           phase: "Interrupted",
           updatedAt: recoveredAt
         };
-    return {
+    const recovered = {
       ...operation,
       status: "failed",
       finishedAt: operation.finishedAt || recoveredAt,
@@ -1353,6 +1479,8 @@ function recoverInterruptedOperationsOnStartup(state) {
       retry: sanitizeOperationRetry(operation.retry),
       undo: operation.undo || null
     };
+    appendOperationEvent(recovered, { at: recoveredAt, kind: "recovered", phase: "Interrupted", message: reason });
+    return recovered;
   });
   if (changed) {
     nextState.updatedAt = recoveredAt;
@@ -2462,30 +2590,41 @@ function labelFromPath(itemPath) {
   return path.basename(withoutSlash) || resolved;
 }
 
+function itemCountText(count, noun = "item") {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function conflictModeText(value) {
+  if (value === "overwrite") return "Replace existing items";
+  if (value === "skip") return "Skip existing items";
+  return "Rename if needed";
+}
+
 function operationLabel(type, body) {
   const paths = Array.isArray(body.paths) ? body.paths : body.path ? [body.path] : [];
   const count = paths.length || 1;
-  if (type === "copy") return `Copy ${count} item(s)`;
-  if (type === "move") return `Move ${count} item(s)`;
-  if (type === "delete") return `Delete ${count} item(s) permanently`;
-  if (type === "recycle") return `Recycle ${count} item(s)`;
-  if (type === "windows-recycle-restore") return `Restore ${count} Windows Recycle item(s)`;
+  if (type === "copy") return `Copy ${itemCountText(count)}`;
+  if (type === "move") return `Move ${itemCountText(count)}`;
+  if (type === "delete") return `Permanently delete ${itemCountText(count)}`;
+  if (type === "recycle") return `Move ${itemCountText(count)} to Windows Recycle Bin`;
+  if (type === "windows-recycle-restore") return `Restore ${itemCountText(count, "Windows Recycle Bin item")}`;
   if (type === "transfer") {
     const mode = body.mode === "move" ? "Move" : "Copy";
-    return `${mode} ${count} item(s) with ${body.conflictMode || "unique"} policy`;
+    return `${mode} ${itemCountText(count)} - ${conflictModeText(body.conflictMode)}`;
   }
-  if (type === "trash") return `Trash ${count} item(s)`;
-  if (type === "trash-restore") return `Restore ${count} app trash item(s)`;
-  if (type === "trash-delete") return `Delete ${count} app trash item(s)`;
+  if (type === "trash") return `Move ${itemCountText(count)} to App Trash`;
+  if (type === "trash-restore") return `Restore ${itemCountText(count, "App Trash item")}`;
+  if (type === "trash-delete") return `Permanently delete ${itemCountText(count, "App Trash item")}`;
   if (type === "rename") return `Rename ${labelFromPath(body.path)}`;
-  if (type === "bulk-rename") return `Bulk rename ${count} item(s)`;
+  if (type === "bulk-rename") return `Bulk rename ${itemCountText(count)}`;
   if (type === "mkdir") return `Create ${body.name}`;
   if (type === "create-file") return `Create file ${body.name}`;
-  if (type === "undo") return `Undo ${body.operationId}`;
+  if (type === "undo") return "Undo operation";
   if (type === "backup-recovery") {
-    return `${body.action === "discard" ? "Keep replacement for" : "Restore original for"} ${
-      Array.isArray(body.indexes) ? body.indexes.length : 0
-    } backup item(s)`;
+    return `${body.action === "discard" ? "Keep replacement for" : "Restore original for"} ${itemCountText(
+      Array.isArray(body.indexes) ? body.indexes.length : 0,
+      "backup item"
+    )}`;
   }
   if (type === "command") return `Run ${body.name || body.commandId || "command"}`;
   if (type === "script") return `Run script ${body.name || body.scriptId || "snippet"}`;
@@ -2493,10 +2632,10 @@ function operationLabel(type, body) {
   if (type === "sync") return `Sync ${body.direction || "panes"}`;
   if (type === "archive-create") return `Create ${body.name || "ZIP archive"}`;
   if (type === "archive-extract") return `Extract ${labelFromPath(body.archive || body.path || "ZIP")}`;
-  if (type === "shortcut-create") return `Create shortcut${count === 1 ? "" : "s"} for ${count} item(s)`;
-  if (type === "link-create") return `Create link${count === 1 ? "" : "s"} for ${count} item(s)`;
-  if (type === "attributes-set") return `Set attributes for ${count} item(s)`;
-  if (type === "timestamps-set") return `Set timestamps for ${count} item(s)`;
+  if (type === "shortcut-create") return `Create shortcut${count === 1 ? "" : "s"} for ${itemCountText(count)}`;
+  if (type === "link-create") return `Create link${count === 1 ? "" : "s"} for ${itemCountText(count)}`;
+  if (type === "attributes-set") return `Set attributes for ${itemCountText(count)}`;
+  if (type === "timestamps-set") return `Set timestamps for ${itemCountText(count)}`;
   return type;
 }
 
@@ -2725,6 +2864,47 @@ async function saveOperation(operation) {
     }
     state.operations = retainOperationHistory(operations);
   });
+  const revision = ++mcpResourceRevision;
+  mcpResourceUpdatePublisher?.(`explore-better://operations/${encodeURIComponent(operation.id)}`, revision);
+  mcpResourceUpdatePublisher?.("explore-better://health/current", revision);
+  for (const waiter of [...operationChangeWaiters]) {
+    if (waiter.operationId !== operation.id) continue;
+    if (waiter.status && waiter.status !== operation.status) continue;
+    waiter.finish(operation);
+  }
+}
+
+async function waitForOperationCondition(operationId, status = "", timeoutMs = 10_000, signal = null) {
+  const current = (await readState()).operations.find((operation) => operation.id === operationId) || null;
+  if (current && (!status || current.status === status)) return current;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeout = null;
+    const waiter = {
+      operationId,
+      status,
+      finish(operation, error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        signal?.removeEventListener?.("abort", onAbort);
+        operationChangeWaiters.delete(waiter);
+        if (error) reject(error);
+        else resolve(operation || null);
+      }
+    };
+    const onAbort = () => {
+      const error = new Error("The AI Bridge wait was canceled.");
+      error.code = "REQUEST_CANCELED";
+      error.retryable = true;
+      waiter.finish(null, error);
+    };
+    timeout = setTimeout(() => waiter.finish(null), Math.max(100, Math.min(30_000, Number(timeoutMs || 10_000))));
+    timeout.unref?.();
+    operationChangeWaiters.add(waiter);
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
 }
 
 function operationCanceledError() {
@@ -2793,9 +2973,18 @@ async function enqueueOperation(type, label, runner, options = {}) {
     cancelRequestedAt: null,
     retry: sanitizeOperationRetry(options.retry),
     retryOf: options.retryOf ? String(options.retryOf).slice(0, 120) : null,
+    relatedOperationId: options.relatedOperationId ? String(options.relatedOperationId).slice(0, 120) : options.retryOf ? String(options.retryOf).slice(0, 120) : null,
     mcpProfileId: options.mcpProfileId ? String(options.mcpProfileId).slice(0, 120) : null,
-    mcpSessionId: options.mcpSessionId ? String(options.mcpSessionId).slice(0, 120) : null
+    mcpSessionId: options.mcpSessionId ? String(options.mcpSessionId).slice(0, 120) : null,
+    events: []
   };
+
+  appendOperationEvent(operation, {
+    kind: options.retryOf ? "retry-queued" : type === "undo" ? "undo-queued" : "queued",
+    message: options.retryOf ? "Retry queued." : type === "undo" ? "Undo queued." : "Operation queued.",
+    relatedOperationId: options.relatedOperationId || options.retryOf || null,
+    correlationId: options.correlationId || null
+  });
 
   await saveOperation(operation);
   const control = {
@@ -2803,7 +2992,10 @@ async function enqueueOperation(type, label, runner, options = {}) {
     operation,
     paused: false,
     pauseStartedAt: null,
-    waiters: []
+    waiters: [],
+    lastProgressEventAt: 0,
+    lastProgressPercent: -1,
+    lastProgressPhase: ""
   };
   operationControls.set(operation.id, control);
 
@@ -2820,12 +3012,19 @@ async function enqueueOperation(type, label, runner, options = {}) {
   const run = async () => {
     if (controller.signal.aborted || operation.status === "canceled") {
       markCanceledOperation(operation);
+      appendOperationEvent(operation, { kind: "canceled", phase: "Canceled", message: "Operation canceled before it started." });
       await saveOperation(operation);
       operationControls.delete(operation.id);
       return operation;
     }
     operation.status = "running";
     operation.startedAt = new Date().toISOString();
+    appendOperationEvent(operation, {
+      kind: "started",
+      message: options.retryOf ? "Retry started." : type === "undo" ? "Undo started." : "Operation started.",
+      relatedOperationId: options.relatedOperationId || options.retryOf || null,
+      correlationId: options.correlationId || null
+    });
     await saveOperation(operation);
     const updateProgress = async (progress) => {
       operation.progress = {
@@ -2833,6 +3032,23 @@ async function enqueueOperation(type, label, runner, options = {}) {
         ...(progress || {}),
         updatedAt: new Date().toISOString()
       };
+      const now = Date.now();
+      const total = Math.max(0, Number(operation.progress.total || 0));
+      const completed = Math.max(0, Number(operation.progress.completed || 0));
+      const percent = total > 0 ? Math.floor((completed / total) * 20) * 5 : -1;
+      const phase = String(operation.progress.phase || "");
+      if (phase !== control.lastProgressPhase || now - control.lastProgressEventAt >= 1000 || percent >= control.lastProgressPercent + 5) {
+        appendOperationEvent(operation, {
+          kind: phase !== control.lastProgressPhase ? "phase" : "progress",
+          phase,
+          message: phase || "Operation progress updated.",
+          completed,
+          total
+        });
+        control.lastProgressEventAt = now;
+        control.lastProgressPercent = Math.max(control.lastProgressPercent, percent);
+        control.lastProgressPhase = phase;
+      }
       await saveOperation(operation);
     };
     const updateRecovery = async (details) => {
@@ -2867,6 +3083,12 @@ async function enqueueOperation(type, label, runner, options = {}) {
         }
         operation.progress.updatedAt = operation.finishedAt;
       }
+      appendOperationEvent(operation, {
+        kind: type === "undo" ? "undo-completed" : options.retryOf ? "retry-completed" : "completed",
+        phase: "Completed",
+        message: type === "undo" ? "Undo completed." : options.retryOf ? "Retry completed." : "Operation completed.",
+        relatedOperationId: options.relatedOperationId || options.retryOf || null
+      });
       await saveOperation(operation);
       return operation;
     } catch (error) {
@@ -2874,6 +3096,7 @@ async function enqueueOperation(type, label, runner, options = {}) {
       if (controller.signal.aborted || isOperationCanceled(error)) {
         markCanceledOperation(operation, operation.finishedAt);
         operation.result = bestCanceledOperationResult(operation.result, error.details);
+        appendOperationEvent(operation, { kind: "canceled", phase: "Canceled", message: "Operation canceled." });
         await saveOperation(operation);
         return operation;
       }
@@ -2884,6 +3107,7 @@ async function enqueueOperation(type, label, runner, options = {}) {
         operation.progress.phase = "Failed";
         operation.progress.updatedAt = operation.finishedAt;
       }
+      appendOperationEvent(operation, { kind: "failed", phase: "Failed", message: operation.error });
       await saveOperation(operation);
       throw error;
     } finally {
@@ -3185,6 +3409,7 @@ async function retryRecordedOperation(operationId, options = {}) {
       };
     }
   });
+  await recordRelatedOperation(original.id, operation, "retry", "Retry operation linked.");
   return operation;
 }
 
@@ -3227,6 +3452,7 @@ async function retryRemainingRecordedOperation(operationId) {
       };
     }
   });
+  await recordRelatedOperation(original.id, operation, "retry", "Remaining work retry linked.");
   return operation;
 }
 
@@ -3332,6 +3558,7 @@ async function retrySelectedRemainingRecordedOperation(operationId, indexes) {
       };
     }
   });
+  await recordRelatedOperation(original.id, operation, "retry", "Selected retry operation linked.");
   return operation;
 }
 
@@ -3732,8 +3959,10 @@ async function cancelOperation(operationId) {
   }
   const now = new Date().toISOString();
   operation.cancelRequestedAt = operation.cancelRequestedAt || now;
+  appendOperationEvent(operation, { at: now, kind: "cancellation-requested", message: "Cancellation requested." });
   if (operation.status === "queued" || !operation.startedAt) {
     markCanceledOperation(operation, now);
+    appendOperationEvent(operation, { at: now, kind: "canceled", phase: "Canceled", message: "Queued operation canceled." });
   } else if (operation.progress) {
     operation.progress.phase = "Cancel requested";
     operation.progress.updatedAt = now;
@@ -3774,6 +4003,7 @@ async function pauseOperation(operationId) {
     operation.progress.phase = "Paused";
     operation.progress.updatedAt = now;
   }
+  appendOperationEvent(operation, { at: now, kind: "paused", phase: "Paused", message: "Operation paused." });
   await saveOperation(operation);
   return operation;
 }
@@ -3800,6 +4030,7 @@ async function resumeOperation(operationId) {
     operation.progress.phase = "Resuming";
     operation.progress.updatedAt = now;
   }
+  appendOperationEvent(operation, { at: now, kind: "resumed", phase: "Resuming", message: "Operation resumed." });
   for (const resolve of control.waiters.splice(0)) {
     resolve();
   }
@@ -7300,11 +7531,10 @@ function folderFreshnessStamps(manifest, store) {
 
 function entryFreshnessStamps(store) {
   return (Array.isArray(store?.entries) ? store.entries : [])
-    .filter((entry) => entry?.path)
+    .filter((entry) => entry?.path && entry.isFile === true)
     .map((entry) => ({
       path: entry.path,
       isFile: entry.isFile === true,
-      isDirectory: entry.isDirectory === true,
       size: Number(entry.size || 0),
       modified: entry.modified ?? null
     }));
@@ -7820,6 +8050,8 @@ async function buildBackgroundIndexRoot(root, job, signal) {
       maxEntries: root.maxEntries,
       updatedAt: new Date().toISOString()
     };
+
+    await waitForForegroundIdle(signal);
 
     let index;
     try {
@@ -11464,6 +11696,13 @@ async function listAppTrash() {
   };
 }
 
+function normalizeWindowsShellDateText(value) {
+  return String(value || "")
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069?]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function normalizeWindowsRecycleItem(item, index) {
   const name = String(item?.name || "");
   const originalLocation = String(item?.originalLocation || "");
@@ -11475,7 +11714,7 @@ function normalizeWindowsRecycleItem(item, index) {
     name,
     originalLocation,
     originalPath,
-    dateDeletedText: String(item?.dateDeletedText || ""),
+    dateDeletedText: normalizeWindowsShellDateText(item?.dateDeletedText),
     sizeText: String(item?.sizeText || ""),
     type: String(item?.type || ""),
     kind: item?.isDirectory ? "Folder" : String(item?.type || "File"),
@@ -11525,6 +11764,17 @@ function Get-DetailText($Folder, $Item, $Index) {
     return ""
   }
 }
+function Get-RecycleItemName($Item) {
+  $Name = [string]$Item.Name
+  $Path = [string]$Item.Path
+  if (-not [bool]$Item.IsFolder) {
+    $Extension = [System.IO.Path]::GetExtension($Path)
+    if ($Extension -and -not $Name.EndsWith($Extension, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $Name = $Name + $Extension
+    }
+  }
+  return $Name
+}
 $Items = New-Object System.Collections.Generic.List[object]
 $Total = 0
 $Bytes = [int64]0
@@ -11536,7 +11786,7 @@ foreach ($Item in @($Bin.Items())) {
   if ($Items.Count -ge $Limit) {
     continue
   }
-  $Name = [string]$Item.Name
+  $Name = Get-RecycleItemName $Item
   $Path = [string]$Item.Path
   $OriginalLocation = Get-DetailText $Bin $Item 1
   $OriginalPath = ""
@@ -11609,6 +11859,17 @@ $ByPath = @{}
 foreach ($Item in @($Bin.Items())) {
   $ByPath[[string]$Item.Path] = $Item
 }
+function Get-RecycleItemName($Item) {
+  $Name = [string]$Item.Name
+  $Path = [string]$Item.Path
+  if (-not [bool]$Item.IsFolder) {
+    $Extension = [System.IO.Path]::GetExtension($Path)
+    if ($Extension -and -not $Name.EndsWith($Extension, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $Name = $Name + $Extension
+    }
+  }
+  return $Name
+}
 $Matched = New-Object System.Collections.Generic.List[object]
 $Restored = New-Object System.Collections.Generic.List[object]
 $Missing = New-Object System.Collections.Generic.List[string]
@@ -11620,7 +11881,7 @@ foreach ($Path in $Requested) {
   $Item = $ByPath[$Path]
   $Record = [pscustomobject]@{
     path = [string]$Item.Path
-    name = [string]$Item.Name
+    name = Get-RecycleItemName $Item
     originalLocation = [string]$Bin.GetDetailsOf($Item, 1)
     dateDeletedText = [string]$Bin.GetDetailsOf($Item, 2)
   }
@@ -13868,7 +14129,7 @@ async function hashFile(file, algorithm, maxHashBytes) {
     return {
       algorithm,
       skipped: true,
-      reason: `Larger than ${maxHashBytes} bytes`
+      reason: `Larger than ${formatBytesForSummary(maxHashBytes)}`
     };
   }
 
@@ -15877,7 +16138,12 @@ async function verifyChecksumManifest(body = {}) {
       }
     } catch (error) {
       item.status = "missing";
-      item.reason = error.code || error.message || "Missing";
+      item.reason =
+        error.code === "ENOENT"
+          ? "File not found"
+          : ["EACCES", "EPERM"].includes(error.code)
+            ? "Access denied"
+            : error.message || "Unavailable";
     }
     items.push(item);
   }
@@ -16176,13 +16442,18 @@ async function shellOpenItemById(id) {
 }
 
 function launchShellTarget(openTarget) {
-  const child = spawn("explorer.exe", [openTarget], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
+  return new Promise((resolve, reject) => {
+    const child = spawn("explorer.exe", [openTarget], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve({ file: "explorer.exe", args: [openTarget], processStarted: true });
+    });
   });
-  child.unref();
-  return { file: "explorer.exe", args: [openTarget] };
 }
 
 function knownShellNamespaceTarget(value) {
@@ -16669,6 +16940,180 @@ if (-not $Title) {
   }
 }
 
+async function recordRelatedOperation(sourceOperationId, relatedOperation, kind, message) {
+  if (!sourceOperationId || !relatedOperation?.id) return;
+  const state = await readState();
+  const source = (state.operations || []).find((item) => item.id === sourceOperationId);
+  if (!source) return;
+  appendOperationEvent(source, {
+    kind,
+    message,
+    relatedOperationId: relatedOperation.id,
+    status: source.status
+  });
+  await saveOperation(source);
+}
+
+async function windowsDriveInventory() {
+  if (process.platform !== "win32") return [];
+  const script = `param([string]$PayloadPath)
+$ErrorActionPreference = "Stop"
+@([System.IO.DriveInfo]::GetDrives() | ForEach-Object {
+  $Ready = $false
+  try { $Ready = $_.IsReady } catch { $Ready = $false }
+  $Total = $null
+  $Free = $null
+  $Label = ""
+  if ($Ready) {
+    try { $Total = [int64]$_.TotalSize } catch { $Total = $null }
+    try { $Free = [int64]$_.AvailableFreeSpace } catch { $Free = $null }
+    try { $Label = [string]$_.VolumeLabel } catch { $Label = "" }
+  }
+  [pscustomobject]@{
+    name = [string]$_.Name
+    driveType = [string]$_.DriveType
+    ready = [bool]$Ready
+    totalBytes = $Total
+    freeBytes = $Free
+    label = $Label
+  }
+}) | ConvertTo-Json -Compress -Depth 5`;
+  try {
+    const parsed = parsePowerShellJson(await runPowerShellPayload(script, {}, { timeoutMs: 1800 }), []);
+    return (Array.isArray(parsed) ? parsed : parsed ? [parsed] : []).map((item) => ({
+      name: String(item.name || ""),
+      driveType: String(item.driveType || "Unknown"),
+      ready: item.ready === true,
+      totalBytes: Number.isFinite(Number(item.totalBytes)) ? Number(item.totalBytes) : null,
+      freeBytes: Number.isFinite(Number(item.freeBytes)) ? Number(item.freeBytes) : null,
+      label: String(item.label || "")
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function deviceCapabilities({ browseInApp = false, browseShell = false, openInExplorer = false } = {}) {
+  return { browseInApp: Boolean(browseInApp), browseShell: Boolean(browseShell), openInExplorer: Boolean(openInExplorer) };
+}
+
+function normalizedDeviceItem(item = {}, fallback = {}) {
+  const capacity = Number.isFinite(Number(item.totalBytes)) && Number(item.totalBytes) > 0
+    ? {
+        totalBytes: Number(item.totalBytes),
+        freeBytes: Number.isFinite(Number(item.freeBytes)) ? Number(item.freeBytes) : null
+      }
+    : null;
+  return {
+    id: String(item.id || fallback.id || crypto.createHash("sha256").update(String(item.path || item.openTarget || item.name || "device")).digest("hex").slice(0, 20)),
+    name: String(item.name || fallback.name || "Windows location"),
+    kind: String(item.kind || fallback.kind || "location"),
+    detail: String(item.detail || fallback.detail || item.type || ""),
+    connectionState: item.connectionState || (item.ready === false ? "unavailable" : "connected"),
+    path: item.path ? String(item.path) : null,
+    openTarget: item.openTarget ? String(item.openTarget) : item.path ? String(item.path) : null,
+    capacity,
+    capabilities: item.capabilities || deviceCapabilities(fallback.capabilities)
+  };
+}
+
+async function getWindowsDevices({ refresh = false, includeNetwork = false } = {}) {
+  if (refresh) shellNamespaceCache.clear();
+  if (process.platform !== "win32") {
+    return {
+      schemaVersion: "1",
+      platform: process.platform,
+      generatedAt: new Date().toISOString(),
+      status: "unavailable",
+      warnings: ["Devices & Windows locations are available on Windows."],
+      counts: { connectedDevices: 0, removableDrives: 0, mappedNetworkLocations: 0, fixedDrives: 0, windowsLocations: 0 },
+      groups: { connectedDevices: [], drives: [], network: [], libraries: [], windowsLocations: [] },
+      networkLoaded: false
+    };
+  }
+  const [roots, locations, thisPc, driveInventory] = await Promise.all([
+    getRoots(),
+    getShellLocations(),
+    listShellNamespace({ target: "thisPc", limit: 200 }),
+    windowsDriveInventory()
+  ]);
+  const warnings = [];
+  if (thisPc.available === false) warnings.push(thisPc.reason || "Connected device provider is unavailable.");
+  const driveByName = new Map(driveInventory.map((drive) => [String(drive.name || "").toLowerCase(), drive]));
+  const drives = (roots.drives || []).map((drive) => {
+    const detail = driveByName.get(String(drive.path || drive.name || "").toLowerCase()) || {};
+    const driveType = String(detail.driveType || "Fixed").toLowerCase();
+    const kind = driveType === "removable" ? "removable-drive" : driveType === "network" ? "mapped-network" : driveType === "cdrom" ? "optical-drive" : "fixed-drive";
+    return normalizedDeviceItem({
+      ...drive,
+      id: `drive:${String(drive.path || drive.name || "").toLowerCase()}`,
+      name: detail.label ? `${detail.label} (${drive.name})` : drive.name,
+      kind,
+      detail: `${String(detail.driveType || "Fixed")} drive`,
+      ready: detail.ready !== false,
+      totalBytes: detail.totalBytes ?? drive.space?.totalBytes,
+      freeBytes: detail.freeBytes ?? drive.space?.freeBytes,
+      capabilities: deviceCapabilities({ browseInApp: true, openInExplorer: true })
+    });
+  });
+  const connectedDevices = (thisPc.items || [])
+    .filter((item) => item.isPortableDevice || (item.isShellDevice && !item.isFileSystem))
+    .map((item) => normalizedDeviceItem({
+      ...item,
+      id: `shell-device:${crypto.createHash("sha256").update(String(item.path || item.openTarget || item.name || item.kind)).digest("hex").slice(0, 16)}`,
+      kind: item.isPortableDevice ? "portable-device" : item.kind || "connected-device",
+      capabilities: deviceCapabilities({
+        browseInApp: item.canOpenPane,
+        browseShell: item.canBrowseShell,
+        openInExplorer: item.canOpen
+      })
+    }));
+  const libraries = (locations.libraries || []).map((item) => normalizedDeviceItem({
+    ...item,
+    id: item.id,
+    capabilities: deviceCapabilities({ browseInApp: item.supportsPane, openInExplorer: Boolean(item.openTarget) })
+  }));
+  const windowsLocations = (locations.virtualFolders || [])
+    .filter((item) => !["thisPc", "network"].includes(item.id))
+    .map((item) => normalizedDeviceItem({
+      ...item,
+      id: item.id,
+      capabilities: deviceCapabilities({ browseInApp: false, browseShell: true, openInExplorer: Boolean(item.openTarget) })
+    }));
+  const mappedDrives = drives.filter((item) => item.kind === "mapped-network");
+  let providerNetwork = [];
+  if (includeNetwork) {
+    const report = await listShellNamespace({ target: "network", limit: 200 });
+    if (report.available === false) warnings.push(report.reason || "Network provider is unavailable.");
+    providerNetwork = (report.items || []).map((item) => normalizedDeviceItem({
+      ...item,
+      id: `network:${crypto.createHash("sha256").update(String(item.path || item.openTarget || item.name || item.kind)).digest("hex").slice(0, 16)}`,
+      kind: item.kind || "network-location",
+      capabilities: deviceCapabilities({ browseInApp: item.canOpenPane, browseShell: item.canBrowseShell, openInExplorer: item.canOpen })
+    }));
+  }
+  const network = [...mappedDrives, ...providerNetwork.filter((item) => !mappedDrives.some((drive) => drive.path && item.path && drive.path.toLowerCase() === item.path.toLowerCase()))];
+  const meaningfulDrives = drives.filter((item) => item.kind !== "fixed-drive");
+  return {
+    schemaVersion: "1",
+    platform: process.platform,
+    generatedAt: new Date().toISOString(),
+    status: warnings.length ? (connectedDevices.length || drives.length || libraries.length ? "partial" : "unavailable") : "ready",
+    warnings: warnings.slice(0, 20),
+    counts: {
+      connectedDevices: connectedDevices.length,
+      removableDrives: drives.filter((item) => item.kind === "removable-drive" || item.kind === "optical-drive").length,
+      mappedNetworkLocations: network.length,
+      fixedDrives: drives.filter((item) => item.kind === "fixed-drive").length,
+      windowsLocations: libraries.length + windowsLocations.length
+    },
+    groups: { connectedDevices, drives, network, libraries, windowsLocations },
+    meaningfulDevices: [...connectedDevices, ...meaningfulDrives].length,
+    networkLoaded: includeNetwork === true,
+    cacheTtlMs: shellNamespaceCacheTtlMs
+  };
+}
+
 async function openShellNamespaceTarget(body = {}) {
   const targetInfo = shellNamespaceTarget(body.target || body.path || body.id);
   if (!targetInfo.target) {
@@ -16689,7 +17134,7 @@ async function openShellNamespaceTarget(body = {}) {
     dryRun: false,
     target: targetInfo.target,
     name: targetInfo.name,
-    launched: launchShellTarget(targetInfo.target)
+    launched: await launchShellTarget(targetInfo.target)
   };
 }
 
@@ -18829,11 +19274,257 @@ async function runTrustedScript(body, hooks = {}) {
   return { logs, events: events.slice(0, 100), result, cacheInvalidation, backgroundIndexInvalidation };
 }
 
+function healthComponent(id, status, summary, metrics = {}, suggestedAction = "") {
+  return { id, status, summary, metrics, suggestedAction };
+}
+
+async function healthCheckWithTimeout(id, task, timeoutMs, signal) {
+  if (signal?.aborted) throw signal.reason || operationCanceledError();
+  let timeout = null;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(task),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          const error = new Error(`${id} probe timed out.`);
+          error.code = "HEALTH_TIMEOUT";
+          reject(error);
+        }, timeoutMs);
+      }),
+      new Promise((_, reject) => signal?.addEventListener?.("abort", () => reject(operationCanceledError()), { once: true }))
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function healthCacheMetrics() {
+  return {
+    directoryListings: directoryListingCache.size,
+    directoryEntries: directoryListingCacheEntryTotal(),
+    directoryInFlight: directoryListingInFlight.size,
+    folderIndexes: folderIndexCacheStats().entries,
+    folderIndexBytes: folderIndexCacheStats().bytes,
+    sizeAnalyses: sizeAnalysisCache.size,
+    searches: advancedSearchCache.size,
+    backgroundSearchStores: backgroundIndexSearchStoreCache.size
+  };
+}
+
+export async function healthReport({ probe = false, signal = null } = {}) {
+  const startedAt = Date.now();
+  const state = await readState();
+  const nativeHelper = nativeFilesystemHelperPath();
+  const packageInfo = await fs.readFile(path.join(__dirname, "package.json"), "utf8").then(JSON.parse).catch(() => ({}));
+  const operationCounts = (state.operations || []).reduce((counts, operation) => {
+    counts[operation.status] = (counts[operation.status] || 0) + 1;
+    return counts;
+  }, {});
+  const components = [
+    healthComponent("backend", "healthy", "Local backend is responding.", { uptimeSeconds: Math.round(process.uptime()) }),
+    healthComponent("renderer", "healthy", "Renderer-to-backend API boundary is available."),
+    healthComponent("nativeHelper", nativeHelper ? "healthy" : "attention", nativeHelper ? "Native filesystem helper is available." : "Native filesystem helper is missing; Node fallbacks remain available.", {}, nativeHelper ? "" : "Reinstall or rebuild the native helper."),
+    healthComponent("mcpBridge", "healthy", "AI Bridge configuration is readable.", { configuredProfiles: 0 }),
+    healthComponent("shellProvider", process.platform === "win32" ? "healthy" : "attention", process.platform === "win32" ? "Windows shell provider is available for on-demand checks." : "Windows shell provider is unavailable on this platform."),
+    healthComponent("cache", "healthy", "Caches are within bounded in-memory limits.", healthCacheMetrics()),
+    healthComponent("index", backgroundIndexJobs.size ? "attention" : "healthy", backgroundIndexJobs.size ? "Background indexing is active." : "No background index job is active.", { configured: (state.backgroundIndexes || []).length, activeJobs: [...backgroundIndexJobs.values()].filter((job) => job.status === "running").length }),
+    healthComponent("operationQueue", operationControls.size ? "attention" : "healthy", operationControls.size ? "File operations are active." : "Operation queue is idle.", { active: operationControls.size, ...operationCounts }),
+    healthComponent("updateConfiguration", process.env.EXPLORE_BETTER_UPDATE_URL || process.env.EB_UPDATE_URL ? "healthy" : "attention", process.env.EXPLORE_BETTER_UPDATE_URL || process.env.EB_UPDATE_URL ? "An update feed is configured." : "No explicit update feed is configured for this build."),
+    healthComponent("package", packageInfo.version ? "healthy" : "attention", packageInfo.version ? "Package metadata is readable." : "Package metadata could not be read.", { version: packageInfo.version || "unknown" })
+  ];
+  try {
+    const configuration = await getMcpBridgeConfiguration();
+    const component = components.find((item) => item.id === "mcpBridge");
+    component.status = configuration.enabled ? "healthy" : "attention";
+    component.summary = configuration.enabled ? "AI Bridge is enabled." : "AI Bridge is disabled.";
+    component.metrics = { configuredProfiles: configuration.profiles?.length || 0, enabled: configuration.enabled === true };
+  } catch (error) {
+    const component = components.find((item) => item.id === "mcpBridge");
+    component.status = "error";
+    component.summary = `AI Bridge configuration failed: ${String(error.message || error).slice(0, 240)}`;
+    component.suggestedAction = "Restart Explore Better and inspect the AI Bridge profile configuration.";
+  }
+  if (probe) {
+    const probeResults = await Promise.allSettled([
+      healthCheckWithTimeout("state", () => readState(), 1500, signal),
+      healthCheckWithTimeout("nativeHelper", () => nativeHelper ? fs.stat(nativeHelper) : Promise.reject(new Error("Native helper is missing.")), 1500, signal),
+      healthCheckWithTimeout("shellProvider", () => getWindowsDevices({ refresh: true, includeNetwork: false }), 4500, signal)
+    ]);
+    const [stateProbe, nativeProbe, shellProbe] = probeResults;
+    if (stateProbe.status === "rejected") components.find((item) => item.id === "backend").status = "error";
+    if (nativeProbe.status === "rejected") {
+      const component = components.find((item) => item.id === "nativeHelper");
+      component.status = "attention";
+      component.summary = String(nativeProbe.reason?.message || "Native helper probe failed.").slice(0, 240);
+    }
+    if (shellProbe.status === "fulfilled") {
+      const component = components.find((item) => item.id === "shellProvider");
+      component.status = shellProbe.value.status === "ready" ? "healthy" : shellProbe.value.status === "partial" ? "attention" : "error";
+      component.summary = shellProbe.value.status === "ready" ? "Windows shell and device provider responded." : (shellProbe.value.warnings?.[0] || "Windows shell provider returned a partial result.");
+      component.metrics = shellProbe.value.counts;
+    } else if (process.platform === "win32") {
+      const component = components.find((item) => item.id === "shellProvider");
+      component.status = shellProbe.reason?.code === "HEALTH_TIMEOUT" ? "attention" : "error";
+      component.summary = String(shellProbe.reason?.message || "Windows shell provider probe failed.").slice(0, 240);
+    }
+  }
+  const overall = components.some((item) => item.status === "error") ? "error" : components.some((item) => item.status === "attention") ? "attention" : "healthy";
+  return {
+    schemaVersion: "1",
+    version: String(packageInfo.version || "unknown"),
+    platform: process.platform,
+    generatedAt: new Date().toISOString(),
+    probe: probe === true,
+    overall,
+    durationMs: Date.now() - startedAt,
+    components,
+    scheduler: foregroundActivitySnapshot()
+  };
+}
+
+function supportBundleRedactor(includePaths = false) {
+  const pathIds = new Map();
+  const omittedKeys = [];
+  const truncated = [];
+  const sensitiveKey = /(token|nonce|capabilit|credential|password|secret|clipboard|terminalOutput|fileContent|environment)/i;
+  const replacePath = (value) => {
+    const text = String(value || "");
+    if (includePaths) return text;
+    const patterns = [/[A-Za-z]:[\\/][^\r\n"']+/g, /\\\\[^\r\n"']+/g, /\/(?:mnt|home|Users|tmp|var|etc)\/[^\r\n"']+/g];
+    let output = text;
+    for (const pattern of patterns) {
+      output = output.replace(pattern, (match) => {
+        if (!pathIds.has(match)) pathIds.set(match, `PATH-${String(pathIds.size + 1).padStart(4, "0")}`);
+        return `[${pathIds.get(match)}]`;
+      });
+    }
+    return output;
+  };
+  const clean = (value, key = "") => {
+    if (sensitiveKey.test(key)) {
+      omittedKeys.push(key);
+      return "[omitted]";
+    }
+    if (typeof value === "string") {
+      const output = replacePath(value);
+      if (output.length > 20_000) truncated.push({ key: key || "text", originalLength: output.length, kept: 20_000 });
+      return output.slice(0, 20_000);
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 1000) truncated.push({ key: key || "array", originalLength: value.length, kept: 1000 });
+      return value.slice(0, 1000).map((item) => clean(item, key));
+    }
+    if (value && typeof value === "object") {
+      const pairs = Object.entries(value);
+      if (pairs.length > 1000) truncated.push({ key: key || "object", originalLength: pairs.length, kept: 1000 });
+      return Object.fromEntries(pairs.slice(0, 1000).map(([childKey, child]) => [childKey, clean(child, childKey)]));
+    }
+    return value;
+  };
+  return { clean, pathIds, omittedKeys, truncated };
+}
+
+async function streamSupportBundle(res, { includePaths = false } = {}) {
+  const redactor = supportBundleRedactor(includePaths);
+  const state = await readState();
+  const health = await healthReport({ probe: false });
+  const audit = await listMcpAudit(200).catch(() => []);
+  const operationSummary = (state.operations || []).slice(0, 100).map((operation) => ({
+    id: operation.id,
+    type: operation.type,
+    status: operation.status,
+    createdAt: operation.createdAt,
+    startedAt: operation.startedAt,
+    finishedAt: operation.finishedAt,
+    progress: operation.progress ? { unit: operation.progress.unit, total: operation.progress.total, completed: operation.progress.completed, phase: operation.progress.phase } : null,
+    eventCount: operation.events?.length || 0,
+    retryOf: operation.retryOf || null,
+    relatedOperationId: operation.relatedOperationId || null
+  }));
+  const settingsSummary = {
+    settings: state.settings || {},
+    counts: {
+      favorites: state.favorites?.length || 0,
+      aliases: state.aliases?.length || 0,
+      collections: state.collections?.length || 0,
+      backgroundIndexes: state.backgroundIndexes?.length || 0
+    }
+  };
+  const performance = { cache: healthCacheMetrics(), scheduler: foregroundActivitySnapshot(), indexJobs: [...backgroundIndexJobs.values()].map(backgroundIndexJobSnapshot) };
+  const entries = new Map([
+    ["health.json", JSON.stringify(redactor.clean(health), null, 2)],
+    ["runtime-settings.json", JSON.stringify(redactor.clean(settingsSummary), null, 2)],
+    ["operations.json", JSON.stringify(redactor.clean(operationSummary), null, 2)],
+    ["mcp-audit.json", JSON.stringify(redactor.clean(audit), null, 2)],
+    ["performance.json", JSON.stringify(redactor.clean(performance), null, 2)]
+  ]);
+  const maxBundleBytes = 10 * 1024 * 1024;
+  let totalBytes = 0;
+  const omitted = [];
+  for (const [name, text] of [...entries]) {
+    const buffer = Buffer.from(text);
+    if (buffer.length > 2 * 1024 * 1024 || totalBytes + buffer.length > maxBundleBytes - 256 * 1024) {
+      entries.delete(name);
+      omitted.push({ name, reason: "size-limit", bytes: buffer.length });
+    } else {
+      totalBytes += buffer.length;
+      entries.set(name, buffer);
+    }
+  }
+  const summary = `# Explore Better support bundle\n\nOverall health: ${health.overall}\n\nGenerated locally. Local paths ${includePaths ? "were included by explicit opt-in" : "were replaced with opaque IDs"}.\n`;
+  const summaryBuffer = Buffer.from(summary);
+  const manifest = {
+    schemaVersion: "1",
+    createdAt: new Date().toISOString(),
+    includeLocalPaths: includePaths === true,
+    maximumBytes: maxBundleBytes,
+    uncompressedBytes: 0,
+    files: [...entries.keys(), "summary.md", "manifest.json"],
+    omitted,
+    truncated: redactor.truncated.slice(0, 100),
+    redactions: { opaquePathCount: redactor.pathIds.size, omittedSensitiveKeys: [...new Set(redactor.omittedKeys)].slice(0, 100) },
+    exclusions: ["file contents", "terminal output", "clipboard data", "environment secrets", "bridge nonces", "capabilities", "apply tokens", "credentials"]
+  };
+  let manifestBuffer = Buffer.from(JSON.stringify(manifest, null, 2));
+  for (let index = 0; index < 2; index += 1) {
+    manifest.uncompressedBytes = totalBytes + summaryBuffer.length + manifestBuffer.length;
+    manifestBuffer = Buffer.from(JSON.stringify(manifest, null, 2));
+  }
+  if (manifest.uncompressedBytes > maxBundleBytes) throw new Error("Support bundle exceeded the 10 MB safety limit.");
+  entries.set("summary.md", summaryBuffer);
+  entries.set("manifest.json", manifestBuffer);
+  const zip = new yazl.ZipFile();
+  for (const [name, buffer] of entries) zip.addBuffer(buffer, name, { compress: true });
+  const fileName = `explore-better-support-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
+  res.writeHead(200, {
+    "content-type": "application/zip",
+    "content-disposition": `attachment; filename="${fileName}"`,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff"
+  });
+  zip.outputStream.pipe(res);
+  zip.end();
+}
+
 async function handleApi(req, res, url) {
   const route = `${req.method} ${url.pathname}`;
 
   if (route === "GET /api/desktop/health") {
     return sendJson(res, 200, { ok: true, desktopInstanceToken });
+  }
+
+  if (route === "GET /api/health/report") {
+    const signal = requestAbortSignal(req, res);
+    return sendJson(res, 200, await healthReport({ probe: url.searchParams.get("probe") === "1", signal }));
+  }
+
+  if (route === "POST /api/health/renderer-scheduler") {
+    return sendJson(res, 200, { ok: true, scheduler: updateRendererSchedulerSnapshot(await readJson(req)) });
+  }
+
+  if (route === "POST /api/health/support-bundle") {
+    const body = await readJson(req);
+    return streamSupportBundle(res, { includePaths: body.includePaths === true });
   }
 
   if (route === "GET /api/manual") {
@@ -18848,6 +19539,13 @@ async function handleApi(req, res, url) {
 
   if (route === "GET /api/shell/locations") {
     return sendJson(res, 200, await getShellLocations());
+  }
+
+  if (route === "GET /api/windows/devices") {
+    return sendJson(res, 200, await getWindowsDevices({
+      refresh: url.searchParams.get("refresh") === "1",
+      includeNetwork: url.searchParams.get("includeNetwork") === "1"
+    }));
   }
 
   if (route === "POST /api/shell/open") {
@@ -18872,7 +19570,7 @@ async function handleApi(req, res, url) {
       ok: true,
       id: item.id,
       name: item.name,
-      launched: launchShellTarget(item.openTarget)
+      launched: await launchShellTarget(item.openTarget)
     });
   }
 
@@ -19726,7 +20424,10 @@ async function handleApi(req, res, url) {
 
   if (route === "POST /api/operation/undo") {
     const body = await readJson(req);
-    const operation = await enqueueOperation("undo", operationLabel("undo", body), async (hooks) => {
+    const sourceState = await readState();
+    const sourceOperation = sourceState.operations.find((item) => item.id === body.operationId);
+    const undoLabel = sourceOperation?.label ? `Undo ${sourceOperation.label}` : operationLabel("undo", body);
+    const operation = await enqueueOperation("undo", undoLabel, async (hooks) => {
       const state = await readState();
       const original = state.operations.find((item) => item.id === body.operationId);
       await hooks.updateProgress?.({
@@ -19752,7 +20453,8 @@ async function handleApi(req, res, url) {
         current: original?.label || body.operationId
       });
       return result;
-    });
+    }, { relatedOperationId: body.operationId });
+    await recordRelatedOperation(body.operationId, operation, "undo", "Undo operation linked.");
     return sendJson(res, 200, { ...operation.result, operation });
   }
 
@@ -19978,7 +20680,12 @@ const server = http.createServer(async (req, res) => {
     }
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname.startsWith("/api/")) {
-      await handleApi(req, res, url);
+      const releaseForeground = requestIsForegroundWork(url, req.method) ? beginForegroundActivity(`${req.method} ${url.pathname}`) : null;
+      try {
+        await handleApi(req, res, url);
+      } finally {
+        releaseForeground?.();
+      }
       return;
     }
     await serveStatic(req, res, url);
@@ -20074,13 +20781,23 @@ function persistedMcpContextFromState(state) {
     panes,
     selection: [],
     focusedPath: "",
+    ui: {
+      status: "",
+      toast: { visible: false, text: "" },
+      openDialogs: [],
+      activeControl: null,
+      lastInteraction: null,
+      navigator: { visible: false, sections: [] },
+      terminals: [],
+      update: { visible: false, title: "", message: "" }
+    },
     contextRevision: 0
   };
 }
 
 async function startMcpUndoOperation(operationId, principal) {
   const body = { operationId };
-  return enqueueOperation("undo", operationLabel("undo", body), async (hooks) => {
+  const operation = await enqueueOperation("undo", operationLabel("undo", body), async (hooks) => {
     const state = await readState();
     const original = state.operations.find((item) => item.id === operationId);
     if (!original) {
@@ -20103,9 +20820,12 @@ async function startMcpUndoOperation(operationId, principal) {
     return result;
   }, {
     returnQueued: true,
+    relatedOperationId: operationId,
     mcpProfileId: principal.profileId,
     mcpSessionId: principal.sessionId
   });
+  await recordRelatedOperation(operationId, operation, "undo", "Undo operation linked.");
+  return operation;
 }
 
 async function getMcpAutomationService() {
@@ -20125,6 +20845,7 @@ async function getMcpAutomationService() {
         checksumReport,
         getRoots,
         getShellLocations,
+        healthReport,
         indexStatus: (targetPath) => folderIndexStatus(targetPath || "", ""),
         sizeAnalysisReport,
         duplicateFiles,
@@ -20146,6 +20867,7 @@ async function getMcpAutomationService() {
           const state = await readState();
           return state.operations.find((operation) => operation.id === operationId) || null;
         },
+        waitForOperation: waitForOperationCondition,
         controlOperation: async (operationId, action, principal = {}) => {
           if (action === "cancel") return cancelOperation(operationId);
           if (action === "pause") return pauseOperation(operationId);
@@ -20205,6 +20927,10 @@ export async function readMcpAutomationResource(request) {
 
 export async function setMcpUiDispatcher(dispatcher) {
   (await getMcpAutomationService()).setUiDispatcher(dispatcher);
+}
+
+export function setMcpResourceUpdatePublisher(publisher) {
+  mcpResourceUpdatePublisher = typeof publisher === "function" ? publisher : null;
 }
 
 export { host, port };

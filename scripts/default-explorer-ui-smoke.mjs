@@ -136,6 +136,12 @@ async function main() {
     await waitForServer(baseUrl, server, () => serverOutput);
     browser = await chromium.launch({ executablePath: edgePath(), headless: true });
     const promptContext = await browser.newContext({ viewport: { width: 1366, height: 768 } });
+    await promptContext.route("**/api/integration/status", async (route) => {
+      const response = await route.fetch();
+      const status = await response.json();
+      status.registry = { ...(status.registry || {}), folderDefaultEnabled: false };
+      await route.fulfill({ response, json: status });
+    });
     await promptContext.addInitScript(() => {
       window.exploreBetterDesktop = {
         appInfo: async () => ({ packaged: true, smoke: false })

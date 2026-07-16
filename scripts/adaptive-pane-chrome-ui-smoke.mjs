@@ -58,6 +58,9 @@ async function paneGeometry(page, paneName) {
       return value ? { width: Math.round(value.width), height: Math.round(value.height), top: Math.round(value.top), bottom: Math.round(value.bottom) } : null;
     };
     const breadcrumbs = pane.querySelector(".breadcrumb-strip");
+    const currentBreadcrumb = breadcrumbs?.querySelector(".breadcrumb-button.current");
+    const breadcrumbBounds = breadcrumbs?.getBoundingClientRect();
+    const currentBreadcrumbBounds = currentBreadcrumb?.getBoundingClientRect();
     const toolbar = pane.querySelector(".toolbar");
     const toggle = pane.querySelector("[data-compact-breadcrumbs]");
     return {
@@ -69,6 +72,15 @@ async function paneGeometry(page, paneName) {
       list: rect(".file-list"),
       breadcrumbsDisplay: getComputedStyle(breadcrumbs).display,
       breadcrumbsPosition: getComputedStyle(breadcrumbs).position,
+      breadcrumbsFlexWrap: getComputedStyle(breadcrumbs).flexWrap,
+      breadcrumbsOverflowX: getComputedStyle(breadcrumbs).overflowX,
+      breadcrumbsClientWidth: Math.round(breadcrumbs.clientWidth),
+      breadcrumbsScrollWidth: Math.round(breadcrumbs.scrollWidth),
+      breadcrumbsScrollLeft: Math.round(breadcrumbs.scrollLeft),
+      currentBreadcrumbVisible:
+        Boolean(currentBreadcrumbBounds && breadcrumbBounds) &&
+        currentBreadcrumbBounds.left >= breadcrumbBounds.left - 1 &&
+        currentBreadcrumbBounds.right <= breadcrumbBounds.right + 1,
       expanded: toggle.getAttribute("aria-expanded"),
       toggle: rect("[data-compact-breadcrumbs]"),
       toolbarOverflow: Math.max(0, toolbar.scrollWidth - toolbar.clientWidth),
@@ -290,12 +302,19 @@ async function main() {
     );
     await page.locator('[data-list="left"]').focus();
     await page.keyboard.press("Control+Shift+1");
-    await page.waitForFunction(() => document.querySelector(".workbench")?.classList.contains("layout-vertical"));
+    await page.waitForFunction(
+      () =>
+        document.querySelector(".workbench")?.classList.contains("layout-vertical") &&
+        Number(document.querySelector('[data-breadcrumbs="left"]')?.scrollLeft || 0) > 0
+    );
     evidence.vertical = await paneGeometry(page, "left");
     check(
       checks,
-      "vertical-keeps-full-breadcrumbs",
-      evidence.vertical.breadcrumbsDisplay === "flex" && evidence.vertical.toggle.width === 0 && evidence.vertical.toggle.height === 0,
+      "vertical-breadcrumbs-stay-single-line",
+      evidence.vertical.breadcrumbsDisplay === "flex" && evidence.vertical.toggle.width === 0 && evidence.vertical.toggle.height === 0 &&
+        evidence.vertical.pathbar.height <= 78 && evidence.vertical.breadcrumbsFlexWrap === "nowrap" &&
+        evidence.vertical.breadcrumbsOverflowX === "auto" && evidence.vertical.breadcrumbsScrollWidth > evidence.vertical.breadcrumbsClientWidth &&
+        evidence.vertical.breadcrumbsScrollLeft > 0 && evidence.vertical.currentBreadcrumbVisible,
       JSON.stringify(evidence.vertical)
     );
 

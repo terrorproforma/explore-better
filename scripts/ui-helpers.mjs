@@ -2,8 +2,14 @@ export async function clickDockAction(page, actionId, options = {}) {
   const selector = `.command-dock [data-global-action="${actionId}"]`;
   const direct = page.locator(selector);
   if (await direct.isVisible()) {
-    await direct.click(options);
-    return "shelf";
+    try {
+      await direct.click({ ...options, timeout: Math.min(options.timeout || 10000, 1000) });
+      return "shelf";
+    } catch {
+      // Responsive measurement can move a command into overflow between the
+      // visibility probe and Playwright's actionability check. Fall through
+      // to the stable overflow dispatch path.
+    }
   }
   const timeout = options.timeout || 10000;
   const deadline = Date.now() + timeout;

@@ -34,7 +34,7 @@ var contractFiles embed.FS
 var version = "dev"
 
 const (
-	bridgeProtocolVersion = 1
+	bridgeProtocolVersion = 2
 	maxBridgeFrameBytes   = 4 * 1024 * 1024
 )
 
@@ -99,6 +99,7 @@ type bridgeFrame struct {
 	Tool        string          `json:"tool,omitempty"`
 	Args        json.RawMessage `json:"args,omitempty"`
 	URI         string          `json:"uri,omitempty"`
+	Revision    int             `json:"revision,omitempty"`
 	RequestID   string          `json:"requestId,omitempty"`
 	Result      json.RawMessage `json:"result,omitempty"`
 	Error       *bridgeError    `json:"error,omitempty"`
@@ -119,17 +120,19 @@ func (e *bridgeError) Error() string {
 }
 
 type bridgeClient struct {
-	profileID    string
-	appPath      string
-	appDir       string
-	manifest     string
-	mu           sync.Mutex
-	writeMu      sync.Mutex
-	conn         net.Conn
-	pending      map[string]chan bridgeFrame
-	disconnected chan struct{}
-	sessionID    string
-	clientInfo   any
+	profileID       string
+	appPath         string
+	appDir          string
+	manifest        string
+	mu              sync.Mutex
+	writeMu         sync.Mutex
+	conn            net.Conn
+	pending         map[string]chan bridgeFrame
+	disconnected    chan struct{}
+	sessionID       string
+	clientInfo      any
+	resourceUpdated func(string)
+	subscriptions   map[string]struct{}
 }
 
 func randomID() string {
@@ -306,8 +309,14 @@ func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, cl
 	b.disconnected = make(chan struct{})
 	b.sessionID = sessionID
 	b.clientInfo = clientInfo
+	if b.subscriptions == nil {
+		b.subscriptions = make(map[string]struct{})
+	}
 	go b.readLoop(conn)
 	go b.heartbeat(conn, b.disconnected)
+	for uri := range b.subscriptions {
+		_ = writeBridgeFrame(conn, bridgeFrame{Version: bridgeProtocolVersion, ID: randomID(), Op: "subscribe", URI: uri})
+	}
 	return nil
 }
 
@@ -365,6 +374,12 @@ func (b *bridgeClient) readLoop(conn net.Conn) {
 		if err != nil {
 			b.disconnect(conn, err)
 			return
+		}
+		if frame.Type == "resource_updated" && frame.URI != "" {
+			if notify := b.resourceUpdated; notify != nil {
+				go notify(frame.URI)
+			}
+			continue
 		}
 		b.mu.Lock()
 		channel := b.pending[frame.ID]
@@ -590,8 +605,38 @@ func main() {
 	defer bridge.close()
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "explore-better", Title: "Explore Better", Version: version, WebsiteURL: "https://terrorproforma.github.io/explore-better/"},
-		&mcp.ServerOptions{Instructions: activeContract.ServerInstructions, PageSize: 100, KeepAlive: 20 * time.Second},
+		&mcp.ServerOptions{
+			Instructions: activeContract.ServerInstructions,
+			PageSize:     100,
+			KeepAlive:    20 * time.Second,
+			SubscribeHandler: func(ctx context.Context, request *mcp.SubscribeRequest) error {
+				sessionID, clientInfo := sessionIdentity(request.Session)
+				_, err := bridge.call(ctx, sessionID, clientInfo, "subscribe", bridgeFrame{URI: request.Params.URI})
+				if err == nil {
+					bridge.mu.Lock()
+					if bridge.subscriptions == nil {
+						bridge.subscriptions = make(map[string]struct{})
+					}
+					bridge.subscriptions[request.Params.URI] = struct{}{}
+					bridge.mu.Unlock()
+				}
+				return err
+			},
+			UnsubscribeHandler: func(ctx context.Context, request *mcp.UnsubscribeRequest) error {
+				sessionID, clientInfo := sessionIdentity(request.Session)
+				_, err := bridge.call(ctx, sessionID, clientInfo, "unsubscribe", bridgeFrame{URI: request.Params.URI})
+				if err == nil {
+					bridge.mu.Lock()
+					delete(bridge.subscriptions, request.Params.URI)
+					bridge.mu.Unlock()
+				}
+				return err
+			},
+		},
 	)
+	bridge.resourceUpdated = func(uri string) {
+		_ = server.ResourceUpdated(context.Background(), &mcp.ResourceUpdatedNotificationParams{URI: uri})
+	}
 
 	for _, definition := range activeContract.Tools {
 		toolDefinition := definition

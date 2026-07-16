@@ -207,9 +207,10 @@ async function main() {
   const latestYmlPath = path.join(feedRoot, "latest.yml");
   const latestYml = (await pathExists(latestYmlPath)) ? await fs.readFile(latestYmlPath, "utf8") : "";
   const feed = await startFeedServer(feedPort);
-  const command = process.platform === "win32" ? "cmd.exe" : "npm";
-  const args =
-    process.platform === "win32" ? ["/d", "/s", "/c", "npm run desktop:smoke-update-feed"] : ["run", "desktop:smoke-update-feed"];
+  const command = process.platform === "win32"
+    ? path.join(workspace, "node_modules", "electron", "dist", "electron.exe")
+    : path.join(workspace, "node_modules", ".bin", "electron");
+  const args = [".", "--smoke", "--smoke-window", "--smoke-update-feed"];
   let result = null;
   try {
     result = await runCommand(command, args, {

@@ -99,13 +99,13 @@ npm run verify:shell-rehearsal
 
 The window has five main regions:
 
-- Navigator: favorites, aliases, Windows Shell locations, drives, folder tree, and recent folders.
+- Navigator: a compact Pinned presentation for Favorites and Aliases, the primary Folder Tree, meaningful connected Devices when present, Quick Access, drives, and recent folders. Favorites and Aliases remain separate saved models and keep their existing management dialogs.
 - Left pane and right pane: independent file listings with tabs.
 - Preview: inspector for selected files and folders.
-- Top bar: roots plus direct access to Search, Disk Map, Operations, and the complete Command palette.
+- Top bar: one measured 44 px row containing roots, status, Search, Disk Map, Operations, Command, and Focus. When space is tight, labels collapse and then Focus, Operations, and Disk Map move into the keyboard-accessible `More` menu before Search or Command. Removed root/status values are repeated inside More.
 - Command shelf: a compact workstation strip by default, divided into active-pane status, customizable actions, and always-reachable workspace modes. Drag its top edge upward to reveal additional wrapped action rows instead of a blank panel. Only the middle action zone scrolls when necessary, so selection, clipboard, Operations, Auto, Hidden, Link, and pane layout stay anchored.
 - Pane command strip: the familiar folder-plus, pencil, copy, move, recycle, and ellipsis icons keep both pane toolbars the same width in every layout. Hover for the complete action and destination; selection-dependent icons enable only when the pane has a selection.
-- Focus: click `Focus` or press `F9` to hide Navigator, Preview, roots, and secondary brand text while keeping Search, Disk Map, Operations, Command, both panes, status, and the command shelf available. Press `F9` again to restore the full workstation.
+- Focus: click `Focus` or press `F9` to hide Navigator, Preview, and secondary brand text while keeping both panes, the one-row top bar, roots/status when space allows, and the command shelf available. Narrow layouts preserve removed root/status values inside `More`. Press `F9` again to restore the full workstation.
 - Status controls: choose the selection summary to return keyboard focus to the active file list, or choose the operation count to open Operations and recovery directly.
 
 Drag the separators between Navigator, panes, and Preview to resize them. In horizontal split mode, drag the separator between the upper and lower panes. Drag the top edge of the command dock to make the command area taller or shorter. Sizes are saved automatically.
@@ -119,6 +119,8 @@ The active pane is marked `SOURCE`; the opposite pane is marked `TARGET`. Copy a
 Open `Command` or press `Ctrl+P` to reach every built-in action, saved tool, and saved script without expanding the command shelf. Search accepts full words, fragments, or compact initials. Results prioritize exact matches, pins, and recent usage before grouping the remaining actions by task.
 
 Use `All` for the complete registry, `Recent` for the latest 12 executed actions, and `Pinned` for a personal shortlist. The bookmark control beside a result pins it; `Ctrl+D` toggles the active result from the keyboard. Pins and recents are stored locally and persist after restart. Arrow keys change the active result and `Enter` runs it. Existing custom hotkeys appear on their matching result.
+
+Each result includes an outcome chip and plain-language description: **In Explore Better**, **File Explorer**, **External app**, or **Windows dialog**. An external handoff reports that the request started; it does not claim another application definitely opened.
 
 Each pane keeps Filter, view mode, New Folder, Rename, Copy, Move, and Recycle visible. Choose `More` in that pane for Kind/Label filters, New File, Bulk Rename, Columns, recursive Folder Sizes, Format, Label, App Trash, and Permanent Delete. This keeps file rows visible while preserving the complete pane action set.
 
@@ -137,8 +139,10 @@ Choose `Focus` in the top bar, run `Toggle focus workspace` from Command, or pre
 - Use `Alt+Left` and `Alt+Right` for pane history.
 - Use the path bar to type or paste a folder path.
 - Use breadcrumbs under the path bar to jump to parent folders.
-- Use Navigator Shell rows for This PC, Libraries, Network, Recycle Bin, App Trash, media folders, and discovered Windows Libraries.
-- Use the Shell `Browse` button or command palette `Open shell browser` to inspect virtual shell locations in-app. Real filesystem items can open in the active pane; virtual devices, libraries, and network providers can be browsed further or opened through Explorer.
+- Use Folder Tree, Quick Access, and Drives for ordinary filesystem navigation. Folder Tree remains above Drives and the Navigator rail owns the only vertical scrollbar.
+- Pinned is hidden when Favorites and Aliases are both empty. Recent is hidden when empty, shows eight locations initially, and uses `Show all` / `Show fewer` without creating a nested scrollbar.
+- Run `Open Devices & Windows locations` from Command Center when you need a removable or portable device, mapped network location, library, or virtual Windows location. Initial loading does not query the slow Network provider; choose `Load network locations` when you explicitly need it.
+- Device actions are capability-based and use explicit names: `Browse in Explore Better`, `Open in active pane`, and `Open in File Explorer`. Fixed system drives do not create a redundant Devices section in Navigator.
 - Windows compatibility junctions such as `Documents\My Videos`, `Documents\My Pictures`, and `Documents\My Music` redirect to the real known folders when possible. If Windows blocks a genuinely protected folder, the pane shows an access note instead of forcing the whole app to run as administrator.
 
 Each pane has its own tabs, path, history, filters, columns, sort order, and view mode.
@@ -192,6 +196,8 @@ Use `Transfer` for conflict-aware copy/move with rename, overwrite, and skip dec
 
 Operations appear in `Ops`, where supported work can be paused, resumed, retried, canceled, inspected, elevated, or undone. If a copy, move, or permanent delete fails because Windows requires administrator rights, open `Ops`, inspect the failed operation, and use `Elevate Remaining`, `Elevate Selected`, or `Elevate All` to launch a structured UAC helper for the remaining paths.
 
+Operation Details starts with a chronological timeline covering queueing, start, meaningful phase changes, bounded progress milestones, pause/resume, cancellation requests, failure, retry, Undo, recovery, and completion. Retry and Undo entries link to their source operation. Older journal rows remain readable and receive a display-only timeline synthesized from their existing timestamps.
+
 ## Search, Compare, And Bulk Tools
 
 - `Search`: bounded recursive filename/content search with filters, plus `Warm Cache` mode for querying saved background-index roots without a live crawl.
@@ -210,8 +216,8 @@ In `Compare`, use `Plan L->R` or `Plan R->L` before syncing. The preview lists c
 
 ## Organization
 
-- `Favorites`: saved locations in the Navigator.
-- `Aliases`: short path prefixes such as `proj:`.
+- `Favorites`: saved locations presented as Favorite items under Pinned.
+- `Aliases`: short path prefixes such as `proj:`, presented as Alias items under Pinned while retaining alias expansion behavior.
 - `Collections`: saved groups of paths from many folders.
 - `Basket`: scratchpad for gathering files before one batch action.
 - `Snapshots`: frozen pane listings that can be restored later.
@@ -250,6 +256,20 @@ Administrator mode elevates only the new terminal through Windows UAC. Explore B
 
 Closing an idle terminal ends it immediately. Closing a terminal with a running command asks for confirmation and terminates the terminal's complete process tree. Terminal processes are not restored after an application restart.
 
+## Preferences
+
+The sticky Preferences search filters section labels, control labels, and help text; it never searches values you typed into settings. Clear the query to restore every section. A badge on each section shows when its current draft differs from saved settings.
+
+`Reset Files and folders`, `Reset Windows integration`, and `Reset Terminal` name the affected section and update the draft only after confirmation. Nothing is persisted until you choose `Save App Preferences`. `Reset All` follows the same draft-then-save rule. AI Bridge profiles are outside these resets and continue to use their separate Save Profile and Revoke workflow. Close, Escape, and Windows Integration retain the existing unsaved-draft protection, and the footer remains visible while the settings body scrolls.
+
+## Health And Diagnostics
+
+Open `Health & diagnostics` from Command Center or the Preferences footer. The normal report reads cheap local status for the backend, renderer, native helper, MCP bridge, Windows shell provider, caches, index, operation queue, update configuration, package, and adaptive scheduler. `Run probes` performs bounded active checks with per-component timeouts and keeps partial results when one component does not respond.
+
+`Export support bundle` creates a streamed ZIP capped at 10 MB. By default, absolute paths are replaced with per-bundle opaque IDs. `Include local paths` is deliberately unchecked. File contents, terminal output, clipboard data, environment secrets, credentials, bridge nonces, capabilities, and apply tokens are never included even when path inclusion is enabled. The manifest reports any omitted or truncated category.
+
+Background listing prefetch starts only after 250 ms of foreground inactivity, prioritizes keyboard/focus intent over hover, and remains capped at two active requests. Navigation, search, analysis, operations, or hiding the app pauses speculative work immediately. Server indexing finishes the current filesystem call, pauses before the next directory batch, and resumes automatically after foreground activity settles. Current scheduler state and counters appear in Health & diagnostics; there are no manual tuning controls in this release.
+
 ## AI Bridge And MCP
 
 The installed desktop app includes `ExploreBetterMcp.exe`, a local MCP server that lets compatible AI clients use Explore Better's structured file context and safety systems. It complements the integrated terminal: use the terminal for arbitrary commands and MCP for reliable panes, selections, indexed discovery, disk analysis, recoverable operations, and audit records.
@@ -257,6 +277,8 @@ The installed desktop app includes `ExploreBetterMcp.exe`, a local MCP server th
 The public [MCP evidence page](https://terrorproforma.github.io/explore-better/mcp/) explains this boundary, lists the complete tool model, and publishes a reproducible comparison with equivalent PowerShell workflows. The machine-readable result is available at [mcp-value.json](https://terrorproforma.github.io/explore-better/benchmarks/mcp-value.json). The benchmark requires both interfaces to match known fixture answers, then separately proves typed discovery, opaque pagination, live pane context, root isolation, read-only capability reduction, and labeled allocated-size semantics. It does not treat MCP as a replacement for a warm interactive shell.
 
 The AI Bridge is disabled until you configure it. It uses local stdio between the AI client and the sidecar, then a random same-user named pipe between the sidecar and Explore Better. It does not open a network port, run arbitrary commands, control terminals, edit the registry, or elevate the app.
+
+The additive schema-v1 contract now exposes 32 tools, 6 resources, 4 prompts, and 43 named UI views. Existing profiles retain their saved tool list after an update and show **New permissions available** instead of silently gaining the three semantic-control permissions. Newly created profiles receive the safe defaults appropriate to their read-only or read-write mode.
 
 ### Enable A Client
 
@@ -295,6 +317,10 @@ Context:
 - `get_context` returns live pane, tab, path, selection, focus, layout, and revision information.
 - `list_locations` returns authorized roots and available shell locations without exposing filesystem-backed locations outside the profile.
 - `show_in_explore_better` reveals a path, replaces a pane location, or opens a new tab through the trusted renderer.
+- `set_ui_view` opens or closes 43 named views so `get_context` can immediately inspect their visible controls and state. Coverage includes Operations and recovery, Search and indexes, Disk Usage and power tools, Preview/Viewer/Editor/Properties, checksums, labels/collections/selection sets/basket, layouts and presets, tools/scripts/hotkeys, file-action planning dialogs, Devices, Health, Preferences, Integration, Command Center, and Manual. Views with a file-selection precondition return `UI_PRECONDITION` instead of pretending to open.
+- `list_ui_actions` returns the bounded renderer-owned semantic action catalog, including disabled actions and their reasons.
+- `invoke_ui_action` runs one permitted stable action ID with schema-validated inputs and an optional expected context revision. It accepts no CSS selector, script, raw DOM event, keyboard text, terminal control, preference save/reset, security-profile change, Retry, or Undo.
+- `wait_for_ui` waits up to 30 seconds for structured view, dialog, status, toast, pane, selection, or operation conditions without client polling. Timeout returns the latest authorized context as a partial result; normal MCP cancellation aborts the underlying wait.
 
 Discovery:
 
@@ -337,7 +363,7 @@ Applied work uses the same staging, backups, operation queue, durable journal, c
 
 ### Resources And Prompts
 
-MCP resources provide `explore-better://context/current`, `explore-better://roots`, job and operation records by ID, and `explore-better://manual/ai-bridge`. Built-in prompts cover investigating the current selection, finding space savings, organizing a folder safely, and comparing folders before a sync. Organization and sync prompts deliberately stop before applying writes.
+MCP resources provide `explore-better://context/current`, `explore-better://roots`, job and operation records by ID, `explore-better://health/current`, and `explore-better://manual/ai-bridge`. Clients that subscribe to context or a concrete operation receive only the changed URI and then reread the authorized resource; paths and UI text are never pushed in unsolicited bridge frames. `wait_for_ui` remains the portable fallback for clients without resource subscriptions. Built-in prompts cover investigating the current selection, finding space savings, organizing a folder safely, and comparing folders before a sync. Organization and sync prompts deliberately stop before applying writes.
 
 ### Headless Use, Audit, And Removal
 
@@ -347,7 +373,7 @@ Audit History records the client, tool, paths, outcome, duration, policy decisio
 
 To remove a client entry, use its **Remove** action in AI Bridge Preferences. To stop all access immediately, clear **Enable AI Bridge**. To remove the deployed sidecar and all bridge state, uninstall Explore Better with full cleanup selected. Configuration backups remain available until cleanup so a damaged third-party configuration can be restored manually.
 
-Common errors include `BRIDGE_DISABLED`, `OUTSIDE_ROOTS`, `STALE_CONTEXT`, `PREVIEW_EXPIRED`, `PLAN_CHANGED`, `CONFLICT`, `CANCELED`, `ELEVATION_REQUIRED`, and `LIMIT_EXCEEDED`. If a client does not see new tools after an update, restart the client or reset its MCP tool cache. If setup reports invalid JSON or TOML, repair that client configuration first; Explore Better will not overwrite malformed configuration.
+Common errors include `BRIDGE_DISABLED`, `OUTSIDE_ROOTS`, `STALE_CONTEXT`, `PREVIEW_EXPIRED`, `PLAN_CHANGED`, `CONFLICT`, `REQUEST_CANCELED`, `ELEVATION_REQUIRED`, and `LIMIT_EXCEEDED`. If a client does not see new tools after an update, restart the client or reset its MCP tool cache. If setup reports invalid JSON or TOML, repair that client configuration first; Explore Better will not overwrite malformed configuration.
 
 ## Explorer Integration
 
@@ -418,7 +444,7 @@ Explore Better prioritizes fast browsing:
 - The listing cache is short-lived, bounded, and least-recently-used, so fast revisits stay instant without letting long browsing sessions grow memory forever.
 - `Speed` builds a persistent per-folder index for instant warm-cache filename and metadata searches.
 - Tile thumbnails load lazily from versioned raw URLs, so image-heavy folders only request visible thumbnail windows and can reuse browser cache.
-- Shell Browser namespace reads use bounded provider timeouts and short warm caching so slow Network providers do not repeatedly stall browsing.
+- Windows-only location reads use bounded provider timeouts and short warm caching so slow Network providers do not repeatedly stall browsing.
 - Tile thumbnails and viewer thumbnails use versioned raw-file URLs so unchanged images can reuse browser cache entries.
 - `npm run perf:bench` measures cold list, warm list, pane-style filter latency, live search latency, folder-index search, background-index search, opt-in background text-content indexing, optional network-path timings, and thumbnail-ish image metadata cache timings.
 - `npm run perf:guard` runs three fresh measured repetitions by default, uses numeric medians for speed budgets and trend history, requires functional cache/index assertions in every repetition, and fails when core speed budgets are exceeded. It writes `artifacts\perf-guard-latest.json` and `.md`, appends trendable metrics to `artifacts\perf-trend-history.jsonl`, and writes `artifacts\perf-trend-latest.json` plus `.md` so regressions are visible against historical medians.
@@ -480,7 +506,7 @@ Explore Better prioritizes fast browsing:
 - `npm run verify:shell-namespace` proves This PC enumerates through Windows Shell.Application, checks Network and Libraries return bounded structured reports, validates Network warm-cache speed, validates pane-openable shell items, and dry-runs shell handoff.
 - `npm run verify:shell-devices` proves phone/MTP/camera-style shell providers under This PC are treated as shell-only devices, not normal pane folders, records This PC warm-cache evidence, captures a Windows PnP/CIM hardware snapshot without elevation, and browses or dry-runs a device target when one is attached. Use `npm run verify:shell-devices -- --require-device` to make attached-device proof a hard gate, and add `--device-query="DEVICE NAME"` when targeting a specific phone or camera.
 - `npm run verify:native-shell-readiness` writes a final local-vs-attached-device native-shell checklist and fails only on local shell evidence gaps unless `-- --strict` is used.
-- `npm run verify:shell` proves the Navigator Shell API exposes This PC, Libraries, Network, Recycle Bin, special folders, and discovered Windows Library targets while rejecting unknown shell-open IDs.
+- `npm run verify:shell` proves the advanced Windows-locations API exposes This PC, Libraries, Network, Recycle Bin, special folders, and discovered Windows Library targets while rejecting unknown shell-open IDs.
 - `npm run verify:windows-recycle` creates one temp file, recycles it, lists it through the in-app Windows Recycle API, dry-runs restore validation, restores it through `Ops`, and confirms it returns to disk.
 - `npm run verify:zip-browse` creates a nested ZIP fixture, browses it through the virtual pane API without extracting, and checks parent paths and timing output.
 - `npm run verify:background-index` proves recursive background indexes and warm-cache filename, label-note, and text-content searches.
@@ -510,13 +536,17 @@ Explore Better prioritizes fast browsing:
 - `npm run verify:action-inventory` writes the control/keyboard action inventory and pending Computer Use evidence matrix used for physical acceptance passes.
 - `npm run verify:large-folder-ui` opens a 10k-entry browser fixture, proves virtualized row rendering stays bounded, checks stressed header layout, and verifies filtering plus virtual scrolling.
 - `npm run verify:large-folder-100k-ui` opens a cold 100k-entry browser fixture on desktop, enforces the 750ms first-window and 2s hydration gates, proves virtualized row rendering stays bounded, and verifies the client filter path still responds.
-- `npm run verify:startup-recovery-ui` removes a saved deep folder, proves startup recovers both panes and persists the nearest existing ancestor, checks Focus/root overflow and stable icon widths at 1280x720, and confirms an explicit missing launch target still reports an error.
+- `npm run verify:startup-recovery-ui` removes a saved deep folder, proves startup recovers both panes and persists the nearest existing ancestor, checks Focus preserves the 44 px top-bar context while hiding side panels, verifies stable icon widths at 1280x720, and confirms an explicit missing launch target still reports an error.
 - `npm run verify:workspace-panels-ui` collapses Navigator and Preview from their headers, proves pane width and height are reclaimed, exercises vertical/horizontal/single layouts plus Focus, reloads to verify persistence, and restores both panels from the permanent dock controls.
 - `npm run verify:keyboard-workflows-ui` drives command-palette execution and Quick Search filtering entirely from the keyboard, checks focus handoff, and verifies the keyboard UI is not clipped or squished.
 - `npm run verify:accessibility` checks useful accessible names, keyboard file-list navigation, command-palette focus, and high-contrast focus styling.
 - `npm run verify:terminal` builds the lazy xterm renderer, exercises real ConPTY input/output and simultaneous pane sessions, runs hostile terminal IPC probes, verifies per-tab UI behavior and resizing, and confirms all test-owned shells are cleaned up.
 - `npm run verify:packaged-terminal` launches the unpacked release executable, requires the x64 node-pty prebuild to be outside the app archive, exercises terminal input/output and both panes, records first-prompt timing, and proves the packaged process exits cleanly.
 - `npm run verify:mcp-value` starts the real Electron host and Go stdio sidecar, compares three file workflows with equivalent PowerShell scripts on a deterministic fixture, and proves six MCP-specific context, schema, pagination, authorization, capability, and allocation controls.
+- `npm run verify:mcp-semantic-ui` exercises the bounded semantic action catalog through the real Electron host and Go sidecar, including disabled, stale-revision, blocked-dialog, unauthorized-root, invalid-input, permission-migration, cancellation, subscription, and redaction boundaries.
+- `npm run verify:mcp-operation-wait` performs a real file operation, waits without polling, verifies the concrete operation resource notification and reread, and checks the bounded timeline.
+- `npm run verify:health-devices-support` verifies device capability reporting, non-blocking Network behavior, Health component states, MCP health redaction, and support-bundle exclusions and size limits.
+- `npm run verify:navigator-product-ui` covers empty, Favorite, Alias, mixed Pinned, 0/1/8/9/20 Recent states, disclosure behavior, dynamic device connect/disconnect, explicit action labels, section order, and single-scroll ownership.
 - `npm run verify:seo-discovery` validates canonical URLs, structured data, crawler access, sitemap and LLM manifests, public benchmark synchronization, responsive MCP-page layout, and anonymous OAI-SearchBot access to every machine-readable endpoint.
 
 If a folder looks stale, press `R` or click Refresh.

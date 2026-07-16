@@ -1,7 +1,7 @@
 {
   "schema": "explore-better.mcp-value.v1",
-  "generatedAt": "2026-07-14T11:24:55.905Z",
-  "appVersion": "0.2.0",
+  "generatedAt": "2026-07-16T16:29:03.173Z",
+  "appVersion": "0.2.4",
   "protocolVersion": "2025-11-25",
   "methodology": {
     "repetitions": 3,
@@ -12,8 +12,8 @@
   "environment": {
     "platform": "win32",
     "architecture": "x64",
-    "node": "v24.12.0",
-    "cpu": "Intel(R) Core(TM) Ultra 9 275HX"
+    "node": "v24.14.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K"
   },
   "fixture": {
     "files": 380,
@@ -27,8 +27,8 @@
   "summary": {
     "workflowsPassed": 3,
     "workflowsTotal": 3,
-    "mcpSpecificProofsPassed": 6,
-    "mcpSpecificProofsTotal": 6,
+    "mcpSpecificProofsPassed": 7,
+    "mcpSpecificProofsTotal": 7,
     "conclusion": "MCP does not replace a shell. It adds typed discovery, live Explore Better context, bounded outputs, least-authority profiles, and application-level file semantics that generic terminal access does not provide by default."
   },
   "workflows": [
@@ -40,23 +40,23 @@
       },
       "mcp": {
         "correct": true,
-        "medianMs": 9.8,
+        "medianMs": 1.5,
         "medianOutputBytes": 4646,
         "runsMs": [
-          11.4,
-          9.8,
-          2
+          6.6,
+          1.5,
+          1.4
         ],
         "interface": "typed search_files response"
       },
       "powershell": {
         "correct": true,
-        "medianMs": 536.1,
+        "medianMs": 222.4,
         "medianOutputBytes": 369,
         "runsMs": [
-          537.5,
-          454.4,
-          536.1
+          261.9,
+          222.4,
+          217
         ],
         "interface": "custom Get-ChildItem pipeline serialized to JSON"
       }
@@ -71,23 +71,23 @@
       },
       "mcp": {
         "correct": true,
-        "medianMs": 130.4,
-        "medianOutputBytes": 24270,
+        "medianMs": 46.5,
+        "medianOutputBytes": 23806,
         "runsMs": [
-          264.1,
-          130.4,
-          105.5
+          46.5,
+          46.5,
+          111.7
         ],
         "interface": "cancellable find_duplicates job"
       },
       "powershell": {
         "correct": true,
-        "medianMs": 580.5,
+        "medianMs": 247.6,
         "medianOutputBytes": 355,
         "runsMs": [
-          625.3,
-          560.3,
-          580.5
+          278.3,
+          245.2,
+          247.6
         ],
         "interface": "custom size-group and Get-FileHash pipeline"
       }
@@ -101,12 +101,12 @@
       },
       "mcp": {
         "correct": true,
-        "medianMs": 72.3,
-        "medianOutputBytes": 132639,
+        "medianMs": 51.4,
+        "medianOutputBytes": 132634,
         "runsMs": [
-          60.2,
-          73.3,
-          72.3
+          49.7,
+          53.9,
+          51.4
         ],
         "allocationAccuracy": "exact",
         "allocatedBytesReported": true,
@@ -114,12 +114,12 @@
       },
       "powershell": {
         "correct": true,
-        "medianMs": 445.4,
+        "medianMs": 239.9,
         "medianOutputBytes": 520,
         "runsMs": [
-          452.5,
-          426.7,
-          445.4
+          239.9,
+          228.1,
+          248.2
         ],
         "allocationAccuracy": "not-reported",
         "allocatedBytesReported": false,
@@ -132,13 +132,13 @@
       "id": "schema-discovery",
       "label": "Model-discoverable typed contract",
       "passed": true,
-      "detail": "17 profile-permitted tools exposed with JSON input schemas; destructive tools are absent from discovery."
+      "detail": "21 profile-permitted tools exposed with JSON input schemas; destructive tools are absent from discovery."
     },
     {
       "id": "bounded-pagination",
       "label": "Bounded pagination",
       "passed": true,
-      "detail": "A 360-entry folder returned exactly 25 entries and an opaque continuation cursor."
+      "detail": "A 360-entry folder returned 25 then 25 entries for a 25-entry limit, with an opaque cursor and no overlap."
     },
     {
       "id": "live-ui-context",
@@ -163,11 +163,17 @@
       "label": "File-manager-specific allocation semantics",
       "passed": true,
       "detail": "Analyzer returned labeled exact allocation data; the generic PowerShell baseline reported logical bytes only."
+    },
+    {
+      "id": "semantic-ui-control",
+      "label": "Selector-free semantic UI control",
+      "passed": true,
+      "detail": "22 stable actions were discoverable; pane.activate produced a correlated visible result and event-driven wait wake-up in 59.2 ms without selectors or scripts."
     }
   ],
   "transport": {
     "implementation": "ExploreBetterMcp.exe Go stdio sidecar over authenticated same-user Electron named pipe",
-    "discoveredTools": 17,
+    "discoveredTools": 21,
     "rawToolCalls": 32
   }
 }

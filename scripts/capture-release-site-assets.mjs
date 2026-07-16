@@ -119,6 +119,33 @@ try {
   await page.waitForTimeout(1_500);
   await dismissDefaultExplorerPrompt(page);
 
+  await page.screenshot({ path: path.join(siteAssets, "workspace.png"), captureBeyondViewport: false });
+
+  await page.evaluate(() => document.querySelector('[data-nav-action="open-devices"]')?.click());
+  const devices = page.locator("#devices-dialog");
+  await devices.waitFor({ state: "visible", timeout: 15_000 });
+  await page.waitForFunction(() => {
+    const refresh = document.querySelector("#devices-refresh");
+    const groups = document.querySelector("#devices-groups")?.textContent || "";
+    return refresh && !refresh.disabled && groups.trim().length > 0;
+  }, null, { timeout: 20_000 });
+  await page.screenshot({ path: path.join(siteAssets, "devices.png"), captureBeyondViewport: false });
+  await devices.locator('[data-close-dialog="devices-dialog"]').click();
+
+  await page.evaluate(() => document.querySelector('[data-global-action="preferences"]')?.click());
+  const preferences = page.locator("#preferences-dialog");
+  await preferences.waitFor({ state: "visible", timeout: 15_000 });
+  await preferences.locator('[data-preferences-action="health"]').click();
+  const health = page.locator("#health-dialog");
+  await health.waitFor({ state: "visible", timeout: 15_000 });
+  await page.waitForFunction(() => {
+    const probe = document.querySelector("#health-probe");
+    const components = document.querySelectorAll("#health-components .health-component");
+    return probe && !probe.disabled && components.length >= 8;
+  }, null, { timeout: 20_000 });
+  await page.screenshot({ path: path.join(siteAssets, "health.png"), captureBeyondViewport: false });
+  await health.locator('[data-close-dialog="health-dialog"]').click();
+
   await page.locator('[data-terminal-toggle="left"]').click();
   const terminal = page.locator('[data-terminal-drawer="left"]');
   await terminal.waitFor({ state: "visible", timeout: 15_000 });
@@ -163,6 +190,9 @@ try {
   await page.screenshot({ path: path.join(siteAssets, "ai-bridge.png"), captureBeyondViewport: false });
 
   console.log(JSON.stringify({
+    workspace: path.join(siteAssets, "workspace.png"),
+    devices: path.join(siteAssets, "devices.png"),
+    health: path.join(siteAssets, "health.png"),
     terminal: path.join(siteAssets, "terminal.png"),
     aiBridge: path.join(siteAssets, "ai-bridge.png")
   }));
