@@ -65,8 +65,8 @@
             "@id": "https://terrorproforma.github.io/explore-better/#software",
             "name": "Explore Better",
             "url": "https://terrorproforma.github.io/explore-better/",
-            "downloadUrl": "https://github.com/terrorproforma/explore-better/releases/download/v0.2.5/ExploreBetter-0.2.5-x64-setup.exe",
-            "softwareVersion": "0.2.5",
+            "downloadUrl": "https://github.com/terrorproforma/explore-better/releases/download/v0.2.6/ExploreBetter-0.2.6-x64-setup.exe",
+            "softwareVersion": "0.2.6",
             "operatingSystem": "Windows 11 x64",
             "applicationCategory": "UtilitiesApplication",
             "applicationSubCategory": "File manager and local MCP server",
@@ -80,6 +80,7 @@
               "One live ConPTY terminal per file tab",
               "Indexed file search and duplicate discovery",
               "Logical and allocated disk-size analysis",
+              "Automatic migration of existing Explore Better default-folder handlers",
               "Transactional preview, recovery, and undo"
             ],
             "screenshot": [
@@ -88,7 +89,7 @@
               "https://terrorproforma.github.io/explore-better/assets/ai-bridge.png",
               "https://terrorproforma.github.io/explore-better/assets/disk-map.png"
             ],
-            "releaseNotes": "https://github.com/terrorproforma/explore-better/releases/tag/v0.2.5",
+            "releaseNotes": "https://github.com/terrorproforma/explore-better/releases/tag/v0.2.6",
             "sameAs": ["https://github.com/terrorproforma/explore-better"]
           },
           {
@@ -282,11 +283,11 @@
         <div class="page-shell">
           <div class="pitch-section-heading pitch-section-heading--ink reveal">
             <div>
-              <p class="eyebrow">Explore Better v0.2.5 / reliable shared control</p>
+              <p class="eyebrow">Explore Better v0.2.6 / defaults that survive updates</p>
               <h2 id="release-title">The AI can act. You can see why.</h2>
             </div>
             <p class="pitch-section-heading__lede">
-              Stable semantic actions replace brittle screen coordinates. The 0.2.5 hotfix also keeps default-folder launches inside the installed app and restores preview-protected Paste and Send To workflows.
+              Stable semantic actions replace brittle screen coordinates. The 0.2.6 migration also upgrades older Explore Better default-folder handlers to the installed desktop app without asking users to choose their default again.
             </p>
           </div>
 
@@ -349,6 +350,20 @@
                 <p>Prefetch and indexing pause for navigation, search, analysis, operations, and hidden windows—then resume without duplicating cached work.</p>
               </div>
               <div class="scheduler-proof"><strong>25.4 ms</strong><span>listing p95 under mixed foreground load</span></div>
+            </article>
+
+            <article class="pitch-release-card pitch-release-card--timeline reveal">
+              <div>
+                <span>06 / Default-app continuity</span>
+                <h3>Your Windows choice survives the update.</h3>
+                <p>Older Explore Better-owned PowerShell handlers are replaced with the installed desktop executable at startup. Another application’s folder or drive default is never taken over.</p>
+              </div>
+              <ol class="release-timeline" aria-label="Default handler migration sequence">
+                <li><i></i><span><b>Detect</b><small>Explore Better-owned legacy command</small></span></li>
+                <li><i></i><span><b>Preserve</b><small>Current folder and drive ownership</small></span></li>
+                <li><i></i><span><b>Repair</b><small>Point directly to Explore Better.exe</small></span></li>
+                <li><i></i><span><b>Verify</b><small>No PowerShell launch path remains</small></span></li>
+              </ol>
             </article>
           </div>
         </div>
@@ -459,20 +474,20 @@
             </div>
             <a
               class="button button--dark button--wide"
-              href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.5/ExploreBetter-0.2.5-x64-setup.exe"
+              href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.6/ExploreBetter-0.2.6-x64-setup.exe"
               aria-describedby="unsigned-preview-note"
             >
               <img src="assets/icons/download.svg" alt="" width="22" height="22" />
-              Download Explore Better v0.2.5
+              Download Explore Better v0.2.6
             </a>
-            <p class="download-facts">Windows x64 / 107.7 MiB / Per-user installer / GitHub Release</p>
+            <p class="download-facts">Windows x64 / 107.4 MiB / Per-user installer / GitHub Release</p>
             <div class="verification-block">
               <div class="verification-block__heading">
                 <span><img src="assets/icons/shield-check.svg" alt="" width="18" height="18" />Verify before opening</span>
-                <a href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.5/SHA256SUMS.txt">SHA256SUMS.txt</a>
+                <a href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.6/SHA256SUMS.txt">SHA256SUMS.txt</a>
               </div>
               <div class="copy-field copy-field--command">
-                <code data-verify-command>Get-FileHash .\ExploreBetter-0.2.5-x64-setup.exe -Algorithm SHA256</code>
+                <code data-verify-command>Get-FileHash .\ExploreBetter-0.2.6-x64-setup.exe -Algorithm SHA256</code>
                 <button
                   class="icon-button copy-button"
                   type="button"
@@ -487,7 +502,7 @@
               </div>
               <small data-command-copy-status aria-live="polite">Run from the folder containing the installer</small>
               <div class="copy-field copy-field--checksum">
-                <code data-checksum>71a5d868aab5e56e0b3a1ac8d995d056deb7c2df50201c2f1c090b51712af006</code>
+                <code data-checksum>9da94e125e7e3547dd30947c5f6ad10ff04f906fc2c81dee715688a8dd15f60f</code>
                 <button
                   class="icon-button copy-button"
                   type="button"
@@ -509,9 +524,9 @@
               </p>
             </details>
             <div class="release-links" aria-label="Release verification links">
-              <a href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.5">Release Details</a>
+              <a href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.6">Release Details</a>
               <a href="integrations/">Connect an AI Client</a>
-              <a href="https://github.com/terrorproforma/explore-better/tree/v0.2.5">Source at v0.2.5</a>
+              <a href="https://github.com/terrorproforma/explore-better/tree/v0.2.6">Source at v0.2.6</a>
             </div>
           </div>
         </div>
