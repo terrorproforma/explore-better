@@ -8763,7 +8763,11 @@ async function pasteFileClipboard(paneName) {
   }
   const result = await request("/api/transfer", {
     method: "POST",
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      ...payload,
+      expectedPlanDigest: plan.planDigest,
+      applyToken: plan.applyToken
+    })
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   if (clipboard.mode === "move") {
@@ -14398,7 +14402,11 @@ async function applyDestinationTransfer() {
   document.getElementById("destination-summary").textContent = "Sending...";
   const result = await request("/api/transfer", {
     method: "POST",
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      ...payload,
+      expectedPlanDigest: plan.planDigest,
+      applyToken: plan.applyToken
+    })
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();

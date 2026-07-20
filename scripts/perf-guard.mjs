@@ -92,6 +92,16 @@ function trendHistoryLimit() {
   return Number.isInteger(value) && value > 0 ? value : 200;
 }
 
+function trendMinimumSamples() {
+  const value = Number(
+    optionValue(
+      "--trend-min-samples",
+      process.env.EB_PERF_TREND_MIN_SAMPLES || "3"
+    )
+  );
+  return Number.isInteger(value) && value >= 1 ? value : 3;
+}
+
 function failOnTrendRegression() {
   return process.argv.includes("--fail-on-trend-regression") || process.env.EB_PERF_TREND_FAIL_ON_REGRESSION === "1";
 }
@@ -340,16 +350,20 @@ function buildTrendReport(history, guardReport, benchmark) {
   const comparableHistory = history.filter((entry) => entryMethodology(entry) === methodology);
   const factor = trendRegressionFactor();
   const minimumDeltaMs = trendMinimumDeltaMs();
+  const minimumSamples = trendMinimumSamples();
   const comparisons = metrics.map((metric) => {
     const previousValues = historyMetricValues(history, metric.name, methodology);
     const previousMedian = median(previousValues);
+    const baselineReady = previousValues.length >= minimumSamples;
     const deltaMs = previousMedian === null ? null : rounded(metric.actual - previousMedian);
     const ratio = previousMedian && previousMedian > 0 ? rounded(metric.actual / previousMedian) : null;
     const regression =
+      baselineReady &&
       previousMedian !== null &&
       metric.actual > previousMedian * factor &&
       metric.actual - previousMedian >= minimumDeltaMs;
     const improvement =
+      baselineReady &&
       previousMedian !== null &&
       metric.actual < previousMedian / factor &&
       previousMedian - metric.actual >= minimumDeltaMs;
@@ -361,7 +375,7 @@ function buildTrendReport(history, guardReport, benchmark) {
       previousMedian: rounded(previousMedian),
       deltaMs,
       ratio,
-      status: regression ? "regression" : improvement ? "improvement" : previousValues.length ? "steady" : "new",
+      status: regression ? "regression" : improvement ? "improvement" : baselineReady ? "steady" : previousValues.length ? "baseline" : "new",
       detail: metric.detail
     };
   });
@@ -373,6 +387,7 @@ function buildTrendReport(history, guardReport, benchmark) {
     methodology,
     factor,
     minimumDeltaMs,
+    minimumSamples,
     historyEntries: comparableHistory.length,
     totalHistoryEntries: history.length,
     benchmark: benchmarkJsonPath,

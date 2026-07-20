@@ -13,8 +13,6 @@ try {
     const response = await callTool("get_context");
     return toolData(response)?.live ? response : null;
   }, 30_000, 150);
-  const startingContext = toolData(live);
-
   const catalogResponse = await callTool("list_ui_actions", { includeDisabled: true });
   const catalog = toolData(catalogResponse)?.actions || [];
   assert(catalog.length >= 20, `Semantic catalog is unexpectedly small: ${catalog.length}.`);
@@ -23,13 +21,20 @@ try {
   assert(catalog.some((item) => item.enabled === false && item.disabledReason), "Disabled semantic actions do not explain why they are unavailable.");
   assert(!catalog.some((item) => /retry|undo|terminal|elevat|registry|preference.*save/i.test(item.id)), "The semantic catalog exposes an excluded privileged action.");
 
-  const targetPane = startingContext.activePane === "left" ? "right" : "left";
-  const activated = await callTool("invoke_ui_action", {
-    actionId: "pane.activate",
-    pane: targetPane,
-    inputs: {},
-    expectedContextRevision: startingContext.contextRevision
-  });
+  const activationContext = toolData(await callTool("get_context"));
+  const targetPane = activationContext.activePane === "left" ? "right" : "left";
+  let expectedContextRevision = activationContext.contextRevision;
+  let activated;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    activated = await callTool("invoke_ui_action", {
+      actionId: "pane.activate",
+      pane: targetPane,
+      inputs: {},
+      expectedContextRevision
+    });
+    if (!toolFailed(activated, "STALE_CONTEXT")) break;
+    expectedContextRevision = toolData(await callTool("get_context"))?.contextRevision;
+  }
   const activatedData = toolData(activated);
   assert(!activated.result?.isError && activatedData?.actionId === "pane.activate" && activatedData?.correlationId, `Pane activation failed: ${serialized(activated)}`);
   const traced = await waitFor(async () => {

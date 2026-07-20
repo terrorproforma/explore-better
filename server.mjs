@@ -60,6 +60,7 @@ const indexRoot = path.join(appDataRoot, "Index");
 const metadataCacheRoot = path.join(appDataRoot, "MetadataCache");
 const integrationRoot = path.join(appDataRoot, "Integration");
 const installedAppRoot = path.join(appDataRoot, "App");
+let desktopExecutablePath = null;
 let operationChain = Promise.resolve();
 let stateChain = Promise.resolve();
 let stateCache = {
@@ -13431,7 +13432,20 @@ function installedAppCurrentPath() {
   return existsSync(candidate) ? candidate : null;
 }
 
+function desktopExecutableCurrentPath() {
+  return desktopExecutablePath && existsSync(desktopExecutablePath) ? desktopExecutablePath : null;
+}
+
+export function setDesktopExecutablePath(value) {
+  const candidate = String(value || "").trim();
+  desktopExecutablePath = candidate && path.isAbsolute(candidate) ? path.resolve(candidate) : null;
+}
+
 function packagedAppPath() {
+  const desktopExecutable = desktopExecutableCurrentPath();
+  if (desktopExecutable) {
+    return desktopExecutable;
+  }
   const installed = installedAppCurrentPath();
   if (installed) {
     return installed;
@@ -13444,6 +13458,14 @@ function packagedAppPath() {
 }
 
 function integrationShellCommand(launcherPath, launchMode, shellOpenMode, targetArgument = "%1") {
+  const desktopExecutable = desktopExecutableCurrentPath();
+  if (desktopExecutable) {
+    return {
+      command: `"${desktopExecutable}" "--shell-mode=${shellOpenMode}" "${targetArgument}"`,
+      kind: "packaged",
+      target: desktopExecutable
+    };
+  }
   const installed = launchMode === "native" ? installedAppCurrentPath() : null;
   if (installed) {
     return {
@@ -13533,6 +13555,7 @@ async function writeIntegrationFiles() {
   const winERemoveScriptPath = paths.winERemoveScriptPath;
   const repoPath = __dirname;
   const desktopDir = userDesktopPath();
+  const desktopExecutable = desktopExecutableCurrentPath();
   const shellCommand = integrationShellCommand(launcherPath, launchMode, shellOpenMode);
   const backgroundShellCommand = integrationShellCommand(launcherPath, launchMode, shellOpenMode, "%V");
   const shellIcon = shellCommand.kind === "launcher" ? "imageres.dll,-5302" : shellCommand.target;
@@ -13547,6 +13570,7 @@ $Port = ${port}
 $DefaultLaunchMode = "${launchMode}"
 $ShellOpenMode = "${shellOpenMode}"
 $AppProfile = Join-Path $env:LOCALAPPDATA "ExploreBetter\\AppWindowProfile"
+$DesktopApp = "${String(desktopExecutable || "").replaceAll("\\", "\\\\")}"
 $InstalledApp = "${installedAppPath().replaceAll("\\", "\\\\")}"
 $PackagedApp = Join-Path $RepoPath "dist\\win-unpacked\\Explore Better.exe"
 $ElectronLauncher = Join-Path $RepoPath "node_modules\\.bin\\electron.cmd"
@@ -13594,6 +13618,10 @@ function Find-AppBrowser {
 }
 
 function Start-NativeWindow {
+  if ($DesktopApp -and (Test-Path -LiteralPath $DesktopApp)) {
+    Start-Process -FilePath $DesktopApp -ArgumentList @("--shell-mode=$ShellOpenMode", $ResolvedTarget)
+    return $true
+  }
   if (Test-Path -LiteralPath $InstalledApp) {
     Start-Process -FilePath $InstalledApp -ArgumentList @("--shell-mode=$ShellOpenMode", $ResolvedTarget)
     return $true
@@ -13607,6 +13635,12 @@ function Start-NativeWindow {
   }
   Start-Process -FilePath $ElectronLauncher -ArgumentList @($RepoPath, "--shell-mode=$ShellOpenMode", $ResolvedTarget)
   return $true
+}
+
+if (-not $DefaultBrowser -and $DesktopApp -and (Test-Path -LiteralPath $DesktopApp)) {
+  if (Start-NativeWindow) {
+    exit
+  }
 }
 
 if (-not $DefaultBrowser -and $DefaultLaunchMode -eq "native") {
@@ -13656,6 +13690,7 @@ if ($Open) {
 
 $ErrorActionPreference = "Stop"
 $Launcher = "${launcherPath.replaceAll("\\", "\\\\")}"
+$DesktopApp = "${String(desktopExecutable || "").replaceAll("\\", "\\\\")}"
 $InstalledApp = "${installedAppPath().replaceAll("\\", "\\\\")}"
 $PackagedApp = "${packagedAppCandidatePath().replaceAll("\\", "\\\\")}"
 $BrandIcon = "${path.join(repoPath, "build", "icon.ico").replaceAll("\\", "\\\\")}"
@@ -13672,7 +13707,12 @@ function New-ExploreBetterShortcut {
     [string]$TargetPath
   )
   $shortcut = $Shell.CreateShortcut($ShortcutPath)
-  if ("${launchMode}" -eq "native" -and (Test-Path -LiteralPath $InstalledApp)) {
+  if ($DesktopApp -and (Test-Path -LiteralPath $DesktopApp)) {
+    $shortcut.TargetPath = $DesktopApp
+    $shortcut.Arguments = "--shell-mode=$ShellOpenMode \`"$TargetPath\`""
+    $shortcut.WorkingDirectory = Split-Path -Parent $DesktopApp
+    $shortcut.IconLocation = $DesktopApp
+  } elseif ("${launchMode}" -eq "native" -and (Test-Path -LiteralPath $InstalledApp)) {
     $shortcut.TargetPath = $InstalledApp
     $shortcut.Arguments = "--shell-mode=$ShellOpenMode \`"$TargetPath\`""
     $shortcut.WorkingDirectory = Split-Path -Parent $InstalledApp
@@ -18680,7 +18720,7 @@ async function getIntegrationStatus() {
   const nativeMain = electronMainPath();
   const nativeLauncher = electronLauncherPath();
   const packagedCandidate = packagedAppCandidatePath();
-  const packagedApp = existsSync(packagedCandidate) ? packagedCandidate : null;
+  const packagedApp = desktopExecutableCurrentPath() || (existsSync(packagedCandidate) ? packagedCandidate : null);
   const installedCandidate = installedAppCandidatePath();
   const installedApp = installedAppCurrentPath();
   const nativeTarget = packagedAppPath();

@@ -11,7 +11,7 @@ const runRoot = path.join(root, "artifacts", `health-devices-${stamp}`);
 const appData = path.join(runRoot, "appdata");
 const fixture = path.join(runRoot, "Private Folder");
 const secretContent = "SUPPORT_BUNDLE_MUST_NOT_INCLUDE_THIS_FILE_CONTENT";
-const port = 54_000 + Math.floor(Math.random() * 5_000);
+const port = Number(process.env.PORT || 54_000 + Math.floor(Math.random() * 5_000));
 const baseUrl = `http://127.0.0.1:${port}`;
 
 function assert(condition, message) {

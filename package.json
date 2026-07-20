@@ -1,6 +1,6 @@
 {
   "name": "explore-better",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -119,6 +119,7 @@
     "verify:auto-update-feed": "node scripts/auto-update-feed-smoke.mjs",
     "verify:shell-rehearsal": "node scripts/shell-replacement-rehearsal-smoke.mjs",
     "verify:shell-current-user": "node scripts/shell-current-user-smoke.mjs",
+    "verify:packaged-integration-launch": "node scripts/packaged-integration-launch-smoke.mjs",
     "verify:shell-verbs": "node scripts/shell-verbs-smoke.mjs",
     "verify:shell-namespace": "node scripts/shell-namespace-smoke.mjs",
     "verify:shell-devices": "node scripts/shell-devices-smoke.mjs",

@@ -39,6 +39,7 @@ const coreSuites = [
   ["preferences-ui", "scripts/preferences-ui-smoke.mjs", 180000],
   ["interaction-resize", "scripts/interaction-resize-smoke.mjs", 180000],
   ["default-explorer-ui", "scripts/default-explorer-ui-smoke.mjs", 120000],
+  ["packaged-integration-launch", "scripts/packaged-integration-launch-smoke.mjs", 120000],
   ["folder-tree-ui", "scripts/folder-tree-ui-smoke.mjs", 120000],
   ["adaptive-pane-chrome", "scripts/adaptive-pane-chrome-ui-smoke.mjs", 180000],
   ["workspace-panels-ui", "scripts/workspace-panels-ui-smoke.mjs", 180000],

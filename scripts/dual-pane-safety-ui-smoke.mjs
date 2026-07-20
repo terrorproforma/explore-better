@@ -14,6 +14,10 @@ const sourcePath = path.join(leftFixture, "transfer-proof.txt");
 const copiedPath = path.join(rightFixture, "transfer-proof.txt");
 const hiddenSourcePath = path.join(leftFixture, "single-hidden-transfer.txt");
 const hiddenCopiedPath = path.join(rightFixture, "single-hidden-transfer.txt");
+const clipboardSourcePath = path.join(leftFixture, "clipboard-paste-proof.txt");
+const clipboardCopiedPath = path.join(rightFixture, "clipboard-paste-proof.txt");
+const destinationSourcePath = path.join(leftFixture, "destination-token-proof.txt");
+const destinationCopiedPath = path.join(rightFixture, "destination-token-proof.txt");
 const latestJsonPath = path.join(artifactsDir, "dual-pane-safety-latest.json");
 const latestMdPath = path.join(artifactsDir, "dual-pane-safety-latest.md");
 const horizontalScreenshotPath = path.join(artifactsDir, "dual-pane-source-target-horizontal.png");
@@ -109,6 +113,8 @@ async function main() {
   await fs.mkdir(appData, { recursive: true });
   await fs.writeFile(sourcePath, "dual pane transfer proof\n");
   await fs.writeFile(hiddenSourcePath, "single pane transfer proof\n");
+  await fs.writeFile(clipboardSourcePath, "clipboard token proof\n");
+  await fs.writeFile(destinationSourcePath, "destination token proof\n");
   await fs.writeFile(path.join(rightFixture, "target-only.txt"), "target\n");
   const port = Number(process.env.PORT || 51000 + Math.floor(Math.random() * 6000));
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -117,11 +123,18 @@ async function main() {
   const pageErrors = [];
   const apiFailures = [];
   const listResponses = [];
+  let serverOutput = "";
   const server = spawn(process.execPath, ["server.mjs"], {
     cwd: workspace,
     env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), LOCALAPPDATA: appData, APPDATA: appData },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
+  });
+  server.stdout.on("data", (chunk) => {
+    serverOutput = `${serverOutput}${chunk}`.slice(-16000);
+  });
+  server.stderr.on("data", (chunk) => {
+    serverOutput = `${serverOutput}${chunk}`.slice(-16000);
   });
   let browser;
   try {
@@ -176,6 +189,38 @@ async function main() {
         evidence.initial.panes.left.actions["copy-other"].title === evidence.initial.panes.left.actions["copy-other"].ariaLabel,
       evidence.initial.panes.left.actions["copy-other"].title
     );
+
+    await page.locator('.pane[data-pane="left"] [data-entry-path]').filter({ hasText: "clipboard-paste-proof.txt" }).click();
+    await page.locator('[data-list="left"]').focus();
+    await page.keyboard.press("Control+C");
+    await page.locator('[data-list="right"]').focus();
+    await page.keyboard.press("Control+V");
+    await waitFor(
+      page,
+      () => ({
+        ok: [...document.querySelectorAll('.pane[data-pane="right"] [data-entry-path]')].some((item) => item.textContent.includes("clipboard-paste-proof.txt")),
+        toast: document.getElementById("toast")?.textContent || ""
+      }),
+      "clipboard paste applied with its preview token"
+    );
+    const clipboardBytes = await fs.readFile(clipboardCopiedPath, "utf8");
+    check(checks, "clipboard-paste-preview-token", clipboardBytes === "clipboard token proof\n", `Copied bytes: ${JSON.stringify(clipboardBytes)}.`);
+
+    await page.locator('.pane[data-pane="left"] [data-entry-path]').filter({ hasText: "destination-token-proof.txt" }).click();
+    await page.evaluate(() => document.querySelector('[data-global-action="destination"]')?.click());
+    await page.waitForFunction(() => document.getElementById("destination-dialog")?.open === true && !document.getElementById("destination-send")?.disabled);
+    await page.locator("#destination-send").click();
+    await waitFor(
+      page,
+      () => ({
+        ok: !document.getElementById("destination-dialog")?.open &&
+          [...document.querySelectorAll('.pane[data-pane="right"] [data-entry-path]')].some((item) => item.textContent.includes("destination-token-proof.txt")),
+        summary: document.getElementById("destination-summary")?.textContent || ""
+      }),
+      "destination transfer applied with its preview token"
+    );
+    const destinationBytes = await fs.readFile(destinationCopiedPath, "utf8");
+    check(checks, "destination-transfer-preview-token", destinationBytes === "destination token proof\n", `Copied bytes: ${JSON.stringify(destinationBytes)}.`);
 
     await page.locator('.pane[data-pane="left"] [data-entry-path]').filter({ hasText: "transfer-proof.txt" }).click();
     evidence.leftSelected = await paneSafetyState(page);
@@ -330,9 +375,11 @@ async function main() {
       JSON.stringify({ ...evidence.singleMovePreview, ...hiddenMoveBeforeApply })
     );
     await page.locator('#transfer-dialog [data-close-dialog="transfer-dialog"]').click();
+    const previewTokenFailures = apiFailures.filter((failure) => /preview token/i.test(failure.body));
+    check(checks, "preview-token-runtime-clean", previewTokenFailures.length === 0, JSON.stringify(previewTokenFailures));
     check(checks, "runtime-clean", pageErrors.length === 0, `${pageErrors.length} page error(s).`);
   } catch (error) {
-    check(checks, "smoke-execution", false, error.message);
+    check(checks, "smoke-execution", false, `${error.message}${serverOutput ? ` / server: ${serverOutput.trim()}` : ""}`);
   } finally {
     await browser?.close().catch(() => {});
     server.kill();

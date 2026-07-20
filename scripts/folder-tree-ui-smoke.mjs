@@ -71,7 +71,7 @@ async function main() {
   }
   await fs.mkdir(appData, { recursive: true });
 
-  const port = 50_000 + Math.floor(Math.random() * 10_000);
+  const port = Number(process.env.PORT || 50_000 + Math.floor(Math.random() * 10_000));
   const baseUrl = `http://127.0.0.1:${port}`;
   const checks = [];
   const pageErrors = [];
