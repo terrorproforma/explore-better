@@ -1,5 +1,19 @@
 # Explore Better Release Notes
 
+## v0.2.6 - 2026-07-20
+
+### Existing Default-App Migration
+
+- Added a packaged-startup migration for people who already made Explore Better their folder and drive default in an earlier release.
+- Replaces only Explore Better-owned legacy PowerShell shell commands with the current installed `Explore Better.exe`; the existing folder/drive default choice is preserved.
+- Repairs Explore Better context-menu commands without taking ownership when another application is the current folder/drive default.
+- Leaves unconfigured Windows shell state untouched and skips the migration when the packaged executable is unavailable.
+
+### Verification
+
+- Added live HKCU regression coverage for a legacy Explore Better default, automatic startup repair, direct target launch, and preservation of a foreign default.
+- Retained the reversible pre-install shell snapshot so tests and users can restore their exact prior current-user shell configuration.
+
 ## v0.2.5 - 2026-07-20
 
 ### Default-App And Transfer Reliability Hotfix

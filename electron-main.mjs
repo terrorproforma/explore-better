@@ -1029,6 +1029,19 @@ async function waitForServer() {
 
 async function ensureServer() {
   await ensureDesktopPort();
+  if (process.platform === "win32" && !process.defaultApp) {
+    try {
+      const integrationModule = embeddedServerModule || (await import("./server.mjs"));
+      integrationModule.setDesktopExecutablePath?.(process.execPath);
+      embeddedServerModule = integrationModule;
+      const repair = await integrationModule.repairCurrentUserShellIntegrationTarget?.();
+      if (repair?.repaired) {
+        console.log(`Explore Better shell integration repaired: ${repair.mode} -> ${repair.target}`);
+      }
+    } catch (error) {
+      console.warn(`Could not repair Explore Better shell integration: ${error.message}`);
+    }
+  }
   if (await serverIsReady()) {
     rememberBackendEvent("ready", "Backend already answered health check.", { kind: "existing" });
     return;
