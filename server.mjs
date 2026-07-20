@@ -50,7 +50,9 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 const localAppData =
   process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-const appDataRoot = path.join(localAppData, "ExploreBetter");
+const appDataRoot = process.env.EXPLORE_BETTER_APP_DATA_ROOT
+  ? path.resolve(process.env.EXPLORE_BETTER_APP_DATA_ROOT)
+  : path.join(localAppData, "ExploreBetter");
 const trashRoot = path.join(appDataRoot, "Trash");
 const tempRoot = path.join(appDataRoot, "Temp");
 const elevationRoot = path.join(appDataRoot, "Elevation");
@@ -18932,6 +18934,89 @@ async function getIntegrationStatus() {
       steps,
       winEManaged: "startup-hotkey"
     }
+  };
+}
+
+function normalizedShellCommand(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function isLegacyExploreBetterShellCommand(value) {
+  const command = normalizedShellCommand(value);
+  return (
+    !command ||
+    command.includes("powershell.exe") ||
+    command.includes("explore-better-open.ps1") ||
+    command.includes("electron.cmd") ||
+    command.includes("app.asar")
+  );
+}
+
+export async function repairCurrentUserShellIntegrationTarget() {
+  if (process.platform !== "win32") {
+    return { ok: true, repaired: false, reason: "unsupported-platform" };
+  }
+  const desktopExecutable = desktopExecutableCurrentPath();
+  if (!desktopExecutable) {
+    return { ok: true, repaired: false, reason: "desktop-executable-unavailable" };
+  }
+
+  const before = await getIntegrationStatus();
+  const ownsFolderDefault = before.registry?.folderDefaultEnabled === true;
+  const ownsContextMenu = before.registry?.contextMenuInstalled === true;
+  if (!ownsFolderDefault && !ownsContextMenu) {
+    return { ok: true, repaired: false, reason: "integration-not-owned" };
+  }
+
+  const paths = integrationPaths();
+  const settings = sanitizeSettings((await readState()).settings || {});
+  const launchMode = normalizeLaunchMode(settings.launchMode);
+  const shellOpenMode = normalizeShellOpenMode(settings.shellOpenMode);
+  const expectedCommand = integrationShellCommand(paths.scriptPath, launchMode, shellOpenMode).command;
+  const expectedBackgroundCommand = integrationShellCommand(
+    paths.scriptPath,
+    launchMode,
+    shellOpenMode,
+    "%V"
+  ).command;
+  const commandPairs = [
+    [before.registry?.directoryCommand, expectedCommand],
+    [before.registry?.driveCommand, expectedCommand],
+    [before.registry?.directoryBackgroundCommand, expectedBackgroundCommand],
+    [before.registry?.fileLocationCommand, expectedCommand]
+  ];
+  const needsRepair = commandPairs.some(
+    ([current, expected]) =>
+      normalizedShellCommand(current) !== normalizedShellCommand(expected) &&
+      isLegacyExploreBetterShellCommand(current)
+  );
+  if (!needsRepair) {
+    return {
+      ok: true,
+      repaired: false,
+      reason: "already-current",
+      target: desktopExecutable,
+      folderDefaultPreserved: ownsFolderDefault
+    };
+  }
+
+  await writeIntegrationFiles();
+  const registryFile = ownsFolderDefault ? paths.folderDefaultRegPath : paths.contextMenuRegPath;
+  await importRegistryFile(registryFile);
+  const after = await getIntegrationStatus();
+  if (ownsFolderDefault && !after.registry?.folderDefaultEnabled) {
+    throw new Error("Explore Better could not preserve the existing folder and drive default during handler repair.");
+  }
+  return {
+    ok: true,
+    repaired: true,
+    reason: "legacy-handler-replaced",
+    mode: ownsFolderDefault ? "folderDefault" : "contextMenu",
+    target: desktopExecutable,
+    folderDefaultPreserved: ownsFolderDefault && after.registry?.folderDefaultEnabled === true
   };
 }
 

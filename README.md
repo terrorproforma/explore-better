@@ -71,6 +71,8 @@ Explorer replacement features are opt-in. On the first packaged launch, Explore 
 
 You can make the same change later from **Integrate** > **Make Default**, add the optional Win+E sign-in helper, or choose **Restore Previous** to put the backed-up handlers back exactly as they were. Applications that ask Windows to open a folder normally can use Explore Better; applications that explicitly execute `explorer.exe` are hard-coded to Windows Explorer and cannot be redirected safely. Explore Better also works as a standalone file manager without changing any defaults.
 
+When an older Explore Better release already owns the folder/drive default, current packaged builds automatically replace its legacy PowerShell command with the installed `Explore Better.exe` while preserving that choice. If another application owns the default, Explore Better repairs only its own existing context-menu commands and does not take the default back.
+
 ## Feature Modules
 
 ### Dual-Pane File Browser

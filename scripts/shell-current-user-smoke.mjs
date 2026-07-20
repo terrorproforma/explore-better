@@ -296,6 +296,39 @@ async function importRegistryFile(filePath) {
   return result;
 }
 
+async function setRegistryDefault(key, value) {
+  const result = await runCommand("reg.exe", ["add", key, "/ve", "/t", "REG_SZ", "/d", value, "/f"], {
+    timeoutMs: 20000
+  });
+  if (result.code !== 0) {
+    throw new Error(`reg add failed for ${key}: ${result.stderr || result.stdout || result.error || result.code}`);
+  }
+  return result;
+}
+
+async function seedLegacyExploreBetterCommands(launcherPath) {
+  const legacyCommand = `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${launcherPath}" "%1"`;
+  const commandKeys = [
+    "HKCU\\Software\\Classes\\Directory\\shell\\ExploreBetter\\command",
+    "HKCU\\Software\\Classes\\Drive\\shell\\ExploreBetter\\command",
+    "HKCU\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter\\command",
+    "HKCU\\Software\\Classes\\*\\shell\\ExploreBetterLocation\\command"
+  ];
+  for (const key of commandKeys) {
+    await setRegistryDefault(key, legacyCommand);
+  }
+  return legacyCommand;
+}
+
+function desktopSmokeEnv(port, userDataDir) {
+  return {
+    HOST: "127.0.0.1",
+    PORT: String(port),
+    EXPLORE_BETTER_APP_DATA_ROOT: stateDir,
+    EXPLORE_BETTER_USER_DATA_DIR: userDataDir
+  };
+}
+
 async function seedState() {
   await fs.mkdir(stateDir, { recursive: true });
   await fs.writeFile(
@@ -371,6 +404,7 @@ async function main() {
   let afterRestoreSnapshot = null;
   let beforeStatus = null;
   let afterApplyStatus = null;
+  let afterMigrationStatus = null;
   let afterRestoreStatus = null;
   let restoreCopyPath = null;
   let restored = false;
@@ -486,17 +520,29 @@ async function main() {
       `${afterApplyStatus.replacement?.ready || 0}/${afterApplyStatus.replacement?.total || 0} readiness steps`
     );
 
+    const legacyCommand = await seedLegacyExploreBetterCommands(generated.scriptPath);
+    const legacyDefaultStatus = await requestJson(baseUrl, "/api/integration/status");
+    requireCheck(
+      checks,
+      legacyDefaultStatus.registry?.folderDefaultEnabled === true &&
+        [
+          legacyDefaultStatus.registry?.directoryCommand,
+          legacyDefaultStatus.registry?.driveCommand,
+          legacyDefaultStatus.registry?.directoryBackgroundCommand,
+          legacyDefaultStatus.registry?.fileLocationCommand
+        ].every((command) => /powershell\.exe/i.test(command || "")),
+      "legacy-default-handler-seeded",
+      "Legacy PowerShell handler is seeded while Explore Better remains the default",
+      legacyCommand
+    );
+
     const shellOpenTarget = path.join(runRoot, "ShellOpenTarget");
     await fs.mkdir(shellOpenTarget, { recursive: true });
     const shellOpenFile = path.join(shellOpenTarget, "opened-by-handler.txt");
     await fs.writeFile(shellOpenFile, "handler fixture", "utf8");
     shellOpenSmoke = await runCommand(installedApp, ["--smoke", "--smoke-window", "--shell-mode=activeNewTab", shellOpenTarget], {
       timeoutMs: 90000,
-      env: {
-        HOST: "127.0.0.1",
-        PORT: String(await availablePort()),
-        EXPLORE_BETTER_USER_DATA_DIR: path.join(runRoot, "ElectronUserData")
-      }
+      env: desktopSmokeEnv(await availablePort(), path.join(runRoot, "ElectronUserData"))
     });
     requireCheck(
       checks,
@@ -508,19 +554,60 @@ async function main() {
         ? `Opened ${shellOpenTarget}`
         : shellOpenSmoke.timedOut
           ? "Installed app shell-open smoke timed out."
-          : shellOpenSmoke.error || shellOpenSmoke.stderr || shellOpenSmoke.stdout || `exit ${shellOpenSmoke.code}`
+        : shellOpenSmoke.error || shellOpenSmoke.stderr || shellOpenSmoke.stdout || `exit ${shellOpenSmoke.code}`
     );
+
+    afterMigrationStatus = await requestJson(baseUrl, "/api/integration/status");
+    const migratedCommands = [
+      afterMigrationStatus.registry?.directoryCommand,
+      afterMigrationStatus.registry?.driveCommand,
+      afterMigrationStatus.registry?.directoryBackgroundCommand,
+      afterMigrationStatus.registry?.fileLocationCommand
+    ];
+    requireCheck(
+      checks,
+      afterMigrationStatus.registry?.folderDefaultEnabled === true &&
+        migratedCommands.every((command) => command?.includes(installedApp) && !/powershell\.exe/i.test(command)),
+      "legacy-default-handler-auto-repaired",
+      "Packaged startup replaces legacy handlers and preserves the user's default choice",
+      migratedCommands.join(" | ")
+    );
+
+    await setRegistryDefault("HKCU\\Software\\Classes\\Directory\\shell", "ForeignHandlerFixture");
+    await setRegistryDefault("HKCU\\Software\\Classes\\Drive\\shell", "ForeignHandlerFixture");
+    await seedLegacyExploreBetterCommands(generated.scriptPath);
+    const contextOnlySmoke = await runCommand(installedApp, ["--smoke"], {
+      timeoutMs: 90000,
+      env: desktopSmokeEnv(await availablePort(), path.join(runRoot, "ElectronContextOnlyUserData"))
+    });
+    const contextOnlyStatus = await requestJson(baseUrl, "/api/integration/status");
+    const contextOnlyCommands = [
+      contextOnlyStatus.registry?.directoryCommand,
+      contextOnlyStatus.registry?.driveCommand,
+      contextOnlyStatus.registry?.directoryBackgroundCommand,
+      contextOnlyStatus.registry?.fileLocationCommand
+    ];
+    requireCheck(
+      checks,
+      contextOnlySmoke.code === 0 &&
+        contextOnlyStatus.registry?.directoryDefault === "ForeignHandlerFixture" &&
+        contextOnlyStatus.registry?.driveDefault === "ForeignHandlerFixture" &&
+        contextOnlyCommands.every((command) => command?.includes(installedApp) && !/powershell\.exe/i.test(command)),
+      "context-handler-repair-preserves-foreign-default",
+      "Startup repairs Explore Better-owned context handlers without taking over another default",
+      `code=${contextOnlySmoke.code} timedOut=${Boolean(contextOnlySmoke.timedOut)} directory=${contextOnlyStatus.registry?.directoryDefault} drive=${contextOnlyStatus.registry?.driveDefault} commands=${contextOnlyCommands.join(" | ")} output=${`${contextOnlySmoke.stdout || ""}${contextOnlySmoke.stderr || ""}`.trim().slice(0, 800)}`
+    );
+    await requestJson(baseUrl, "/api/integration/apply", {
+      method: "POST",
+      body: JSON.stringify({ mode: "folderDefault" })
+    });
 
     const fileLocationSmoke = await runCommand(
       installedApp,
       ["--smoke", "--smoke-window", "--shell-mode=activeNewTab", shellOpenFile],
       {
         timeoutMs: 90000,
-        env: {
-          HOST: "127.0.0.1",
-          PORT: String(await availablePort()),
-          EXPLORE_BETTER_USER_DATA_DIR: path.join(runRoot, "ElectronFileLocationUserData")
-        }
+        env: desktopSmokeEnv(await availablePort(), path.join(runRoot, "ElectronFileLocationUserData"))
       }
     );
     requireCheck(
@@ -631,6 +718,7 @@ async function main() {
     generated,
     beforeStatus,
     afterApplyStatus,
+    afterMigrationStatus,
     afterRestoreStatus,
     shellOpenSmoke,
     registry: {
