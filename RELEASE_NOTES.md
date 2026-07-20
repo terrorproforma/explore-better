@@ -4,8 +4,8 @@
 
 ### Compact Tab Overflow
 
-- Replaced the native horizontal scrollbar in crowded pane headers with compact 68 px minimum tabs and a scrollbar-free strip.
-- Keeps the active tab visible automatically and provides an accessible all-tabs menu with the complete tab name and path when the row overflows.
+- Replaced the native horizontal scrollbar in crowded pane headers with compact 68 px minimum tabs and measured overflow—no tab buttons remain off-canvas.
+- Keeps the active tab visible automatically and moves only the tabs that do not fit into an accessible numbered menu with the complete tab name and path.
 - Preserves tab closing, locking, dragging, keyboard cycling, new-tab access, pane activity, and source/target labels in the same 40 px header row.
 
 ### Verification

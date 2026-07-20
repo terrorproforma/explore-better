@@ -6570,7 +6570,6 @@ function scheduleProgressiveFileRender(paneName, token, entries, renderer, start
 }
 
 const paneTabOverflowFrames = { left: 0, right: 0 };
-const paneTabRevealActive = { left: false, right: false };
 const paneTabResizeObservers = { left: null, right: null };
 
 function closePaneTabOverflow(paneName, options = {}) {
@@ -6619,42 +6618,47 @@ function updatePaneTabOverflow(paneName) {
   const menu = tabbar?.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
   if (!tabbar || !strip || !toggle || !menu) return;
 
+  const tabs = [...strip.querySelectorAll(".tab")];
+  tabs.forEach((tab) => tab.classList.remove("tab-responsive-hidden"));
+  toggle.hidden = true;
   let overflowing = strip.scrollWidth > strip.clientWidth + 1;
-  if (!overflowing && !toggle.hidden) {
-    toggle.hidden = true;
-    overflowing = strip.scrollWidth > strip.clientWidth + 1;
-  } else if (overflowing && toggle.hidden) {
-    toggle.hidden = false;
-  }
   if (!overflowing) {
-    strip.scrollLeft = 0;
+    closePaneTabOverflow(paneName);
+    return;
+  }
+
+  toggle.hidden = false;
+  const activeIndex = Math.max(0, tabs.findIndex((tab) => tab.classList.contains("active")));
+  const hideCandidates = tabs
+    .map((tab, index) => ({ tab, index, locked: tab.classList.contains("locked") }))
+    .filter((item) => item.index !== activeIndex)
+    .sort((left, right) => {
+      if (left.locked !== right.locked) return left.locked ? 1 : -1;
+      const distanceDelta = Math.abs(right.index - activeIndex) - Math.abs(left.index - activeIndex);
+      return distanceDelta || left.index - right.index;
+    });
+  for (const item of hideCandidates) {
+    if (strip.scrollWidth <= strip.clientWidth + 1) break;
+    item.tab.classList.add("tab-responsive-hidden");
+  }
+
+  const hiddenCount = tabs.filter((tab) => tab.classList.contains("tab-responsive-hidden")).length;
+  overflowing = hiddenCount > 0;
+  toggle.hidden = !overflowing;
+  if (!overflowing) {
     closePaneTabOverflow(paneName);
     return;
   }
 
   const tabCount = panes[paneName]?.tabs?.length || 0;
-  toggle.title = `Show all ${tabCount} tabs`;
+  toggle.title = `Show all ${tabCount} tabs (${hiddenCount} hidden)`;
   toggle.setAttribute("aria-label", toggle.title);
-  toggle.querySelector(".tab-overflow-count").textContent = String(tabCount);
-
-  if (paneTabRevealActive[paneName]) {
-    const active = strip.querySelector(".tab.active");
-    if (active) {
-      const activeLeft = active.offsetLeft;
-      const activeRight = activeLeft + active.offsetWidth;
-      if (activeLeft < strip.scrollLeft) strip.scrollLeft = activeLeft;
-      if (activeRight > strip.scrollLeft + strip.clientWidth) {
-        strip.scrollLeft = Math.max(0, activeRight - strip.clientWidth);
-      }
-    }
-  }
-  paneTabRevealActive[paneName] = false;
+  toggle.querySelector(".tab-overflow-count").textContent = String(hiddenCount);
   if (!menu.hidden) positionPaneTabOverflow(paneName);
 }
 
-function schedulePaneTabOverflow(paneName, options = {}) {
+function schedulePaneTabOverflow(paneName) {
   if (!isPaneName(paneName)) return;
-  paneTabRevealActive[paneName] ||= options.revealActive === true;
   if (paneTabOverflowFrames[paneName]) cancelAnimationFrame(paneTabOverflowFrames[paneName]);
   paneTabOverflowFrames[paneName] = requestAnimationFrame(() => updatePaneTabOverflow(paneName));
 }
@@ -6722,7 +6726,7 @@ function renderPane(paneName) {
      <div class="tab-overflow-menu" data-tab-overflow-menu="${paneName}" role="menu" aria-label="All ${paneName} pane tabs" hidden>${paneTabOverflowMenuMarkup(paneName, pane)}</div>
      ${paneActivityMarkup(paneName)}`;
   observePaneTabOverflow(paneName);
-  schedulePaneTabOverflow(paneName, { revealActive: true });
+  schedulePaneTabOverflow(paneName);
 
   document.querySelector(`[data-path-input="${paneName}"]`).value = tab.path;
   const breadcrumbs = document.querySelector(`[data-breadcrumbs="${paneName}"]`);

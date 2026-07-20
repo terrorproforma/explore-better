@@ -126,12 +126,7 @@ async function inspectPaneChrome(page) {
           Boolean(activeTabRect && activeTabRect.left >= rect.left - 1 && activeTabRect.right <= rect.right + 1);
         const intentionalBreadcrumbScroll =
           selector === ".breadcrumb-strip" && xScrollable && style.scrollbarWidth === "none" && currentBreadcrumbVisible;
-        const intentionalTabScroll =
-          selector === ".tab-strip" &&
-          xScrollable &&
-          style.scrollbarWidth === "none" &&
-          activeTabVisible &&
-          !element.closest(".tabbar")?.querySelector("[data-tab-overflow-toggle]")?.hidden;
+        const intentionalTabScroll = false;
         const intentionalHorizontalScroll = intentionalBreadcrumbScroll || intentionalTabScroll;
         const sample = {
           pane: paneName,
@@ -229,6 +224,8 @@ async function main() {
         const tabbar = document.querySelector('[data-tabs="left"]');
         const strip = tabbar.querySelector('[data-tab-strip="left"]');
         const tabs = [...strip.querySelectorAll(".tab")];
+        const visibleTabs = tabs.filter((tab) => !tab.classList.contains("tab-responsive-hidden"));
+        const hiddenTabs = tabs.filter((tab) => tab.classList.contains("tab-responsive-hidden"));
         const active = strip.querySelector(".tab.active");
         const stripRect = strip.getBoundingClientRect();
         const activeRect = active.getBoundingClientRect();
@@ -237,8 +234,10 @@ async function main() {
         return {
           tabbarHeight: Math.round(tabbar.getBoundingClientRect().height),
           tabCount: tabs.length,
-          minTabWidth: Math.round(Math.min(...tabs.map((tab) => tab.getBoundingClientRect().width))),
-          maxTabWidth: Math.round(Math.max(...tabs.map((tab) => tab.getBoundingClientRect().width))),
+          visibleTabCount: visibleTabs.length,
+          hiddenTabCount: hiddenTabs.length,
+          minTabWidth: Math.round(Math.min(...visibleTabs.map((tab) => tab.getBoundingClientRect().width))),
+          maxTabWidth: Math.round(Math.max(...visibleTabs.map((tab) => tab.getBoundingClientRect().width))),
           scrollable: strip.scrollWidth > strip.clientWidth + 1,
           scrollLeft: Math.round(strip.scrollLeft),
           activeOffsetLeft: Math.round(active.offsetLeft),
@@ -257,6 +256,8 @@ async function main() {
         checks,
         `compact-tabs-${viewport.name}`,
         tabState.tabCount >= 13 &&
+          tabState.visibleTabCount >= 1 &&
+          tabState.hiddenTabCount >= 1 &&
           tabState.tabbarHeight <= 40 &&
           tabState.minTabWidth >= 67 &&
           tabState.maxTabWidth <= 169,
@@ -265,12 +266,12 @@ async function main() {
       check(
         checks,
         `tab-overflow-chrome-${viewport.name}`,
-        tabState.scrollable &&
+        !tabState.scrollable &&
           tabState.scrollbarWidth === "none" &&
           tabState.overflowY === "hidden" &&
           tabState.activeVisible &&
           tabState.overflowToggleVisible &&
-          tabState.overflowLabel === `Show all ${tabState.tabCount} tabs`,
+          tabState.overflowLabel === `Show all ${tabState.tabCount} tabs (${tabState.hiddenTabCount} hidden)`,
         JSON.stringify(tabState)
       );
       await page.click('[data-tab-overflow-toggle="left"]');

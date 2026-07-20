@@ -1394,13 +1394,16 @@ body.resizing-layout.resizing-rows {
   align-items: end;
   gap: 3px;
   min-width: 0;
-  overflow-x: auto;
+  overflow-x: hidden;
   overflow-y: hidden;
-  overscroll-behavior-x: contain;
   scrollbar-width: none;
 }
 
 .tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.tab.tab-responsive-hidden {
   display: none;
 }
 
