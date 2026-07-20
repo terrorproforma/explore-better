@@ -1,5 +1,21 @@
 # Explore Better Release Notes
 
+## v0.2.5 - 2026-07-20
+
+### Default-App And Transfer Reliability Hotfix
+
+- Fixed packaged folder and drive handlers so Explore Better remains the Windows default while launching the installed desktop executable directly, without a flashing PowerShell window or a dependency on global Node or the packaged `app.asar` path.
+- Fixed packaged Start Menu, Desktop, and Win+E launcher generation to retain the actual installed executable even when an older browser-window launch preference is still saved.
+- Fixed quick Paste and Send To so the preview digest and one-use apply token are carried into the transfer request instead of being discarded at the security boundary.
+- Preserved the existing reversible shell backup, explicit File Explorer actions, current-user-only integration, and preview-before-apply safeguards.
+
+### Verification
+
+- Added a packaged-integration regression suite proving default handlers and shortcuts target the desktop executable and never PowerShell.
+- Expanded the real browser dual-pane suite to copy and paste through the clipboard and complete a Send To transfer through the same-origin token boundary.
+- Passed 19/19 dual-pane safety checks, 12/12 live current-user shell checks, 15/15 default-Explorer UI checks, and 11/11 security-boundary checks.
+- Installed the 0.2.5 hotfix locally, matched the installed `app.asar` to the verified build, invoked a real Windows folder association, and confirmed the resulting Explore Better state through MCP.
+
 ## v0.2.4 - 2026-07-17
 
 ### Product-Tested Navigation And Device Experience

@@ -112,7 +112,13 @@ function markdownReport(report) {
 async function main() {
   await fs.mkdir(artifactsDir, { recursive: true });
   await fs.mkdir(appData, { recursive: true });
-  const port = 52000 + Math.floor(Math.random() * 8000);
+  // The full acceptance runner probes a usable loopback port before launching
+  // each suite. Honour that port instead of picking another Windows port at
+  // random, which can land inside an excluded/reserved range and fail EACCES.
+  const configuredPort = Number.parseInt(process.env.PORT || "", 10);
+  const port = Number.isInteger(configuredPort) && configuredPort > 0
+    ? configuredPort
+    : 52000 + Math.floor(Math.random() * 8000);
   const baseUrl = `http://127.0.0.1:${port}`;
   const checks = [];
   const snapshots = [];

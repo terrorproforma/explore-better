@@ -106,7 +106,10 @@ async function main() {
   await fs.mkdir(appData, { recursive: true });
   await fs.writeFile(path.join(fixture, "visible.txt"), "visible\n", "utf8");
   await fs.writeFile(path.join(fixture, ".hidden.txt"), "hidden\n", "utf8");
-  const port = 51_000 + Math.floor(Math.random() * 8_000);
+  const configuredPort = Number.parseInt(process.env.PORT || "", 10);
+  const port = Number.isInteger(configuredPort) && configuredPort > 0
+    ? configuredPort
+    : 51_000 + Math.floor(Math.random() * 8_000);
   const baseUrl = `http://127.0.0.1:${port}`;
   const checks = [];
   const pageErrors = [];
@@ -296,8 +299,10 @@ async function main() {
     if (passed !== checks.length) process.exitCode = 1;
   } finally {
     await browser?.close().catch(() => {});
-    server.kill();
-    await new Promise((resolve) => server.once("exit", resolve)).catch(() => {});
+    if (server.exitCode === null && server.signalCode === null) {
+      server.kill();
+      await new Promise((resolve) => server.once("exit", resolve)).catch(() => {});
+    }
   }
 }
 

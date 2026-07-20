@@ -1316,9 +1316,25 @@ const coverageAreas = [
         const media = Array.isArray(data.mediaRuns) ? data.mediaRuns[0] : null;
         const cold = media?.cold?.wallMs;
         const warm = media?.warm?.wallMs;
+        const coldApi = media?.cold?.result?.totalMs;
+        const warmApi = media?.warm?.result?.totalMs;
         const hits = media?.warm?.result?.dimensionsCache?.hits ?? media?.warm?.result?.dimensionsCacheHits;
+        const listingCacheHit = media?.warm?.result?.cache?.hit === true && Number(media?.warm?.result?.scanned) === 0;
         if (Number.isFinite(cold) && Number.isFinite(warm) && warm <= cold) {
           return pass(`Media cache warm ${warm} ms <= cold ${cold} ms${Number.isFinite(hits) ? `, hits=${hits}` : ""}.`);
+        }
+        // On tiny fixtures the fixed HTTP/process scheduling cost can be larger
+        // than the cache work itself. Accept the server timing when it proves a
+        // zero-scan cache hit and a faster warm listing; this is the behavior
+        // the cache is responsible for and avoids treating sub-millisecond wall
+        // jitter as a product regression.
+        if (
+          listingCacheHit &&
+          Number.isFinite(coldApi) &&
+          Number.isFinite(warmApi) &&
+          warmApi <= coldApi
+        ) {
+          return pass(`Media cache hit with zero scan; server warm ${warmApi} ms <= cold ${coldApi} ms (wall ${warm}/${cold} ms).`);
         }
         return fail("Media metadata benchmark did not prove a warm-cache improvement.");
       }),

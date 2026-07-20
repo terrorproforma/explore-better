@@ -821,7 +821,10 @@ function handleMcpConnectionCount(count = 0) {
 }
 
 async function ensureMcpBackendModule() {
-  if (!embeddedServerModule) embeddedServerModule = await import("./server.mjs");
+  if (!embeddedServerModule) {
+    embeddedServerModule = await import("./server.mjs");
+    embeddedServerModule.setDesktopExecutablePath?.(process.defaultApp ? null : process.execPath);
+  }
   return embeddedServerModule;
 }
 
@@ -1033,6 +1036,7 @@ async function ensureServer() {
   rememberBackendEvent("starting", "Starting embedded backend server.", { kind: "embedded" });
   try {
     const serverModule = await import("./server.mjs");
+    serverModule.setDesktopExecutablePath?.(process.defaultApp ? null : process.execPath);
     embeddedServerModule = serverModule;
     embeddedServer = await serverModule.startServer();
     if (await waitForServer()) {
