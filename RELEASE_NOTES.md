@@ -1,5 +1,17 @@
 # Explore Better Release Notes
 
+## Unreleased
+
+### Compact Tab Overflow
+
+- Replaced the native horizontal scrollbar in crowded pane headers with compact 68 px minimum tabs and a scrollbar-free strip.
+- Keeps the active tab visible automatically and provides an accessible all-tabs menu with the complete tab name and path when the row overflows.
+- Preserves tab closing, locking, dragging, keyboard cycling, new-tab access, pane activity, and source/target labels in the same 40 px header row.
+
+### Verification
+
+- Expanded pane-layout coverage to create 13–28 tabs at 1100, 1360, and 1500 px and verify fixed header height, hidden scrollbar chrome, active-tab visibility, complete overflow-menu contents, viewport-safe positioning, Escape dismissal, and focus restoration.
+
 ## v0.2.6 - 2026-07-20
 
 ### Existing Default-App Migration

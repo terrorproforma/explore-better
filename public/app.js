@@ -6569,6 +6569,120 @@ function scheduleProgressiveFileRender(paneName, token, entries, renderer, start
   }
 }
 
+const paneTabOverflowFrames = { left: 0, right: 0 };
+const paneTabRevealActive = { left: false, right: false };
+const paneTabResizeObservers = { left: null, right: null };
+
+function closePaneTabOverflow(paneName, options = {}) {
+  if (!isPaneName(paneName)) return;
+  const toggle = document.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
+  const menu = document.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+  if (!toggle || !menu) return;
+  menu.hidden = true;
+  toggle.setAttribute("aria-expanded", "false");
+  if (options.restoreFocus) toggle.focus();
+}
+
+function closeOtherPaneTabOverflow(exceptPane = "") {
+  for (const paneName of ["left", "right"]) {
+    if (paneName !== exceptPane) closePaneTabOverflow(paneName);
+  }
+}
+
+function positionPaneTabOverflow(paneName) {
+  const toggle = document.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
+  const menu = document.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+  if (!toggle || !menu || menu.hidden) return;
+  const rect = toggle.getBoundingClientRect();
+  const width = menu.getBoundingClientRect().width || 320;
+  const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(rect.bottom + 5)}px`;
+}
+
+function openPaneTabOverflow(paneName) {
+  const toggle = document.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
+  const menu = document.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+  if (!toggle || !menu || toggle.hidden || !menu.children.length) return;
+  closeOtherPaneTabOverflow(paneName);
+  menu.hidden = false;
+  toggle.setAttribute("aria-expanded", "true");
+  positionPaneTabOverflow(paneName);
+  menu.querySelector("button.active")?.focus() || menu.querySelector("button")?.focus();
+}
+
+function updatePaneTabOverflow(paneName) {
+  paneTabOverflowFrames[paneName] = 0;
+  const tabbar = document.querySelector(`[data-tabs="${paneName}"]`);
+  const strip = tabbar?.querySelector(`[data-tab-strip="${paneName}"]`);
+  const toggle = tabbar?.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
+  const menu = tabbar?.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+  if (!tabbar || !strip || !toggle || !menu) return;
+
+  let overflowing = strip.scrollWidth > strip.clientWidth + 1;
+  if (!overflowing && !toggle.hidden) {
+    toggle.hidden = true;
+    overflowing = strip.scrollWidth > strip.clientWidth + 1;
+  } else if (overflowing && toggle.hidden) {
+    toggle.hidden = false;
+  }
+  if (!overflowing) {
+    strip.scrollLeft = 0;
+    closePaneTabOverflow(paneName);
+    return;
+  }
+
+  const tabCount = panes[paneName]?.tabs?.length || 0;
+  toggle.title = `Show all ${tabCount} tabs`;
+  toggle.setAttribute("aria-label", toggle.title);
+  toggle.querySelector(".tab-overflow-count").textContent = String(tabCount);
+
+  if (paneTabRevealActive[paneName]) {
+    const active = strip.querySelector(".tab.active");
+    if (active) {
+      const activeLeft = active.offsetLeft;
+      const activeRight = activeLeft + active.offsetWidth;
+      if (activeLeft < strip.scrollLeft) strip.scrollLeft = activeLeft;
+      if (activeRight > strip.scrollLeft + strip.clientWidth) {
+        strip.scrollLeft = Math.max(0, activeRight - strip.clientWidth);
+      }
+    }
+  }
+  paneTabRevealActive[paneName] = false;
+  if (!menu.hidden) positionPaneTabOverflow(paneName);
+}
+
+function schedulePaneTabOverflow(paneName, options = {}) {
+  if (!isPaneName(paneName)) return;
+  paneTabRevealActive[paneName] ||= options.revealActive === true;
+  if (paneTabOverflowFrames[paneName]) cancelAnimationFrame(paneTabOverflowFrames[paneName]);
+  paneTabOverflowFrames[paneName] = requestAnimationFrame(() => updatePaneTabOverflow(paneName));
+}
+
+function observePaneTabOverflow(paneName) {
+  const tabbar = document.querySelector(`[data-tabs="${paneName}"]`);
+  const strip = tabbar?.querySelector(`[data-tab-strip="${paneName}"]`);
+  paneTabResizeObservers[paneName]?.disconnect();
+  if (!tabbar || !strip || typeof ResizeObserver === "undefined") return;
+  paneTabResizeObservers[paneName] = new ResizeObserver(() => schedulePaneTabOverflow(paneName));
+  paneTabResizeObservers[paneName].observe(tabbar);
+  paneTabResizeObservers[paneName].observe(strip);
+}
+
+function paneTabOverflowMenuMarkup(paneName, pane) {
+  return pane.tabs
+    .map((item, index) => {
+      const active = index === pane.activeTab;
+      const title = item.title || labelForPath(item.path);
+      const state = active ? "&#10003;" : item.locked ? "&#9679;" : "";
+      return `<button type="button" role="menuitem" class="${active ? "active" : ""}" data-tab="${index}" data-pane="${paneName}" title="${escapeHtml(item.path)}">
+        <span class="tab-overflow-state" aria-hidden="true">${state}</span>
+        <span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(item.path)}</small></span>
+      </button>`;
+    })
+    .join("");
+}
+
 function renderPane(paneName) {
   scheduleMcpContextPublish();
   const pane = panes[paneName];
@@ -6581,8 +6695,7 @@ function renderPane(paneName) {
   paneElement.classList.toggle("virtual-zip", tab.virtualMode === "zip");
 
   const tabsElement = document.querySelector(`[data-tabs="${paneName}"]`);
-  tabsElement.innerHTML =
-    pane.tabs
+  const tabsMarkup = pane.tabs
       .map((item, index) => {
         const active = index === pane.activeTab ? " active" : "";
         const locked = item.locked ? " locked" : "";
@@ -6592,16 +6705,24 @@ function renderPane(paneName) {
             ? `<button class="tab-close" data-close-tab="${index}" data-pane="${paneName}" title="Close tab" aria-label="Close tab">&times;</button>`
             : `<span></span>`;
         return `<div class="tab${active}${locked}" data-tab-shell="${index}" data-pane="${paneName}" draggable="true" title="${escapeHtml(item.path)}">
-          <button class="tab-label" data-tab="${index}" data-pane="${paneName}">
+          <button class="tab-label" role="tab" aria-selected="${index === pane.activeTab}" data-tab="${index}" data-pane="${paneName}">
             <span>${escapeHtml(item.title || labelForPath(item.path))}</span>
           </button>
           <button class="tab-lock${item.locked ? " active" : ""}" data-lock-tab="${index}" data-pane="${paneName}" title="${lockTitle}" aria-label="${lockTitle}"><span class="tab-lock-glyph" aria-hidden="true"></span></button>
           ${closeButton}
         </div>`;
       })
-      .join("") +
-    `<button class="new-tab" data-new-tab="${paneName}" title="New tab" aria-label="New tab">+</button>
+      .join("");
+  tabsElement.innerHTML =
+    `<div class="tab-strip" data-tab-strip="${paneName}" role="tablist" aria-label="${paneName} pane tabs">${tabsMarkup}</div>
+     <button class="new-tab" data-new-tab="${paneName}" title="New tab" aria-label="New tab">+</button>
+     <button class="tab-overflow-toggle" data-tab-overflow-toggle="${paneName}" type="button" aria-haspopup="menu" aria-expanded="false" hidden>
+       <span class="tab-overflow-glyph" aria-hidden="true">&hellip;</span><span class="tab-overflow-count">${pane.tabs.length}</span>
+     </button>
+     <div class="tab-overflow-menu" data-tab-overflow-menu="${paneName}" role="menu" aria-label="All ${paneName} pane tabs" hidden>${paneTabOverflowMenuMarkup(paneName, pane)}</div>
      ${paneActivityMarkup(paneName)}`;
+  observePaneTabOverflow(paneName);
+  schedulePaneTabOverflow(paneName, { revealActive: true });
 
   document.querySelector(`[data-path-input="${paneName}"]`).value = tab.path;
   const breadcrumbs = document.querySelector(`[data-breadcrumbs="${paneName}"]`);
@@ -24377,6 +24498,18 @@ function wireEvents() {
   });
 
   document.body.addEventListener("click", async (event) => {
+    if (!event.target.closest("[data-tab-overflow-toggle], [data-tab-overflow-menu]")) {
+      closeOtherPaneTabOverflow();
+    }
+    const tabOverflowToggle = event.target.closest("[data-tab-overflow-toggle]");
+    if (tabOverflowToggle) {
+      event.preventDefault();
+      const paneName = tabOverflowToggle.dataset.tabOverflowToggle;
+      const menu = document.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+      if (menu?.hidden) openPaneTabOverflow(paneName);
+      else closePaneTabOverflow(paneName, { restoreFocus: true });
+      return;
+    }
     const updateActionButton = event.target.closest("[data-update-action]");
     if (updateActionButton) {
       await runAppUpdateAction(updateActionButton.dataset.updateAction);
@@ -25367,6 +25500,36 @@ function wireEvents() {
   });
 
   document.body.addEventListener("keydown", async (event) => {
+    const tabOverflowMenu = event.target.closest?.("[data-tab-overflow-menu]");
+    if (tabOverflowMenu) {
+      const paneName = tabOverflowMenu.dataset.tabOverflowMenu;
+      const items = [...tabOverflowMenu.querySelectorAll("button")];
+      const index = items.indexOf(document.activeElement);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const offset = event.key === "ArrowDown" ? 1 : -1;
+        items[(index + offset + items.length) % items.length]?.focus();
+        return;
+      }
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        items[event.key === "Home" ? 0 : items.length - 1]?.focus();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePaneTabOverflow(paneName, { restoreFocus: true });
+        return;
+      }
+    }
+    if (event.key === "Escape") {
+      const openTabMenu = document.querySelector('[data-tab-overflow-menu]:not([hidden])');
+      if (openTabMenu) {
+        event.preventDefault();
+        closePaneTabOverflow(openTabMenu.dataset.tabOverflowMenu, { restoreFocus: true });
+        return;
+      }
+    }
     const terminalSearch = event.target.closest?.("[data-terminal-search]");
     if (terminalSearch) {
       if (event.key === "Enter") {

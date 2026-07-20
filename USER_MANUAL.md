@@ -155,6 +155,7 @@ Each pane has its own tabs, path, history, filters, columns, sort order, and vie
 - `Ctrl+Tab`: cycle tabs.
 - Drag tabs left or right to reorder them.
 - `L` on a tab locks it; navigating from a locked tab opens a branch tab.
+- Crowded tab rows shrink to compact tabs without adding a header scrollbar. Explore Better keeps the active tab visible; choose the numbered `...` button to open the complete tab list with names and paths. The menu supports arrow keys, Home/End, Enter, and Escape.
 - Use `Layouts` to save and restore a full two-pane workspace.
 - Use `Tab Groups` to save only the active pane's tab set.
 - Use the three pane-layout icons for vertical split, horizontal split, and single-pane focus. Their tooltips include the `Ctrl+Shift+1/2/3` shortcuts.
