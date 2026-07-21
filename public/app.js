@@ -130,6 +130,8 @@ const app = {
   listingHydrations: new Map(),
   inspectorRenderToken: 0,
   inspectorPreviewController: null,
+  viewerLoadToken: 0,
+  viewerPreviewController: null,
   listingPrefetch: { queue: [], queued: new Set(), active: new Map(), timer: null, paused: false, metrics: { queued: 0, started: 0, aborts: 0, cacheHits: 0, resumptions: 0 } },
   foregroundActivity: { leases: new Map(), nextId: 1, idleSince: performance.now(), publishTimer: null, metrics: { starts: 0, releases: 0 } },
   visibleEntryCache: new WeakMap(),
@@ -12689,6 +12691,33 @@ function disposeModelViewport(scope) {
   }
 }
 
+function previewMetadataMatchesEntry(preview, entry) {
+  if (!preview || !entry || !samePath(preview.path, entry.path)) {
+    return false;
+  }
+  const previewSize = Number(preview.size);
+  const entrySize = Number(entry.size);
+  if (Number.isFinite(previewSize) && Number.isFinite(entrySize) && previewSize !== entrySize) {
+    return false;
+  }
+  const previewModified = Number(preview.modified);
+  const entryModified = Number(entry.modified);
+  return !Number.isFinite(previewModified) || !Number.isFinite(entryModified) || Math.abs(previewModified - entryModified) < 1;
+}
+
+function currentModelViewportMatches(scope, paneName, itemPath) {
+  const lifecycle = app.modelViewers?.[scope];
+  if (
+    !lifecycle ||
+    lifecycle.disposed ||
+    !lifecycle.container?.isConnected ||
+    !samePath(lifecycle.preview?.path, itemPath)
+  ) {
+    return false;
+  }
+  return previewMetadataMatchesEntry(lifecycle.preview, entryForPath(paneName, itemPath));
+}
+
 function flattenedModelArray(value) {
   const source = Array.isArray(value) ? value : [];
   return Array.isArray(source[0]) ? source.flat() : source;
@@ -12917,6 +12946,7 @@ async function mountModelViewport(container, preview, scope) {
   const status = container.querySelector("[data-model-status]");
   const lifecycle = {
     scope,
+    preview,
     container,
     stage,
     status,
@@ -12933,6 +12963,8 @@ async function mountModelViewport(container, preview, scope) {
     modelBox: null,
     meshCount: 0,
     triangleCount: 0,
+    renderWidth: 0,
+    renderHeight: 0,
     disposed: false
   };
   app.modelViewers[scope] = lifecycle;
@@ -12969,8 +13001,11 @@ async function mountModelViewport(container, preview, scope) {
     lifecycle.scene.add(fillLight);
     const resize = () => {
       if (lifecycle.disposed) return;
-      const width = Math.max(1, stage.clientWidth);
-      const height = Math.max(1, stage.clientHeight);
+      const width = Math.max(1, Math.round(stage.clientWidth));
+      const height = Math.max(1, Math.round(stage.clientHeight));
+      if (width === lifecycle.renderWidth && height === lifecycle.renderHeight) return;
+      lifecycle.renderWidth = width;
+      lifecycle.renderHeight = height;
       lifecycle.camera.aspect = width / height;
       lifecycle.camera.updateProjectionMatrix();
       lifecycle.renderer.setSize(width, height, false);
@@ -13023,10 +13058,6 @@ async function mountModelViewport(container, preview, scope) {
 async function renderInspector(options = {}) {
   const inspector = document.getElementById("inspector");
   const body = inspector.querySelector(".inspector-body");
-  disposeModelViewport("inspector");
-  const renderToken = ++app.inspectorRenderToken;
-  app.inspectorPreviewController?.abort();
-  app.inspectorPreviewController = null;
   if (options.deferPresence) {
     clearTimeout(app.inspectorPresenceTimer);
     app.inspectorPresenceTimer = setTimeout(() => applyInspectorPresence({ virtualRefreshDelay: 0 }), 650);
@@ -13034,11 +13065,23 @@ async function renderInspector(options = {}) {
     clearTimeout(app.inspectorPresenceTimer);
     applyInspectorPresence();
   }
+  const selection = selectedPaths(app.activePane);
+  if (
+    options.forcePreview !== true &&
+    inspectorEnabled() &&
+    selection.length === 1 &&
+    currentModelViewportMatches("inspector", app.activePane, selection[0])
+  ) {
+    return;
+  }
+  disposeModelViewport("inspector");
+  const renderToken = ++app.inspectorRenderToken;
+  app.inspectorPreviewController?.abort();
+  app.inspectorPreviewController = null;
   if (!inspectorEnabled()) {
     body.innerHTML = `<div class="muted">Preview disabled</div>`;
     return;
   }
-  const selection = selectedPaths(app.activePane);
   if (!selection.length) {
     body.innerHTML = `<div class="muted">Select an item</div>`;
     return;
@@ -13342,11 +13385,28 @@ async function loadViewerPath(itemPath) {
   if (!itemPath) {
     return;
   }
+  const currentEntry = entryForPath(app.viewer.paneName, itemPath);
+  if (
+    samePath(itemPath, app.viewer.path) &&
+    previewMetadataMatchesEntry(app.viewer.preview, currentEntry) &&
+    (app.viewer.preview?.type !== "model" || currentModelViewportMatches("viewer", app.viewer.paneName, itemPath))
+  ) {
+    renderViewerStrip();
+    renderViewerNav();
+    return;
+  }
+  const loadToken = ++app.viewerLoadToken;
+  app.viewerPreviewController?.abort();
+  const controller = new AbortController();
+  app.viewerPreviewController = controller;
   app.viewer.path = itemPath;
   syncViewerIndex();
   renderViewer({ name: labelForPath(itemPath), path: itemPath, type: "loading" });
   try {
-    const preview = await request(`/api/preview?path=${encodeURIComponent(itemPath)}`);
+    const preview = await request(`/api/preview?path=${encodeURIComponent(itemPath)}`, { signal: controller.signal });
+    if (loadToken !== app.viewerLoadToken) {
+      return;
+    }
     app.viewer.path = preview.path || itemPath;
     app.viewer.preview = preview;
     syncViewerIndex();
@@ -13356,10 +13416,23 @@ async function loadViewerPath(itemPath) {
       showToast("Viewer supports text, images, PDF, audio, video, STL, and STEP");
     }
   } catch (error) {
+    if (isAbortError(error) || loadToken !== app.viewerLoadToken) {
+      return;
+    }
     app.viewer.preview = null;
     renderViewer({ name: labelForPath(itemPath), path: itemPath, type: error.message });
     showToast(error.message);
+  } finally {
+    if (loadToken === app.viewerLoadToken) {
+      app.viewerPreviewController = null;
+    }
   }
+}
+
+function cancelViewerPreviewLoad() {
+  app.viewerLoadToken += 1;
+  app.viewerPreviewController?.abort();
+  app.viewerPreviewController = null;
 }
 
 async function openViewer(paneName = app.activePane, itemPath = null) {
@@ -27192,9 +27265,6 @@ function wireEvents() {
         closeTextEditor();
         return;
       }
-      if (button.dataset.closeDialog === "viewer-dialog") {
-        disposeModelViewport("viewer");
-      }
       if (button.dataset.closeDialog === "preferences-dialog") {
         requestClosePreferencesDialog();
         return;
@@ -27215,8 +27285,10 @@ function wireEvents() {
   }
   const viewerDialog = document.getElementById("viewer-dialog");
   if (viewerDialog) {
-    viewerDialog.addEventListener("close", () => disposeModelViewport("viewer"));
-    viewerDialog.addEventListener("cancel", () => disposeModelViewport("viewer"));
+    viewerDialog.addEventListener("close", () => {
+      cancelViewerPreviewLoad();
+      disposeModelViewport("viewer");
+    });
   }
 
   const textEditorDialog = document.getElementById("text-editor-dialog");

@@ -132,6 +132,7 @@ async function main() {
   const pageErrors = [];
   const consoleErrors = [];
   const apiFailures = [];
+  const previewRequests = [];
   let serverOutput = "";
   const server = spawn(process.execPath, ["server.mjs"], {
     cwd: workspace,
@@ -181,6 +182,9 @@ async function main() {
     });
     const page = await browser.newPage({ viewport: { width: 1440, height: 920 } });
     page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("request", (request) => {
+      if (request.url().includes("/api/preview?")) previewRequests.push(request.url());
+    });
     page.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
@@ -198,11 +202,41 @@ async function main() {
     evidence.stlInspector = await modelEvidence(page, "inspector", 30000);
     check(checks, "stl-inspector-renders", evidence.stlInspector.state === "ready" && evidence.stlInspector.meshes === 1 && evidence.stlInspector.triangles >= 12 && evidence.stlInspector.canvas?.width >= 200 && evidence.stlInspector.canvas?.height >= 200, JSON.stringify(evidence.stlInspector));
     check(checks, "model-controls-complete", ["fit", "iso", "front", "top", "zoom-out", "zoom-in", "edges"].every((action) => evidence.stlInspector.controls.some((control) => control.action === action)), JSON.stringify(evidence.stlInspector.controls));
+    await page.evaluate(() => { window.__modelPreviewInspectorCanvas = document.querySelector('[data-model-viewport="inspector"] canvas'); });
+    const inspectorPreviewRequestsBefore = previewRequests.length;
+    await paneRow(page, stlName).click();
+    await page.waitForTimeout(350);
+    evidence.stableInspectorRefresh = await page.evaluate(() => ({
+      sameCanvas: window.__modelPreviewInspectorCanvas === document.querySelector('[data-model-viewport="inspector"] canvas'),
+      state: document.querySelector('[data-model-viewport="inspector"]')?.dataset.modelState || "missing"
+    }));
+    const inspectorPreviewRequestDelta = previewRequests.length - inspectorPreviewRequestsBefore;
+    check(
+      checks,
+      "unchanged-selection-reuses-inspector",
+      evidence.stableInspectorRefresh.sameCanvas && evidence.stableInspectorRefresh.state === "ready" && inspectorPreviewRequestDelta === 0,
+      `${JSON.stringify(evidence.stableInspectorRefresh)} previewRequests=${inspectorPreviewRequestDelta}`
+    );
 
     await page.locator('#inspector [data-preview-action="viewer"]').click();
     await page.waitForSelector("#viewer-dialog[open]", { timeout: 10000 });
     evidence.stlViewer = await modelEvidence(page, "viewer", 30000);
     check(checks, "stl-large-viewer-renders", evidence.stlViewer.state === "ready" && evidence.stlViewer.canvas?.width >= 800 && evidence.stlViewer.canvas?.height >= 400, JSON.stringify(evidence.stlViewer));
+    await page.evaluate(() => { window.__modelPreviewViewerCanvas = document.querySelector('[data-model-viewport="viewer"] canvas'); });
+    const viewerPreviewRequestsBefore = previewRequests.length;
+    await page.locator('#viewer-strip .viewer-strip-item.active').click();
+    await page.waitForTimeout(250);
+    evidence.stableActiveViewer = await page.evaluate(() => ({
+      sameCanvas: window.__modelPreviewViewerCanvas === document.querySelector('[data-model-viewport="viewer"] canvas'),
+      state: document.querySelector('[data-model-viewport="viewer"]')?.dataset.modelState || "missing"
+    }));
+    const viewerPreviewRequestDelta = previewRequests.length - viewerPreviewRequestsBefore;
+    check(
+      checks,
+      "active-viewer-selection-does-not-reload",
+      evidence.stableActiveViewer.sameCanvas && evidence.stableActiveViewer.state === "ready" && viewerPreviewRequestDelta === 0,
+      `${JSON.stringify(evidence.stableActiveViewer)} previewRequests=${viewerPreviewRequestDelta}`
+    );
     const viewerModel = page.locator('[data-model-viewport="viewer"]');
     for (const action of ["front", "top", "iso", "zoom-in", "zoom-out", "fit"]) {
       await viewerModel.locator(`[data-model-action="${action}"]`).click();

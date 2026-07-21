@@ -5,6 +5,7 @@
 ### Local STL And STEP Preview
 
 - Added interactive 3D previews for `.stl`, `.step`, and `.stp` files in both the Preview inspector and the large Viewer.
+- Keeps an unchanged model canvas alive across selection and folder refreshes, and ignores repeat clicks on the active Viewer item, eliminating unnecessary flashes, refetches, and WebGL reconstruction.
 - Added orbit, pan, wheel and button zoom, fit, isometric/front/top views, edge toggling, dimensions, mesh counts, and triangle counts.
 - Tessellates STEP geometry locally in a dedicated OpenCascade WebAssembly worker; model files never leave the device, and the main app retains its stricter script policy.
 - Lazy-loads the 736 KB 3D renderer only after the first model selection and loads the 7.3 MB CAD engine only for STEP, keeping the normal application runtime at 567 KB.
@@ -26,7 +27,7 @@
 
 ### Verification
 
-- Added a real-browser STL/STEP suite with 13/13 passing checks across packaged runtime assets/licenses, API classification, list metadata, inspector and Viewer rendering, every view control, worker output, dimensions/statistics, WebGL replacement/disposal, and clean browser/API diagnostics.
+- Added a real-browser STL/STEP suite with 15/15 passing checks across packaged runtime assets/licenses, API classification, list metadata, inspector and Viewer rendering, stable unchanged-model refreshes, every view control, worker output, dimensions/statistics, WebGL replacement/disposal, and clean browser/API diagnostics.
 - Kept startup verification at 12/12 and the focused performance guard at 20/20 with no regression watch items after separating the model runtime.
 - Added an end-to-end ZIP fixture that verifies the right-click label, containing-folder dialog default, safe sibling output, journaled completion, visible outcome, and protection against accidental opposite-pane extraction.
 - Expanded pane-layout coverage to create 13–28 tabs at 1100, 1360, and 1500 px and verify fixed header height, hidden scrollbar chrome, active-tab visibility, complete overflow-menu contents, viewport-safe positioning, Escape dismissal, and focus restoration.
