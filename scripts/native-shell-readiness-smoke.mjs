@@ -46,6 +46,10 @@ function slashPath(value) {
   return value.split(path.sep).join("/");
 }
 
+function normalizePathForComparison(value) {
+  return String(value || "").replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+}
+
 function relativePath(filePath) {
   return slashPath(path.relative(workspace, filePath));
 }
@@ -330,13 +334,23 @@ async function main() {
     `matched=${reports.recycle.data?.dryRun?.matched || 0}, operation=${reports.recycle.data?.operation?.status || "missing"}.`,
     "npm run verify:windows-recycle"
   );
+  const zipExtractHere = reports.zip.data?.extractHere;
+  const zipExtractTargetMatches = Boolean(
+    zipExtractHere?.archive &&
+    zipExtractHere?.targetDir &&
+    normalizePathForComparison(zipExtractHere.targetDir) === normalizePathForComparison(path.win32.dirname(zipExtractHere.archive))
+  );
   addLocalGate(
     checks,
     readinessChecklist,
     "local-zip-browse",
-    "ZIP virtual pane browsing reaches nested archive folders",
-    reports.zip.data?.root?.count >= 1 && reports.zip.data?.nested?.count >= 1 && reports.zip.data?.deep?.count >= 1,
-    `root/nested/deep=${reports.zip.data?.root?.count || 0}/${reports.zip.data?.nested?.count || 0}/${reports.zip.data?.deep?.count || 0}.`,
+    "ZIP browsing and right-click Extract Here pass",
+    reports.zip.data?.root?.count >= 1 &&
+      reports.zip.data?.nested?.count >= 1 &&
+      reports.zip.data?.deep?.count >= 1 &&
+      zipExtractHere?.status === "completed" &&
+      zipExtractTargetMatches,
+    `root/nested/deep=${reports.zip.data?.root?.count || 0}/${reports.zip.data?.nested?.count || 0}/${reports.zip.data?.deep?.count || 0}, extractHere=${zipExtractHere?.status || "missing"}, target=${zipExtractTargetMatches ? "archive-parent" : "mismatch"}.`,
     "npm run verify:zip-browse"
   );
   addLocalGate(

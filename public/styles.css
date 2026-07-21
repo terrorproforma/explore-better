@@ -5338,7 +5338,9 @@ textarea:focus {
   position: fixed;
   z-index: 120;
   width: min(260px, calc(100vw - 16px));
-  overflow: hidden;
+  max-height: calc(100vh - 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
   background: #fff;

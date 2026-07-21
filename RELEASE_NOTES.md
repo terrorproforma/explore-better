@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### ZIP Extraction
+
+- Added `Extract Here` directly to the right-click menu for ZIP files.
+- Changed the Archive dialog's extraction target to the folder containing the selected ZIP instead of the opposite pane, with an explicit `Here` shortcut to restore that target.
+- Keeps extraction safe and undoable by creating a sibling folder named after the archive rather than scattering files into an existing folder.
+- Made long right-click menus vertically scrollable so lower actions remain reachable on shorter windows.
+
 ### Compact Tab Overflow
 
 - Replaced the native horizontal scrollbar in crowded pane headers with compact 68 px minimum tabs and measured overflow—no tab buttons remain off-canvas.
@@ -10,6 +17,7 @@
 
 ### Verification
 
+- Added an end-to-end ZIP fixture that verifies the right-click label, containing-folder dialog default, safe sibling output, journaled completion, visible outcome, and protection against accidental opposite-pane extraction.
 - Expanded pane-layout coverage to create 13–28 tabs at 1100, 1360, and 1500 px and verify fixed header height, hidden scrollbar chrome, active-tab visibility, complete overflow-menu contents, viewport-safe positioning, Escape dismissal, and focus restoration.
 
 ## v0.2.6 - 2026-07-20

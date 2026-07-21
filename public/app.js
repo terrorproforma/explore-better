@@ -436,7 +436,7 @@ const commands = [
   },
   {
     name: "Extract selected ZIP",
-    detail: "Extracts the first selected ZIP into a folder in the opposite pane.",
+    detail: "Extracts the first selected ZIP beside the archive by default.",
     run: () => openArchiveDialog(app.activePane)
   },
   {
@@ -14558,6 +14558,12 @@ function defaultExtractFolderName(archivePath) {
   return isZipPath(base) ? base.slice(0, -4) || "Extracted" : base;
 }
 
+function defaultExtractTarget(archivePath, paneName = app.activePane) {
+  const containingFolder = parentPathOf(archivePath || "");
+  if (/^[a-z]:$/i.test(containingFolder)) return `${containingFolder}\\`;
+  return containingFolder || tabOf(paneName).path;
+}
+
 function openArchiveDialogForPaths(paneName, paths, options = {}) {
   if (!paths.length) {
     return showToast("Select items first");
@@ -14568,7 +14574,7 @@ function openArchiveDialogForPaths(paneName, paths, options = {}) {
   document.getElementById("archive-target").value = tabOf(otherPane(paneName)).path;
   document.getElementById("archive-create-summary").textContent = `${paths.length} selected`;
   document.getElementById("archive-path").value = archivePath;
-  document.getElementById("archive-extract-target").value = tabOf(otherPane(paneName)).path;
+  document.getElementById("archive-extract-target").value = defaultExtractTarget(archivePath, paneName);
   document.getElementById("archive-folder").value = defaultExtractFolderName(archivePath);
   document.getElementById("archive-extract-summary").textContent = archivePath
     ? labelForPath(archivePath)
@@ -14618,6 +14624,30 @@ async function extractArchiveFromForm() {
   await syncStateAndChrome();
   document.getElementById("archive-extract-summary").textContent = labelForPath(result.extractedDir);
   showToast("ZIP extracted");
+}
+
+async function extractArchiveHere(paneName, archivePath) {
+  if (!isPaneName(paneName) || !isZipPath(archivePath)) {
+    return showToast("Select a ZIP first");
+  }
+  const targetDir = defaultExtractTarget(archivePath, paneName);
+  setStatus(`Extracting ${labelForPath(archivePath)} here...`);
+  try {
+    const result = await request("/api/archive/extract", {
+      method: "POST",
+      body: JSON.stringify({
+        archive: archivePath,
+        targetDir,
+        folderName: defaultExtractFolderName(archivePath)
+      })
+    });
+    await Promise.all([refreshPane(paneName), refreshPane(otherPane(paneName))]);
+    await syncStateAndChrome();
+    showToast(`Extracted here to ${labelForPath(result.extractedDir)}`);
+    return result;
+  } finally {
+    setStatus("Ready");
+  }
 }
 
 function openPropertiesDialog(paneName) {
@@ -17389,6 +17419,9 @@ function contextMenuItems(menu = app.contextMenu) {
       contextMenuItem("shell-verbs", "Shell Verbs", { disabled: hasZipVirtualSelection }),
       contextMenuItem("reveal", "Reveal In Explorer")
     );
+    if (isRealZipFileEntry(entry)) {
+      items.push(contextMenuItem("extract-here", "Extract Here"));
+    }
     items.push({ separator: true });
     items.push(
       contextMenuItem("copy-clip", `Copy ${selectionCount || 1} Item(s)`, {
@@ -17671,6 +17704,7 @@ async function executeContextAction(action) {
     if (action === "shortcut") await createShortcutsForSelection(paneName);
     if (action === "link") openLinkDialog(paneName);
     if (action === "archive") openArchiveDialog(paneName);
+    if (action === "extract-here" && entry) await extractArchiveHere(paneName, entry.path);
     if (action === "label") await openLabelsDialog(paneName);
     if (action === "collection") await addSelectionToCollection();
     if (action === "basket-add") await addSelectionToBasket(paneName);
@@ -26059,6 +26093,11 @@ function wireEvents() {
       const targetPane = action.startsWith("active") ? app.activePane : otherPane(app.activePane);
       if (action.endsWith("create")) {
         document.getElementById("archive-target").value = tabOf(targetPane).path;
+      } else if (action === "here-extract") {
+        document.getElementById("archive-extract-target").value = defaultExtractTarget(
+          document.getElementById("archive-path").value,
+          app.archive?.paneName || app.activePane
+        );
       } else {
         document.getElementById("archive-extract-target").value = tabOf(targetPane).path;
       }

@@ -212,7 +212,7 @@ npm run verify:mcp-value
 - Device actions say exactly whether they browse in Explore Better, open in the active pane, or request Windows File Explorer; unsupported actions are not rendered.
 - Health & diagnostics reports renderer, backend, native helper, MCP bridge, shell provider, cache, index, queue, updater, package, and adaptive scheduler state. A streamed support bundle is path-redacted by default, never includes file or terminal contents or secrets, and is capped at 10 MB.
 - Explorer replacement and Windows integration remain optional and reversible per user.
-- ZIP browsing as read-only virtual folders without extracting first.
+- ZIP browsing as read-only virtual folders without extracting first, plus a right-click `Extract Here` action that creates a safe archive-named sibling folder beside the ZIP.
 - Windows file clipboard and drag/drop interoperability with Explorer and the desktop.
 - Recycle Bin browsing and native restore support.
 - First-launch opt-in plus current-user folder, drive, folder-background, and file-location handlers.

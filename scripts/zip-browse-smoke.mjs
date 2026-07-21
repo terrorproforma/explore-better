@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { chromium } from "playwright-core";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -21,6 +22,10 @@ function optionValue(name, fallback = "") {
 
 function keepFixture() {
   return process.argv.includes("--keep-fixture") || process.env.EB_ZIP_BROWSE_KEEP_FIXTURE === "1";
+}
+
+function edgePath() {
+  return optionValue("--browser", process.env.EB_ZIP_BROWSE_BROWSER || "") || "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe";
 }
 
 function assert(condition, message) {
@@ -109,6 +114,15 @@ function itemByName(listing, name) {
   return (listing.entries || []).find((entry) => entry.name === name);
 }
 
+async function waitForPath(itemPath, timeoutMs = 10000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await fs.access(itemPath).then(() => true, () => false)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for ${itemPath}`);
+}
+
 async function main() {
   await fs.mkdir(artifactsDir, { recursive: true });
   await prepareFixture();
@@ -126,6 +140,7 @@ async function main() {
     serverOutput += chunk.toString();
   });
 
+  let browser = null;
   try {
     await waitForServer(baseUrl, server);
     const root = await requestJson(
@@ -159,6 +174,57 @@ async function main() {
     assert(itemByName(deepListing, "final.log")?.isFile, "Deep ZIP folder should list files.");
     assert(deepListing.timing?.scanMs >= 0, "ZIP listing should include scan timing.");
 
+    browser = await chromium.launch({ executablePath: edgePath(), headless: true });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 760 } });
+    await page.goto(`${baseUrl}/?left=${encodeURIComponent(runRoot)}&right=${encodeURIComponent(sourceRoot)}`, {
+      waitUntil: "domcontentloaded"
+    });
+    const zipRow = page.locator('.pane[data-pane="left"] [data-entry-path]').filter({ hasText: "fixture.zip" });
+    await zipRow.waitFor({ state: "visible", timeout: 10000 });
+    await zipRow.click({ button: "right" });
+    const extractHereButton = page.locator('#context-menu [data-context-action="extract-here"]');
+    assert(await extractHereButton.isVisible(), "ZIP context menu should expose Extract Here.");
+    assert((await extractHereButton.textContent())?.trim() === "Extract Here", "ZIP context action should use the explicit Extract Here label.");
+    await page.locator('#context-menu [data-context-action="archive"]').click();
+    await page.waitForFunction(() => document.getElementById("archive-dialog")?.open === true);
+    const dialogDefaults = await page.evaluate(() => {
+      const hereButton = document.querySelector('[data-archive-target="here-extract"]');
+      return {
+        archive: document.getElementById("archive-path")?.value || "",
+        target: document.getElementById("archive-extract-target")?.value || "",
+        folder: document.getElementById("archive-folder")?.value || "",
+        hereButtonVisible: Boolean(hereButton && !hereButton.hidden)
+      };
+    });
+    assert(dialogDefaults.archive === zipPath, "Archive dialog should retain the selected ZIP path.");
+    assert(dialogDefaults.target === runRoot, "Archive dialog should default extraction to the ZIP containing folder.");
+    assert(dialogDefaults.folder === "fixture", "Archive dialog should keep extraction in a safe archive-named sibling folder.");
+    assert(dialogDefaults.hereButtonVisible, "Archive dialog should expose an explicit Here target button.");
+    await page.locator('[data-close-dialog="archive-dialog"]').click();
+    await page.waitForFunction(() => document.getElementById("archive-dialog")?.open === false);
+    await zipRow.click({ button: "right" });
+    await extractHereButton.click();
+    const extractedDir = path.join(runRoot, "fixture");
+    await waitForPath(path.join(extractedDir, "root-file.txt"));
+    await waitForPath(path.join(extractedDir, "nested", "deep", "final.log"));
+    await page.waitForFunction(() => /Extracted here to fixture/i.test(document.getElementById("toast")?.textContent || ""));
+    const state = await requestJson(baseUrl, "/api/state");
+    const extractOperation = (state.operations || []).find((operation) => operation.type === "archive-extract");
+    assert(extractOperation?.status === "completed", "Extract Here should complete as a journaled archive extraction.");
+    assert(extractOperation?.retry?.body?.targetDir === runRoot, "Extract Here should target the ZIP containing folder.");
+    assert(
+      !(await fs.access(path.join(sourceRoot, "fixture")).then(() => true, () => false)),
+      "Extract Here must not use the other pane as its target."
+    );
+    const ui = await page.evaluate(() => ({
+      dialogOpen: document.getElementById("archive-dialog")?.open === true,
+      toast: document.getElementById("toast")?.textContent || "",
+      leftPath: document.querySelector('[data-path-input="left"]')?.value || "",
+      rightPath: document.querySelector('[data-path-input="right"]')?.value || ""
+    }));
+    assert(!ui.dialogOpen, "Extract Here should run directly without opening the archive dialog.");
+    assert(/Extracted here to fixture/i.test(ui.toast), "Extract Here should report the created sibling folder.");
+
     const outputPath = path.join(artifactsDir, "zip-browse-latest.json");
     await fs.writeFile(
       outputPath,
@@ -185,6 +251,16 @@ async function main() {
             parent: deepListing.parent,
             count: deepListing.count,
             timing: deepListing.timing
+          },
+          extractHere: {
+            action: "Extract Here",
+            archive: zipPath,
+            targetDir: runRoot,
+            extractedDir,
+            operationId: extractOperation.id,
+            status: extractOperation.status,
+            dialogDefaults,
+            ui
           }
         },
         null,
@@ -195,8 +271,10 @@ async function main() {
     console.log(`zip root: ${root.count} item(s), scanned ${root.scannedEntries}`);
     console.log(`nested: ${nestedListing.count} item(s)`);
     console.log(`deep: ${deepListing.count} item(s)`);
+    console.log(`extract here: ${extractedDir}`);
     console.log(`wrote ${outputPath}`);
   } finally {
+    await browser?.close().catch(() => {});
     server.kill();
     if (!keepFixture()) {
       await fs.rm(runRoot, { recursive: true, force: true }).catch(() => {});
