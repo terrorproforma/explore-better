@@ -231,7 +231,9 @@ Use `Backup` to export or restore configuration packages.
 
 ## Preview And Editing
 
-The inspector previews folders, text, images, PDFs, audio, and video. By default, an empty Preview collapses to a narrow rail and restores its saved width as soon as you select an item; turn off `Collapse empty Preview` in Preferences to keep it pinned open. Use `Viewer` for a larger preview window with neighboring-file navigation. Use `Edit` for quick editing of small text files with undoable saves.
+The inspector previews folders, text, images, PDFs, audio, video, STL meshes, and STEP/STP CAD models. By default, an empty Preview collapses to a narrow rail and restores its saved width as soon as you select an item; turn off `Collapse empty Preview` in Preferences to keep it pinned open. Use `Viewer` for a larger preview window with neighboring-file navigation. Use `Edit` for quick editing of small text files with undoable saves.
+
+For a 3D model, drag to orbit, right-drag to pan, and use the wheel or `+`/`−` buttons to zoom. `Fit`, `Iso`, `Front`, and `Top` provide deterministic views; `Edges` toggles the model outline. The status line reports format, mesh and triangle counts, and model dimensions. STEP tessellation runs locally in a bounded WebAssembly worker, while STL parsing also stays in the app. Models are never uploaded. Selection changes and Viewer close cancel or dispose the active parser and WebGL context. Files above 100 MB receive an explicit large-model fallback instead of risking an unbounded preview.
 
 ## Scripting And Tools
 
@@ -541,6 +543,7 @@ Explore Better prioritizes fast browsing:
 - `npm run verify:large-folder-100k-ui` opens a cold 100k-entry browser fixture on desktop, enforces the 750ms first-window and 2s hydration gates, proves virtualized row rendering stays bounded, and verifies the client filter path still responds.
 - `npm run verify:startup-recovery-ui` removes a saved deep folder, proves startup recovers both panes and persists the nearest existing ancestor, checks Focus preserves the 44 px top-bar context while hiding side panels, verifies stable icon widths at 1280x720, and confirms an explicit missing launch target still reports an error.
 - `npm run verify:workspace-panels-ui` collapses Navigator and Preview from their headers, proves pane width and height are reclaimed, exercises vertical/horizontal/single layouts plus Focus, reloads to verify persistence, and restores both panels from the permanent dock controls.
+- `npm run verify:model-preview-ui` loads real STL and STEP cube fixtures, verifies local API classification and worker tessellation, exercises every 3D view control, checks model statistics and responsive canvas dimensions, proves WebGL replacement/disposal, and rejects browser, console, and API errors.
 - `npm run verify:keyboard-workflows-ui` drives command-palette execution and Quick Search filtering entirely from the keyboard, checks focus handoff, and verifies the keyboard UI is not clipped or squished.
 - `npm run verify:accessibility` checks useful accessible names, keyboard file-list navigation, command-palette focus, and high-contrast focus styling.
 - `npm run verify:terminal` builds the lazy xterm renderer, exercises real ConPTY input/output and simultaneous pane sessions, runs hostile terminal IPC probes, verifies per-tab UI behavior and resizing, and confirms all test-owned shells are cleaned up.

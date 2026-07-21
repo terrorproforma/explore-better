@@ -36,6 +36,7 @@ const coreSuites = [
   ["checksums-ui", "scripts/checksums-ui-smoke.mjs", 120000],
   ["organizer-ui", "scripts/organizer-ui-smoke.mjs", 180000],
   ["preview-editor-properties-ui", "scripts/preview-editor-properties-ui-smoke.mjs", 180000],
+  ["model-preview-ui", "scripts/model-preview-ui-smoke.mjs", 180000],
   ["preferences-ui", "scripts/preferences-ui-smoke.mjs", 180000],
   ["interaction-resize", "scripts/interaction-resize-smoke.mjs", 180000],
   ["default-explorer-ui", "scripts/default-explorer-ui-smoke.mjs", 120000],

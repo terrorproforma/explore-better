@@ -146,7 +146,8 @@ The current 100,000-entry acceptance fixture records a 101.5 ms median first vis
 
 ### Preview, Viewer, And Quick Edit
 
-- Built-in previews for folders, text, images, PDFs, audio, and video.
+- Built-in previews for folders, text, images, PDFs, audio, video, STL meshes, and STEP/STP CAD models.
+- Interactive local 3D viewing with orbit, pan, wheel or button zoom, fit, isometric/front/top views, edges, dimensions, mesh counts, and triangle counts. STEP tessellation runs in a dedicated local OpenCascade worker and never uploads model data.
 - Larger Viewer with neighboring-file navigation and a filmstrip.
 - Quick Edit for small text files with an undoable save operation.
 - Properties and Path Health views with sizes, timestamps, hashes, drive information, and bounded diagnostics.

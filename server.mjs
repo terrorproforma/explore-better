@@ -34,7 +34,14 @@ const contentSecurityPolicy = [
   "media-src 'self' blob:",
   "object-src 'none'",
   "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'"
+  "style-src 'self' 'unsafe-inline'",
+  "worker-src 'self'"
+].join("; ");
+const modelWorkerContentSecurityPolicy = [
+  "default-src 'self'",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'"
 ].join("; ");
 
 function isLoopbackHostname(value) {
@@ -212,6 +219,10 @@ const mimeTypes = new Map([
   [".webm", "video/webm"],
   [".avi", "video/x-msvideo"],
   [".mkv", "video/x-matroska"],
+  [".step", "application/step"],
+  [".stp", "application/step"],
+  [".stl", "model/stl"],
+  [".wasm", "application/wasm"],
   [".txt", "text/plain; charset=utf-8"]
 ]);
 
@@ -231,6 +242,8 @@ const imageExtensions = new Set([
 const audioExtensions = new Set([".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav"]);
 const videoExtensions = new Set([".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"]);
 const previewDocumentExtensions = new Set([".pdf"]);
+const modelPreviewExtensions = new Set([".step", ".stp", ".stl"]);
+const modelPreviewMaxBytes = 100 * 1024 * 1024;
 
 const textExtensions = new Set([
   ".bat",
@@ -4178,6 +4191,9 @@ function entryKind(name, isDirectory) {
   }
   if (videoExtensions.has(ext)) {
     return "Video";
+  }
+  if (modelPreviewExtensions.has(ext)) {
+    return "3D Model";
   }
   if ([".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"].includes(ext) || previewDocumentExtensions.has(ext)) {
     return "Document";
@@ -14072,6 +14088,19 @@ async function previewFile(targetPath) {
     };
   }
 
+  if (modelPreviewExtensions.has(ext)) {
+    return {
+      type: stats.size <= modelPreviewMaxBytes ? "model" : "model-too-large",
+      name: path.basename(file),
+      path: file,
+      size: stats.size,
+      modified: stats.mtimeMs,
+      format: ext === ".stl" ? "stl" : "step",
+      url: `/api/raw?path=${encodeURIComponent(file)}`,
+      maxPreviewBytes: modelPreviewMaxBytes
+    };
+  }
+
   if (stats.size > 750_000) {
     return {
       type: "large",
@@ -20778,11 +20807,14 @@ async function serveStatic(req, res, url) {
       return sendError(res, 404, "Static file not found.");
     }
     const ext = path.extname(file).toLowerCase();
+    const staticContentSecurityPolicy = path.basename(file) === "occt-import-js-worker.js"
+      ? modelWorkerContentSecurityPolicy
+      : contentSecurityPolicy;
     res.writeHead(200, {
       "content-type": mimeTypes.get(ext) || "application/octet-stream",
       "content-length": stats.size,
       "cache-control": "no-store",
-      "content-security-policy": contentSecurityPolicy,
+      "content-security-policy": staticContentSecurityPolicy,
       "cross-origin-opener-policy": "same-origin",
       "cross-origin-resource-policy": "same-origin",
       "permissions-policy": "camera=(), display-capture=(), geolocation=(), microphone=(), payment=(), usb=()",
