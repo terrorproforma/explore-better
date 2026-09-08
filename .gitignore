@@ -27,3 +27,5 @@ release-feed/
 Thumbs.db
 .vscode/
 .idea/
+.cursor/
+*~

@@ -146,7 +146,8 @@ The current 100,000-entry acceptance fixture records a 101.5 ms median first vis
 
 ### Preview, Viewer, And Quick Edit
 
-- Built-in previews for folders, text, images, PDFs, audio, and video.
+- Built-in previews for folders, text, images, PDFs, audio, video, STL meshes, and STEP/STP CAD models.
+- Interactive local 3D viewing with orbit, pan, wheel or button zoom, fit, isometric/front/top views, edges, dimensions, mesh counts, and triangle counts. STEP tessellation runs in a dedicated local OpenCascade worker and never uploads model data.
 - Larger Viewer with neighboring-file navigation and a filmstrip.
 - Quick Edit for small text files with an undoable save operation.
 - Properties and Path Health views with sizes, timestamps, hashes, drive information, and bounded diagnostics.
@@ -212,7 +213,7 @@ npm run verify:mcp-value
 - Device actions say exactly whether they browse in Explore Better, open in the active pane, or request Windows File Explorer; unsupported actions are not rendered.
 - Health & diagnostics reports renderer, backend, native helper, MCP bridge, shell provider, cache, index, queue, updater, package, and adaptive scheduler state. A streamed support bundle is path-redacted by default, never includes file or terminal contents or secrets, and is capped at 10 MB.
 - Explorer replacement and Windows integration remain optional and reversible per user.
-- ZIP browsing as read-only virtual folders without extracting first.
+- ZIP browsing as read-only virtual folders without extracting first, plus a right-click `Extract Here` action that creates a safe archive-named sibling folder beside the ZIP.
 - Windows file clipboard and drag/drop interoperability with Explorer and the desktop.
 - Recycle Bin browsing and native restore support.
 - First-launch opt-in plus current-user folder, drive, folder-background, and file-location handlers.

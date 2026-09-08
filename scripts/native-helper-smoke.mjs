@@ -39,6 +39,7 @@ async function main() {
     const browsed = await request({ id: "browse", op: "browse", path: fixture });
     const listed = await request({ id: "list", op: "enumerate", path: fixture });
     const scanned = await request({ id: "scan", op: "scan-tree", path: fixture });
+    const analyzed = await request({ id: "analyze", op: "analyze-tree", path: fixture, maxEntries: 0 });
     const cancelTarget = request({ id: "cancel-target", op: "scan-tree", path: fixture, maxEntries: 500000 });
     const cancelStarted = performance.now();
     const canceled = await request({ id: "cancel", op: "cancel", targetId: "cancel-target" });
@@ -59,14 +60,27 @@ async function main() {
     ) {
       throw new Error("Tree scan did not return the complete bounded folder/file stream.");
     }
+    if (
+      !analyzed.ok ||
+      analyzed.data.entryLimitMode !== "summary-all-entries" ||
+      analyzed.data.wireFormat !== "summary-v1" ||
+      analyzed.data.truncated !== false ||
+      analyzed.data.scannedEntries !== 2 ||
+      analyzed.data.files !== 1 ||
+      analyzed.data.folders !== 1 ||
+      analyzed.data.folderNodes?.length !== 2 ||
+      analyzed.data.topFiles?.[0]?.name !== "sample.txt"
+    ) {
+      throw new Error("Unlimited summary scan did not return the complete bounded analysis.");
+    }
     if (!canceled.ok || canceled.data.canceled !== "cancel-target" || cancelResponseMs > 150) throw new Error(`Cancellation acknowledgement took ${cancelResponseMs.toFixed(1)} ms.`);
-    const report = { generatedAt: new Date().toISOString(), helperPath, hello: hello.data, allocated: allocated.data, volume: volume.data, enumeration: { returned: listed.data.returned }, scan: { files: scanned.data.files, folders: scanned.data.folders, scannedEntries: scanned.data.scannedEntries, entryLimitMode: scanned.data.entryLimitMode }, cancellation: { responseMs: Math.round(cancelResponseMs * 10) / 10 } };
+    const report = { generatedAt: new Date().toISOString(), helperPath, hello: hello.data, allocated: allocated.data, volume: volume.data, enumeration: { returned: listed.data.returned }, scan: { files: scanned.data.files, folders: scanned.data.folders, scannedEntries: scanned.data.scannedEntries, entryLimitMode: scanned.data.entryLimitMode }, analysis: { files: analyzed.data.files, folders: analyzed.data.folders, scannedEntries: analyzed.data.scannedEntries, entryLimitMode: analyzed.data.entryLimitMode, wireFormat: analyzed.data.wireFormat }, cancellation: { responseMs: Math.round(cancelResponseMs * 10) / 10 } };
     await fs.mkdir(path.join(root, "artifacts"), { recursive: true });
     await fs.writeFile(path.join(root, "artifacts", "native-helper-latest.json"), `${JSON.stringify(report, null, 2)}\n`);
     console.log(`Native helper: protocol v${hello.data.protocolVersion}, ${hello.data.platform}/${hello.data.architecture}`);
     console.log(`Allocated: ${allocated.data.logicalBytes} logical, ${allocated.data.allocatedBytes} exact bytes, cluster ${volume.data.clusterSize}`);
     console.log(`Cancellation acknowledgement: ${cancelResponseMs.toFixed(1)} ms`);
-    console.log("Native helper: 8 pass, 0 fail");
+    console.log("Native helper: 9 pass, 0 fail");
   } finally {
     child.stdin.end();
     await Promise.race([new Promise((resolve) => child.once("exit", resolve)), new Promise((resolve) => setTimeout(resolve, 2000))]);

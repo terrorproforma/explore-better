@@ -532,8 +532,8 @@
             <input id="size-analysis-path" />
           </label>
           <label>
-            <span class="field-label">Entries</span>
-            <input id="size-analysis-max-entries" type="number" min="100" max="500000" step="1000" value="100000" />
+            <span class="field-label">Entry limit (0 = all)</span>
+            <input id="size-analysis-max-entries" type="number" min="0" max="5000000" step="100000" value="0" />
           </label>
           <label class="check-row compact-check">
             <input id="size-analysis-follow-links" type="checkbox" />
@@ -549,7 +549,7 @@
             <span>Size by</span>
             <select id="size-analysis-size-by" data-size-analysis-action="size-by" aria-label="Treemap size measurement">
               <option value="logical">Logical size</option>
-              <option value="allocated">Allocated size</option>
+              <option value="allocated" selected>Allocated size</option>
             </select>
           </label>
           <label class="size-analysis-map-option">
@@ -2283,6 +2283,7 @@
             <input id="archive-folder" required />
           </label>
           <div class="archive-actions">
+            <button type="button" data-archive-target="here-extract">Here</button>
             <button type="button" data-archive-target="active-extract">Active</button>
             <button type="button" data-archive-target="other-extract">Other</button>
             <button type="submit">Extract</button>

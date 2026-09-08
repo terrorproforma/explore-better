@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -156,6 +157,95 @@ func collectTreeEntries(ctx context.Context, root string, maxEntries int) (treeS
 		syscall.FindClose(handle)
 	}
 	return result, nil
+}
+
+func analyzeTree(ctx context.Context, req request, out *writer) (map[string]interface{}, error) {
+	started := time.Now()
+	root := filepath.Clean(req.Path)
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+	if !rootInfo.IsDir() {
+		return nil, &os.PathError{Op: "analyze-tree", Path: root, Err: fmt.Errorf("path is not a directory")}
+	}
+	acc := newAnalysisAccumulator(root, rootInfo.ModTime().UnixMilli())
+	type folderWork struct {
+		Path  string
+		Index int
+	}
+	queue := []folderWork{{Path: root, Index: 0}}
+	for head := 0; head < len(queue) && !acc.Truncated; head++ {
+		current := queue[head]
+		pattern, pathErr := syscall.UTF16PtrFromString(filepath.Join(current.Path, "*"))
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		var data syscall.Win32finddata
+		handle, findErr := syscall.FindFirstFile(pattern, &data)
+		if findErr != nil {
+			if errno, ok := findErr.(syscall.Errno); ok && errno == syscall.ERROR_FILE_NOT_FOUND {
+				continue
+			}
+			if current.Index == 0 {
+				return nil, &os.PathError{Op: "FindFirstFile", Path: current.Path, Err: findErr}
+			}
+			acc.Skipped++
+			continue
+		}
+		stop := false
+		for {
+			select {
+			case <-ctx.Done():
+				syscall.FindClose(handle)
+				return nil, ctx.Err()
+			default:
+			}
+			name := syscall.UTF16ToString(data.FileName[:])
+			if name != "." && name != ".." {
+				if req.MaxEntries > 0 && acc.Scanned >= req.MaxEntries {
+					acc.Truncated = true
+					stop = true
+				} else {
+					itemPath := filepath.Join(current.Path, name)
+					acc.Scanned++
+					if data.FileAttributes&0x00000400 != 0 {
+						acc.Skipped++
+					} else if data.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0 {
+						folderIndex := acc.addFolder(name, itemPath, current.Index, filetimeMilliseconds(data.LastWriteTime))
+						queue = append(queue, folderWork{Path: itemPath, Index: folderIndex})
+					} else {
+						logical := uint64(data.FileSizeHigh)<<32 | uint64(data.FileSizeLow)
+						allocated, _, _, allocationErr := allocatedSize(itemPath, int64(logical))
+						if allocationErr != nil {
+							allocated = logical
+							acc.Skipped++
+						}
+						acc.addFile(name, itemPath, current.Index, logical, allocated, filetimeMilliseconds(data.LastWriteTime))
+					}
+					if acc.Scanned == 1 || acc.Scanned%10000 == 0 {
+						out.send(response{Version: protocolVersion, ID: req.ID, Type: "progress", OK: true, Data: acc.progressResult(root, req.MaxEntries)})
+					}
+				}
+			}
+			if stop {
+				break
+			}
+			if nextErr := syscall.FindNextFile(handle, &data); nextErr != nil {
+				if nextErr == syscall.ERROR_NO_MORE_FILES {
+					break
+				}
+				syscall.FindClose(handle)
+				return nil, &os.PathError{Op: "FindNextFile", Path: current.Path, Err: nextErr}
+			}
+		}
+		syscall.FindClose(handle)
+	}
+	volume, volumeErr := volumeInfo(root)
+	if volumeErr != nil {
+		volume = map[string]interface{}{"clusterSize": 0, "allocationAccuracy": "unknown", "error": volumeErr.Error()}
+	}
+	return acc.result(root, req.MaxEntries, volume, float64(time.Since(started).Microseconds())/1000), nil
 }
 
 func allocatedSize(itemPath string, logical int64) (uint64, string, string, error) {

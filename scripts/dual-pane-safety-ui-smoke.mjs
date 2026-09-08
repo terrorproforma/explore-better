@@ -77,13 +77,25 @@ async function paneSafetyState(page) {
         };
       }
       const tabbar = pane.querySelector(".tabbar");
+      const tabbarRect = tabbar.getBoundingClientRect();
+      const visibleChildRects = [...tabbar.children]
+        .filter((child) => {
+          const style = getComputedStyle(child);
+          return !child.hidden && style.display !== "none" && style.position !== "fixed";
+        })
+        .map((child) => child.getBoundingClientRect());
+      const visibleTabbarOverflow = visibleChildRects.reduce(
+        (largest, rect) => Math.max(largest, tabbarRect.left - rect.left, rect.right - tabbarRect.right, 0),
+        0
+      );
       panes[paneName] = {
         role: badge.textContent.trim(),
         roleLabel: badge.getAttribute("aria-label"),
         roleClass: badge.className,
         active: pane.classList.contains("active"),
         hasSelection: pane.classList.contains("has-selection"),
-        tabbarOverflow: Math.max(0, tabbar.scrollWidth - tabbar.clientWidth),
+        tabbarOverflow: Math.round(visibleTabbarOverflow),
+        tabbarScrollRange: Math.max(0, tabbar.scrollWidth - tabbar.clientWidth),
         actions
       };
     }

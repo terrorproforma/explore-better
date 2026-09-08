@@ -63,7 +63,7 @@ const app = {
     treemapSelection: null,
     treemapFocusPath: "",
     viewMode: "overview",
-    sizeMode: "logical",
+    sizeMode: "allocated",
     colorMode: "type"
   },
   pathSuggest: { paneName: null, items: [], activeIndex: 0, keyboardSelected: false, requestId: 0 },
@@ -88,6 +88,7 @@ const app = {
   duplicateResult: null,
   textEditor: null,
   viewer: { paneName: "left", path: null, entries: [], index: -1, preview: null },
+  modelViewers: { inspector: null, viewer: null },
   commandPalette: { items: [], activeIndex: 0, view: "all", pins: new Set(), recents: [], loaded: false },
   terminals: {
     capabilities: null,
@@ -129,6 +130,8 @@ const app = {
   listingHydrations: new Map(),
   inspectorRenderToken: 0,
   inspectorPreviewController: null,
+  viewerLoadToken: 0,
+  viewerPreviewController: null,
   listingPrefetch: { queue: [], queued: new Set(), active: new Map(), timer: null, paused: false, metrics: { queued: 0, started: 0, aborts: 0, cacheHits: 0, resumptions: 0 } },
   foregroundActivity: { leases: new Map(), nextId: 1, idleSince: performance.now(), publishTimer: null, metrics: { starts: 0, releases: 0 } },
   visibleEntryCache: new WeakMap(),
@@ -228,8 +231,28 @@ function enhanceDialogAccessibility() {
   });
 }
 
-const viewerPreviewTypes = new Set(["image", "text", "pdf", "audio", "video"]);
-const viewerPreviewKinds = new Set(["Image", "Text", "Audio", "Video"]);
+const viewerPreviewTypes = new Set(["image", "text", "pdf", "audio", "video", "model"]);
+const viewerPreviewKinds = new Set(["Image", "Text", "Audio", "Video", "3D Model"]);
+const modelPreviewExtensions = new Set([".step", ".stp", ".stl"]);
+let THREE = null;
+let OrbitControls = null;
+let STLLoader = null;
+let modelRuntimePromise = null;
+
+async function ensureModelRuntime() {
+  if (!modelRuntimePromise) {
+    modelRuntimePromise = import("/generated/model-runtime.js").then((runtime) => {
+      THREE = runtime.THREE;
+      OrbitControls = runtime.OrbitControls;
+      STLLoader = runtime.STLLoader;
+      return runtime;
+    }).catch((error) => {
+      modelRuntimePromise = null;
+      throw error;
+    });
+  }
+  return modelRuntimePromise;
+}
 const listingCacheTtlMs = 8000;
 const listingCacheMaxEntries = 24;
 const listingWindowInitialLimit = 48;
@@ -436,7 +459,7 @@ const commands = [
   },
   {
     name: "Extract selected ZIP",
-    detail: "Extracts the first selected ZIP into a folder in the opposite pane.",
+    detail: "Extracts the first selected ZIP beside the archive by default.",
     run: () => openArchiveDialog(app.activePane)
   },
   {
@@ -2282,6 +2305,49 @@ async function request(url, options = {}) {
   }
 }
 
+async function requestSizeAnalysisStream(body, signal, onProgress) {
+  const release = beginForegroundActivity("analysis");
+  try {
+    const response = await fetch("/api/size-analysis/stream", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal,
+      headers: { "content-type": "application/json" }
+    });
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `Request failed: ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let result = null;
+    const consumeLine = (line) => {
+      if (!line.trim()) return;
+      const event = JSON.parse(line);
+      if (event.type === "progress" && event.report) onProgress?.(event.report);
+      if (event.type === "result" && event.report) result = event.report;
+      if (event.type === "error") throw new Error(event.error || "Size analysis failed.");
+    };
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        consumeLine(line);
+      }
+      if (done) break;
+    }
+    consumeLine(buffer);
+    if (!result) throw new Error("Size analysis stream ended before the final result.");
+    return result;
+  } finally {
+    release?.();
+  }
+}
+
 function attributesFromCompactText(value) {
   const text = String(value || "").toUpperCase();
   return {
@@ -2994,6 +3060,9 @@ function glyphFor(entry) {
   }
   if (kind === "archive") {
     return { text: "ZIP", className: "archive" };
+  }
+  if (kind === "3d model") {
+    return { text: "3D", className: "model" };
   }
   const ext = (entry.extension || "").replace(".", "").slice(0, 3).toUpperCase();
   return { text: ext || "FIL", className: "" };
@@ -6569,6 +6638,126 @@ function scheduleProgressiveFileRender(paneName, token, entries, renderer, start
   }
 }
 
+const paneTabOverflowFrames = { left: 0, right: 0 };
+const paneTabResizeObservers = { left: null, right: null };
+
+function closePaneTabOverflow(paneName, options = {}) {
+  if (!isPaneName(paneName)) return;
+  const toggle = document.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
+  const menu = document.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+  if (!toggle || !menu) return;
+  menu.hidden = true;
+  toggle.setAttribute("aria-expanded", "false");
+  if (options.restoreFocus) toggle.focus();
+}
+
+function closeOtherPaneTabOverflow(exceptPane = "") {
+  for (const paneName of ["left", "right"]) {
+    if (paneName !== exceptPane) closePaneTabOverflow(paneName);
+  }
+}
+
+function positionPaneTabOverflow(paneName) {
+  const toggle = document.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
+  const menu = document.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+  if (!toggle || !menu || menu.hidden) return;
+  const rect = toggle.getBoundingClientRect();
+  const width = menu.getBoundingClientRect().width || 320;
+  const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(rect.bottom + 5)}px`;
+}
+
+function openPaneTabOverflow(paneName) {
+  const toggle = document.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
+  const menu = document.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+  if (!toggle || !menu || toggle.hidden || !menu.children.length) return;
+  closeOtherPaneTabOverflow(paneName);
+  menu.hidden = false;
+  toggle.setAttribute("aria-expanded", "true");
+  positionPaneTabOverflow(paneName);
+  menu.querySelector("button.active")?.focus() || menu.querySelector("button")?.focus();
+}
+
+function updatePaneTabOverflow(paneName) {
+  paneTabOverflowFrames[paneName] = 0;
+  const tabbar = document.querySelector(`[data-tabs="${paneName}"]`);
+  const strip = tabbar?.querySelector(`[data-tab-strip="${paneName}"]`);
+  const toggle = tabbar?.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
+  const menu = tabbar?.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+  if (!tabbar || !strip || !toggle || !menu) return;
+
+  const tabs = [...strip.querySelectorAll(".tab")];
+  tabs.forEach((tab) => tab.classList.remove("tab-responsive-hidden"));
+  toggle.hidden = true;
+  let overflowing = strip.scrollWidth > strip.clientWidth + 1;
+  if (!overflowing) {
+    closePaneTabOverflow(paneName);
+    return;
+  }
+
+  toggle.hidden = false;
+  const activeIndex = Math.max(0, tabs.findIndex((tab) => tab.classList.contains("active")));
+  const hideCandidates = tabs
+    .map((tab, index) => ({ tab, index, locked: tab.classList.contains("locked") }))
+    .filter((item) => item.index !== activeIndex)
+    .sort((left, right) => {
+      if (left.locked !== right.locked) return left.locked ? 1 : -1;
+      const distanceDelta = Math.abs(right.index - activeIndex) - Math.abs(left.index - activeIndex);
+      return distanceDelta || left.index - right.index;
+    });
+  for (const item of hideCandidates) {
+    if (strip.scrollWidth <= strip.clientWidth + 1) break;
+    item.tab.classList.add("tab-responsive-hidden");
+  }
+
+  const hiddenCount = tabs.filter((tab) => tab.classList.contains("tab-responsive-hidden")).length;
+  overflowing = hiddenCount > 0;
+  toggle.hidden = !overflowing;
+  if (!overflowing) {
+    closePaneTabOverflow(paneName);
+    return;
+  }
+
+  const tabCount = panes[paneName]?.tabs?.length || 0;
+  toggle.title = `Show all ${tabCount} tabs (${hiddenCount} hidden)`;
+  toggle.setAttribute("aria-label", toggle.title);
+  toggle.querySelector(".tab-overflow-count").textContent = String(hiddenCount);
+  if (!menu.hidden) positionPaneTabOverflow(paneName);
+}
+
+function schedulePaneTabOverflow(paneName) {
+  if (!isPaneName(paneName)) return;
+  if (paneTabOverflowFrames[paneName]) cancelAnimationFrame(paneTabOverflowFrames[paneName]);
+  paneTabOverflowFrames[paneName] = requestAnimationFrame(() => updatePaneTabOverflow(paneName));
+}
+
+function observePaneTabOverflow(paneName) {
+  const tabbar = document.querySelector(`[data-tabs="${paneName}"]`);
+  const strip = tabbar?.querySelector(`[data-tab-strip="${paneName}"]`);
+  paneTabResizeObservers[paneName]?.disconnect();
+  if (!tabbar || !strip || typeof ResizeObserver === "undefined") return;
+  paneTabResizeObservers[paneName] = new ResizeObserver(() => schedulePaneTabOverflow(paneName));
+  paneTabResizeObservers[paneName].observe(tabbar);
+  paneTabResizeObservers[paneName].observe(strip);
+}
+
+function paneTabOverflowMenuMarkup(paneName, pane) {
+  return pane.tabs
+    .map((item, index) => {
+      const active = index === pane.activeTab;
+      const title = item.title || labelForPath(item.path);
+      const state = active ? "&#10003;" : item.locked ? "&#9679;" : "";
+      return `<button type="button" role="menuitem" class="${active ? "active" : ""}" data-tab="${index}" data-pane="${paneName}" title="${escapeHtml(item.path)}">
+        <span class="tab-overflow-state" aria-hidden="true">${state}</span>
+        <span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(item.path)}</small></span>
+      </button>`;
+    })
+    .join("");
+}
+
+const panePathInputRenderState = new WeakMap();
+
 function renderPane(paneName) {
   scheduleMcpContextPublish();
   const pane = panes[paneName];
@@ -6581,8 +6770,7 @@ function renderPane(paneName) {
   paneElement.classList.toggle("virtual-zip", tab.virtualMode === "zip");
 
   const tabsElement = document.querySelector(`[data-tabs="${paneName}"]`);
-  tabsElement.innerHTML =
-    pane.tabs
+  const tabsMarkup = pane.tabs
       .map((item, index) => {
         const active = index === pane.activeTab ? " active" : "";
         const locked = item.locked ? " locked" : "";
@@ -6592,18 +6780,31 @@ function renderPane(paneName) {
             ? `<button class="tab-close" data-close-tab="${index}" data-pane="${paneName}" title="Close tab" aria-label="Close tab">&times;</button>`
             : `<span></span>`;
         return `<div class="tab${active}${locked}" data-tab-shell="${index}" data-pane="${paneName}" draggable="true" title="${escapeHtml(item.path)}">
-          <button class="tab-label" data-tab="${index}" data-pane="${paneName}">
+          <button class="tab-label" role="tab" aria-selected="${index === pane.activeTab}" data-tab="${index}" data-pane="${paneName}">
             <span>${escapeHtml(item.title || labelForPath(item.path))}</span>
           </button>
           <button class="tab-lock${item.locked ? " active" : ""}" data-lock-tab="${index}" data-pane="${paneName}" title="${lockTitle}" aria-label="${lockTitle}"><span class="tab-lock-glyph" aria-hidden="true"></span></button>
           ${closeButton}
         </div>`;
       })
-      .join("") +
-    `<button class="new-tab" data-new-tab="${paneName}" title="New tab" aria-label="New tab">+</button>
+      .join("");
+  tabsElement.innerHTML =
+    `<div class="tab-strip" data-tab-strip="${paneName}" role="tablist" aria-label="${paneName} pane tabs">${tabsMarkup}</div>
+     <button class="new-tab" data-new-tab="${paneName}" title="New tab" aria-label="New tab">+</button>
+     <button class="tab-overflow-toggle" data-tab-overflow-toggle="${paneName}" type="button" aria-haspopup="menu" aria-expanded="false" hidden>
+       <span class="tab-overflow-glyph" aria-hidden="true">&hellip;</span><span class="tab-overflow-count">${pane.tabs.length}</span>
+     </button>
+     <div class="tab-overflow-menu" data-tab-overflow-menu="${paneName}" role="menu" aria-label="All ${paneName} pane tabs" hidden>${paneTabOverflowMenuMarkup(paneName, pane)}</div>
      ${paneActivityMarkup(paneName)}`;
+  observePaneTabOverflow(paneName);
+  schedulePaneTabOverflow(paneName);
 
-  document.querySelector(`[data-path-input="${paneName}"]`).value = tab.path;
+  const pathInput = document.querySelector(`[data-path-input="${paneName}"]`);
+  const previousPathState = panePathInputRenderState.get(pathInput);
+  const editingCurrentPath = document.activeElement === pathInput &&
+    previousPathState?.tabId === tab.id && previousPathState?.path === tab.path;
+  if (!editingCurrentPath) pathInput.value = tab.path;
+  panePathInputRenderState.set(pathInput, { tabId: tab.id, path: tab.path });
   const breadcrumbs = document.querySelector(`[data-breadcrumbs="${paneName}"]`);
   if (breadcrumbs) {
     breadcrumbs.innerHTML = renderBreadcrumbs(paneName, tab.path);
@@ -7349,6 +7550,25 @@ function setSizeAnalysisPathToActive() {
   }
 }
 
+let sizeAnalysisAutoScanTimer = 0;
+
+function clearSizeAnalysisAutoScan() {
+  if (sizeAnalysisAutoScanTimer) {
+    clearTimeout(sizeAnalysisAutoScanTimer);
+    sizeAnalysisAutoScanTimer = 0;
+  }
+}
+
+function queueSizeAnalysisAutoScan(delay = 450) {
+  clearSizeAnalysisAutoScan();
+  if (!document.getElementById("size-analysis-dialog")?.open) return;
+  sizeAnalysisAutoScanTimer = setTimeout(() => {
+    sizeAnalysisAutoScanTimer = 0;
+    if (!document.getElementById("size-analysis-dialog")?.open) return;
+    void runSizeAnalysis();
+  }, Math.max(0, Number(delay) || 0));
+}
+
 function updateSizeAnalysisActionState() {
   const scanning = app.sizeAnalysis.loading === true;
   const scan = document.querySelector('[data-size-analysis-action="scan"]');
@@ -7489,6 +7709,13 @@ function sizeAnalysisTreemapValue(item) {
   return app.sizeAnalysis.sizeMode === "allocated" ? sizeAnalysisAllocatedOf(item) : Number(item?.size || 0);
 }
 
+function sizeAnalysisTreemapTotal(report) {
+  if (app.sizeAnalysis.sizeMode === "allocated") {
+    return Number(report?.summary?.allocated || 0) + Number(report?.summary?.unmappedAllocated || 0);
+  }
+  return Number(report?.summary?.bytes || 0);
+}
+
 function sizeAnalysisTreemapColor(item) {
   if (app.sizeAnalysis.colorMode === "folder") {
     return item?.folderColor || sizeAnalysisStablePaletteColor(item?.parent || item?.path || item?.name);
@@ -7590,7 +7817,9 @@ function sizeAnalysisScanStrip(report) {
   const elapsed = Math.round(Number(report?.summary?.elapsedMs || 0));
   const scanned = Number(report?.scanned || 0);
   const skipped = Number(report?.summary?.skipped || 0);
-  const cap = report?.cache?.hit
+  const cap = report?.partial
+    ? "Scanning..."
+    : report?.cache?.hit
     ? "Cached result"
     : report?.truncated
       ? `Stopped at ${itemWord(Number(report.maxEntries || 0), "item")}`
@@ -7598,6 +7827,8 @@ function sizeAnalysisScanStrip(report) {
   const space = report?.space || null;
   const root = space?.root || report?.path || "";
   const share = space?.available ? sizeAnalysisDriveShareText(totalBytes, space.totalBytes) : "";
+  const unmapped = Number(report?.summary?.unmappedAllocated || 0);
+  const unmappedText = unmapped > 0 ? `${formatSize(unmapped)} ${report?.partial ? "not mapped yet" : "not enumerable"}` : "";
   return `<div class="size-analysis-scan-line">
     <strong>${escapeHtml(cap)}</strong>
     <span>${escapeHtml(
@@ -7609,7 +7840,9 @@ function sizeAnalysisScanStrip(report) {
         .filter(Boolean)
         .join(" / ")
     )}</span>
-    <span title="${escapeHtml(root)}">${escapeHtml([sizeAnalysisSpaceText(space, totalBytes), share].filter(Boolean).join(" / "))}</span>
+    <span title="${escapeHtml(root)}">${escapeHtml(
+      [sizeAnalysisSpaceText(space, totalBytes), share, unmappedText].filter(Boolean).join(" / ")
+    )}</span>
   </div>
   <div class="size-analysis-progress-track" aria-label="Size by extension">
     ${sizeAnalysisBandSegments(report?.extensions || [], totalBytes)}
@@ -7733,11 +7966,20 @@ function sizeAnalysisMapLegendItems(report = app.sizeAnalysis.report) {
       value: sizeAnalysisTreemapValue(item)
     }));
   }
-  return (report.extensions || []).slice(0, 10).map((item) => ({
+  const items = (report.extensions || []).map((item) => ({
     label: sizeAnalysisExtensionLabel(item.extension),
     color: sizeAnalysisExtensionColor(item.extension),
     value: app.sizeAnalysis.sizeMode === "allocated" ? sizeAnalysisAllocatedOf(item) : Number(item.size || 0)
   }));
+  const unmapped = Number(report.summary?.unmappedAllocated || 0);
+  if (app.sizeAnalysis.sizeMode === "allocated" && unmapped > 0) {
+    items.unshift({
+      label: report.partial ? "Not mapped yet" : "Not enumerable",
+      color: sizeAnalysisExtensionColor("(other)"),
+      value: unmapped
+    });
+  }
+  return items.slice(0, 10);
 }
 
 function renderSizeAnalysisViewState() {
@@ -7842,7 +8084,7 @@ function renderSizeAnalysisDialog(message = "") {
   }
   updateSizeAnalysisActionState();
   renderSizeAnalysisViewState();
-  if (app.sizeAnalysis.loading) {
+  if (app.sizeAnalysis.loading && !report?.partial) {
     const requestedPath = document.getElementById("size-analysis-path")?.value || "";
     if (report && samePath(report.path, requestedPath)) {
       summary.textContent = message || "Refreshing...";
@@ -7909,6 +8151,20 @@ function renderSizeAnalysisDialog(message = "") {
       `${Number(report.summary?.categories || 0).toLocaleString()} categories${skipped ? ` / ${skipped} skipped` : ""}`
     )
   ];
+  const unmappedAllocated = Number(report.summary?.unmappedAllocated || 0);
+  if (unmappedAllocated > 0) {
+    metricCards.splice(
+      2,
+      0,
+      sizeAnalysisMetric(
+        report.partial ? "Not mapped yet" : "Not enumerable",
+        formatSize(unmappedAllocated),
+        report.partial
+          ? "The live scan is still discovering the drive"
+          : "Windows-reported use in skipped/inaccessible items or filesystem metadata"
+      )
+    );
+  }
   if (report.space?.available) {
     metricCards.push(
       sizeAnalysisMetric(
@@ -7947,6 +8203,7 @@ function openSizeAnalysisDialog(paneName = app.activePane, viewMode = app.sizeAn
   app.sizeAnalysis.paneName = paneName;
   app.sizeAnalysis.viewMode = viewMode === "map" ? "map" : "overview";
   const defaultPath = sizeAnalysisDefaultPath(paneName);
+  const hasCurrentReport = Boolean(app.sizeAnalysis.report?.path && samePath(app.sizeAnalysis.report.path, defaultPath));
   if (app.sizeAnalysis.report?.path && !samePath(app.sizeAnalysis.report.path, defaultPath)) {
     app.sizeAnalysis.report = null;
     app.sizeAnalysis.treemapRects = [];
@@ -7960,6 +8217,9 @@ function openSizeAnalysisDialog(paneName = app.activePane, viewMode = app.sizeAn
   }
   renderSizeAnalysisDialog();
   document.getElementById("size-analysis-dialog").showModal();
+  if (!hasCurrentReport && !app.sizeAnalysis.loading) {
+    void runSizeAnalysis();
+  }
 }
 
 async function runSizeAnalysis() {
@@ -7974,15 +8234,15 @@ async function runSizeAnalysis() {
   renderSizeAnalysisDialog("Scanning...");
   const body = {
     path: document.getElementById("size-analysis-path")?.value || sizeAnalysisDefaultPath(app.sizeAnalysis.paneName),
-    maxEntries: Number(document.getElementById("size-analysis-max-entries")?.value || 100000),
+    maxEntries: Number(document.getElementById("size-analysis-max-entries")?.value || 0),
     followLinks: document.getElementById("size-analysis-follow-links")?.checked === true
   };
   setStatus(`Analyzing ${body.path}`);
   try {
-    const report = await request("/api/size-analysis", {
-      method: "POST",
-      body: JSON.stringify(body),
-      signal: controller.signal
+    const report = await requestSizeAnalysisStream(body, controller.signal, (progress) => {
+      if (app.sizeAnalysis.requestId !== requestId) return;
+      app.sizeAnalysis.report = progress;
+      renderSizeAnalysisDialog();
     });
     if (app.sizeAnalysis.requestId !== requestId) {
       return;
@@ -8044,7 +8304,7 @@ function sizeAnalysisPathContains(folderPath, itemPath) {
 
 function sizeAnalysisTreemapHierarchy(report) {
   const sourceRoot = report?.tree;
-  if (!sourceRoot || sizeAnalysisTreemapValue(sourceRoot) <= 0) {
+  if (!sourceRoot || sizeAnalysisTreemapTotal(report) <= 0) {
     return null;
   }
   const folderNodes = [];
@@ -8085,6 +8345,23 @@ function sizeAnalysisTreemapHierarchy(report) {
     }
     file.mapSize = sizeAnalysisTreemapValue(file);
     owner.fileChildren.push(file);
+  }
+  const unmappedAllocated = Number(report?.summary?.unmappedAllocated || 0);
+  if (app.sizeAnalysis.sizeMode === "allocated" && unmappedAllocated > 0) {
+    root.fileChildren.push({
+      name: report.partial ? "Not mapped yet" : "Not enumerable",
+      path: "",
+      parent: root.path,
+      extension: "(other)",
+      kind: "Windows-reported drive use",
+      size: 0,
+      allocated: unmappedAllocated,
+      mapSize: unmappedAllocated,
+      modified: null,
+      color: sizeAnalysisExtensionColor("(other)"),
+      virtualRemainder: true,
+      treemapGroup: false
+    });
   }
   const colorFolderBranches = (folder, branchColor = "", rootFolder = false) => {
     folder.folderColor = branchColor || sizeAnalysisStablePaletteColor(folder.path || folder.name);
@@ -8268,10 +8545,7 @@ function sizeAnalysisTreemapLabel(item, report = app.sizeAnalysis.report) {
   if (!item) {
     return "";
   }
-  const totalBytes =
-    app.sizeAnalysis.sizeMode === "allocated"
-      ? Number(report?.summary?.allocated || report?.summary?.bytes || 0)
-      : Number(report?.summary?.bytes || 0);
+  const totalBytes = sizeAnalysisTreemapTotal(report);
   const measuredBytes = Number(item.mapSize ?? sizeAnalysisTreemapValue(item));
   return [
     item.name || "(file)",
@@ -8503,10 +8777,7 @@ function drawSizeTreemap(report) {
   const hierarchy = sizeAnalysisTreemapHierarchy(report);
   const focused = sizeAnalysisTreemapFocusNode(hierarchy);
   renderSizeAnalysisMapNavigation(report, hierarchy);
-  const measuredTotal =
-    app.sizeAnalysis.sizeMode === "allocated"
-      ? Number(report?.summary?.allocated || report?.summary?.bytes || 0)
-      : Number(report?.summary?.bytes || 0);
+  const measuredTotal = sizeAnalysisTreemapTotal(report);
   if (!focused?.children?.length || measuredTotal <= 0) {
     app.sizeAnalysis.treemapRects = [];
     ctx.fillStyle = "#dbe6e1";
@@ -12487,12 +12758,426 @@ function previewActionBar(preview, extraMarkup = "") {
   return `<div class="preview-actions">${previewViewerButton(preview)}${extraMarkup}</div>`;
 }
 
+function modelViewportMarkup(scope) {
+  return `<div class="model-preview" data-model-viewport="${escapeHtml(scope)}" data-model-state="loading" aria-busy="true">
+    <div class="model-preview-toolbar" role="toolbar" aria-label="3D model view controls">
+      <button type="button" data-model-action="fit" title="Fit the model in the current view">Fit</button>
+      <button type="button" data-model-action="iso" title="Isometric view">Iso</button>
+      <button type="button" data-model-action="front" title="Front view">Front</button>
+      <button type="button" data-model-action="top" title="Top view">Top</button>
+      <button type="button" data-model-action="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
+      <button type="button" data-model-action="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+      <button type="button" data-model-action="edges" title="Toggle model edges" aria-pressed="true">Edges</button>
+    </div>
+    <div class="model-preview-stage" data-model-stage>
+      <div class="model-preview-progress" data-model-progress role="status">
+        <span class="preview-loading" aria-hidden="true"><span></span><span></span><span></span></span>
+        <strong>Preparing 3D preview</strong>
+        <span>Models stay on this device.</span>
+      </div>
+    </div>
+    <div class="model-preview-status" id="${escapeHtml(scope)}-model-summary" data-model-status aria-live="polite">Loading model...</div>
+  </div>`;
+}
+
+function disposeThreeMaterial(material) {
+  if (Array.isArray(material)) {
+    material.forEach(disposeThreeMaterial);
+    return;
+  }
+  material?.dispose?.();
+}
+
+function disposeModelViewport(scope) {
+  const lifecycle = app.modelViewers?.[scope];
+  if (!lifecycle) {
+    return;
+  }
+  lifecycle.disposed = true;
+  lifecycle.controller?.abort();
+  lifecycle.worker?.terminate();
+  clearTimeout(lifecycle.workerTimer);
+  lifecycle.resizeObserver?.disconnect();
+  lifecycle.controls?.dispose();
+  lifecycle.scene?.traverse((object) => {
+    object.geometry?.dispose?.();
+    disposeThreeMaterial(object.material);
+  });
+  lifecycle.renderer?.domElement?.remove();
+  lifecycle.renderer?.dispose();
+  lifecycle.renderer?.forceContextLoss?.();
+  if (app.modelViewers[scope] === lifecycle) {
+    app.modelViewers[scope] = null;
+  }
+}
+
+function previewMetadataMatchesEntry(preview, entry) {
+  if (!preview || !entry || !samePath(preview.path, entry.path)) {
+    return false;
+  }
+  const previewSize = Number(preview.size);
+  const entrySize = Number(entry.size);
+  if (Number.isFinite(previewSize) && Number.isFinite(entrySize) && previewSize !== entrySize) {
+    return false;
+  }
+  const previewModified = Number(preview.modified);
+  const entryModified = Number(entry.modified);
+  return !Number.isFinite(previewModified) || !Number.isFinite(entryModified) || Math.abs(previewModified - entryModified) < 1;
+}
+
+function currentModelViewportMatches(scope, paneName, itemPath) {
+  const lifecycle = app.modelViewers?.[scope];
+  if (
+    !lifecycle ||
+    lifecycle.disposed ||
+    !lifecycle.container?.isConnected ||
+    !samePath(lifecycle.preview?.path, itemPath)
+  ) {
+    return false;
+  }
+  return previewMetadataMatchesEntry(lifecycle.preview, entryForPath(paneName, itemPath));
+}
+
+function flattenedModelArray(value) {
+  const source = Array.isArray(value) ? value : [];
+  return Array.isArray(source[0]) ? source.flat() : source;
+}
+
+function stepModelGeometry(source) {
+  const positions = flattenedModelArray(source?.attributes?.position?.array);
+  const indices = flattenedModelArray(source?.index?.array);
+  if (positions.length < 9 || indices.length < 3) {
+    return null;
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  const normals = flattenedModelArray(source?.attributes?.normal?.array);
+  if (normals.length === positions.length) {
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  } else {
+    geometry.computeVertexNormals();
+  }
+  geometry.setIndex(new THREE.BufferAttribute(Uint32Array.from(indices), 1));
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function modelMaterial(color = null) {
+  const channels = Array.isArray(color) && color.length >= 3
+    ? color.slice(0, 3).map((value) => Math.max(0, Number(value) || 0))
+    : null;
+  if (channels && Math.max(...channels) > 1) {
+    channels.forEach((value, index) => { channels[index] = value / 255; });
+  }
+  const resolvedColor = channels && channels.reduce((sum, value) => sum + value, 0) > 0.08
+    ? new THREE.Color(channels[0], channels[1], channels[2])
+    : new THREE.Color(0x78b8a8);
+  return new THREE.MeshPhongMaterial({
+    color: resolvedColor,
+    specular: 0x1b312b,
+    shininess: 22,
+    side: THREE.DoubleSide
+  });
+}
+
+function appendModelMesh(lifecycle, geometry, options = {}) {
+  if (!geometry?.getAttribute("position")?.count) {
+    geometry?.dispose?.();
+    return;
+  }
+  if (!geometry.getAttribute("normal")) {
+    geometry.computeVertexNormals();
+  }
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  const mesh = new THREE.Mesh(geometry, modelMaterial(options.color));
+  mesh.name = options.name || "Model";
+  lifecycle.modelRoot.add(mesh);
+  const edgesGeometry = new THREE.EdgesGeometry(geometry, 28);
+  const edges = new THREE.LineSegments(
+    edgesGeometry,
+    new THREE.LineBasicMaterial({ color: 0x18312b, transparent: true, opacity: 0.62 })
+  );
+  edges.name = `${mesh.name} edges`;
+  edges.userData.modelEdges = true;
+  lifecycle.modelRoot.add(edges);
+  lifecycle.meshCount += 1;
+  lifecycle.triangleCount += geometry.index
+    ? Math.floor(geometry.index.count / 3)
+    : Math.floor(geometry.getAttribute("position").count / 3);
+}
+
+async function fetchModelBuffer(preview, signal) {
+  const response = await fetch(preview.url, { signal, credentials: "same-origin" });
+  if (!response.ok) {
+    let message = `Could not load model (${response.status})`;
+    try {
+      const data = await response.json();
+      message = data.error || message;
+    } catch {}
+    throw new Error(message);
+  }
+  return response.arrayBuffer();
+}
+
+async function loadStepModel(lifecycle, preview) {
+  const buffer = await fetchModelBuffer(preview, lifecycle.controller.signal);
+  if (lifecycle.disposed) {
+    throw new DOMException("Model preview canceled", "AbortError");
+  }
+  const result = await new Promise((resolve, reject) => {
+    const worker = new Worker("/generated/occt-import-js-worker.js");
+    lifecycle.worker = worker;
+    const finish = () => {
+      clearTimeout(lifecycle.workerTimer);
+      lifecycle.controller.signal.removeEventListener("abort", cancel);
+      worker.terminate();
+      lifecycle.worker = null;
+    };
+    const cancel = () => {
+      finish();
+      reject(new DOMException("Model preview canceled", "AbortError"));
+    };
+    lifecycle.workerTimer = setTimeout(() => {
+      finish();
+      reject(new Error("STEP preview timed out while tessellating the model."));
+    }, 45_000);
+    lifecycle.controller.signal.addEventListener("abort", cancel, { once: true });
+    worker.addEventListener("message", (event) => {
+      finish();
+      resolve(event.data);
+    }, { once: true });
+    worker.addEventListener("error", (event) => {
+      finish();
+      reject(new Error(event.message || "STEP parser failed"));
+    }, { once: true });
+    const bytes = new Uint8Array(buffer);
+    worker.postMessage({
+      format: "step",
+      buffer: bytes,
+      params: {
+        linearUnit: "millimeter",
+        linearDeflectionType: "bounding_box_ratio",
+        linearDeflection: 0.001,
+        angularDeflection: 0.5
+      }
+    }, [buffer]);
+  });
+  if (!result?.success || !Array.isArray(result.meshes) || !result.meshes.length) {
+    throw new Error("The STEP file did not contain previewable solid geometry.");
+  }
+  for (const source of result.meshes) {
+    const geometry = stepModelGeometry(source);
+    if (geometry) {
+      appendModelMesh(lifecycle, geometry, { name: source.name, color: source.color });
+    }
+  }
+}
+
+async function loadStlModel(lifecycle, preview) {
+  const buffer = await fetchModelBuffer(preview, lifecycle.controller.signal);
+  if (lifecycle.disposed) {
+    throw new DOMException("Model preview canceled", "AbortError");
+  }
+  const geometry = new STLLoader().parse(buffer);
+  appendModelMesh(lifecycle, geometry, { name: preview.name, color: [0.47, 0.72, 0.66] });
+}
+
+function renderModelViewport(lifecycle) {
+  if (!lifecycle.disposed) {
+    lifecycle.renderer.render(lifecycle.scene, lifecycle.camera);
+  }
+}
+
+function frameModelViewport(lifecycle, direction = null, up = null) {
+  const box = lifecycle.modelBox;
+  if (!box || box.isEmpty()) {
+    return;
+  }
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxDimension = Math.max(size.x, size.y, size.z, 0.001);
+  const radius = Math.max(box.getBoundingSphere(new THREE.Sphere()).radius, maxDimension / 2, 0.001);
+  const currentDirection = lifecycle.camera.position.clone().sub(lifecycle.controls.target).normalize();
+  const resolvedDirection = (direction || currentDirection).clone().normalize();
+  const distance = (radius / Math.sin(THREE.MathUtils.degToRad(lifecycle.camera.fov / 2))) * 1.18;
+  lifecycle.camera.up.copy(up || new THREE.Vector3(0, 0, 1));
+  lifecycle.camera.position.copy(center).addScaledVector(resolvedDirection, distance);
+  lifecycle.camera.near = Math.max(distance / 5000, 0.001);
+  lifecycle.camera.far = Math.max(distance * 200, maxDimension * 500);
+  lifecycle.camera.updateProjectionMatrix();
+  lifecycle.controls.target.copy(center);
+  lifecycle.controls.minDistance = Math.max(maxDimension * 0.02, 0.001);
+  lifecycle.controls.maxDistance = Math.max(maxDimension * 100, distance * 4);
+  lifecycle.controls.update();
+  renderModelViewport(lifecycle);
+}
+
+function modelDimensionText(value, digits = 1) {
+  const numeric = Number(value || 0);
+  return numeric >= 1000 ? numeric.toLocaleString(undefined, { maximumFractionDigits: 0 }) : numeric.toFixed(digits);
+}
+
+function zoomModelViewport(lifecycle, factor) {
+  const offset = lifecycle.camera.position.clone().sub(lifecycle.controls.target);
+  const nextDistance = THREE.MathUtils.clamp(
+    offset.length() * factor,
+    lifecycle.controls.minDistance,
+    lifecycle.controls.maxDistance
+  );
+  lifecycle.camera.position.copy(lifecycle.controls.target).add(offset.normalize().multiplyScalar(nextDistance));
+  lifecycle.controls.update();
+  renderModelViewport(lifecycle);
+}
+
+function finalizeModelViewport(lifecycle, preview) {
+  lifecycle.modelBox = new THREE.Box3().setFromObject(lifecycle.modelRoot);
+  if (!lifecycle.meshCount || lifecycle.modelBox.isEmpty()) {
+    throw new Error("The model did not contain previewable triangle geometry.");
+  }
+  const size = lifecycle.modelBox.getSize(new THREE.Vector3());
+  const center = lifecycle.modelBox.getCenter(new THREE.Vector3());
+  const maxDimension = Math.max(size.x, size.y, size.z, 1);
+  const grid = new THREE.GridHelper(maxDimension * 2, 10, 0x52756c, 0x2a403a);
+  grid.rotation.x = Math.PI / 2;
+  grid.position.set(center.x, center.y, lifecycle.modelBox.min.z);
+  lifecycle.scene.add(grid);
+  const axes = new THREE.AxesHelper(maxDimension * 0.28);
+  axes.position.set(center.x, center.y, lifecycle.modelBox.min.z);
+  lifecycle.scene.add(axes);
+  frameModelViewport(lifecycle, new THREE.Vector3(1, -1, 0.78));
+  const unit = preview.format === "step" ? "mm" : "units";
+  const summary = `${preview.format.toUpperCase()} · ${itemWord(lifecycle.meshCount, "mesh")} · ${lifecycle.triangleCount.toLocaleString()} triangles · ${modelDimensionText(size.x)} × ${modelDimensionText(size.y)} × ${modelDimensionText(size.z)} ${unit}`;
+  lifecycle.container.dataset.modelState = "ready";
+  lifecycle.container.setAttribute("aria-busy", "false");
+  lifecycle.container.dataset.meshCount = String(lifecycle.meshCount);
+  lifecycle.container.dataset.triangleCount = String(lifecycle.triangleCount);
+  lifecycle.status.textContent = summary;
+  lifecycle.progress?.remove();
+}
+
+async function mountModelViewport(container, preview, scope) {
+  disposeModelViewport(scope);
+  if (!container?.isConnected) {
+    return;
+  }
+  const stage = container.querySelector("[data-model-stage]");
+  const status = container.querySelector("[data-model-status]");
+  const lifecycle = {
+    scope,
+    preview,
+    container,
+    stage,
+    status,
+    progress: container.querySelector("[data-model-progress]"),
+    controller: new AbortController(),
+    worker: null,
+    workerTimer: null,
+    resizeObserver: null,
+    renderer: null,
+    scene: null,
+    camera: null,
+    controls: null,
+    modelRoot: null,
+    modelBox: null,
+    meshCount: 0,
+    triangleCount: 0,
+    renderWidth: 0,
+    renderHeight: 0,
+    disposed: false
+  };
+  app.modelViewers[scope] = lifecycle;
+  try {
+    status.textContent = "Loading local 3D renderer...";
+    await ensureModelRuntime();
+    if (lifecycle.disposed || app.modelViewers[scope] !== lifecycle) {
+      return;
+    }
+    lifecycle.scene = new THREE.Scene();
+    lifecycle.camera = new THREE.PerspectiveCamera(40, 1, 0.01, 1_000_000);
+    lifecycle.modelRoot = new THREE.Group();
+    lifecycle.scene.background = new THREE.Color(0x121816);
+    lifecycle.camera.up.set(0, 0, 1);
+    lifecycle.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    lifecycle.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    lifecycle.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    lifecycle.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    lifecycle.renderer.toneMappingExposure = 1.08;
+    lifecycle.renderer.domElement.setAttribute("aria-label", `${preview.name} interactive 3D preview`);
+    stage.appendChild(lifecycle.renderer.domElement);
+    lifecycle.controls = new OrbitControls(lifecycle.camera, lifecycle.renderer.domElement);
+    lifecycle.controls.enableDamping = false;
+    lifecycle.controls.screenSpacePanning = true;
+    lifecycle.controls.addEventListener("change", () => renderModelViewport(lifecycle));
+    lifecycle.scene.add(lifecycle.modelRoot);
+    lifecycle.scene.add(new THREE.AmbientLight(0xffffff, 1.25));
+    lifecycle.scene.add(new THREE.HemisphereLight(0xf4fbf7, 0x26342f, 2.35));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.8);
+    keyLight.position.set(2, -3, 4);
+    lifecycle.scene.add(keyLight);
+    const fillLight = new THREE.DirectionalLight(0x9ecfca, 1.2);
+    fillLight.position.set(-4, 2, 1);
+    lifecycle.scene.add(fillLight);
+    const resize = () => {
+      if (lifecycle.disposed) return;
+      const width = Math.max(1, Math.round(stage.clientWidth));
+      const height = Math.max(1, Math.round(stage.clientHeight));
+      if (width === lifecycle.renderWidth && height === lifecycle.renderHeight) return;
+      lifecycle.renderWidth = width;
+      lifecycle.renderHeight = height;
+      lifecycle.camera.aspect = width / height;
+      lifecycle.camera.updateProjectionMatrix();
+      lifecycle.renderer.setSize(width, height, false);
+      renderModelViewport(lifecycle);
+    };
+    lifecycle.resizeObserver = new ResizeObserver(resize);
+    lifecycle.resizeObserver.observe(stage);
+    resize();
+    container.querySelectorAll("[data-model-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const action = button.dataset.modelAction;
+        if (action === "fit") frameModelViewport(lifecycle);
+        if (action === "iso") frameModelViewport(lifecycle, new THREE.Vector3(1, -1, 0.78));
+        if (action === "front") frameModelViewport(lifecycle, new THREE.Vector3(0, -1, 0));
+        if (action === "top") frameModelViewport(lifecycle, new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 1, 0));
+        if (action === "zoom-out") zoomModelViewport(lifecycle, 1.25);
+        if (action === "zoom-in") zoomModelViewport(lifecycle, 0.8);
+        if (action === "edges") {
+          const visible = button.getAttribute("aria-pressed") !== "true";
+          button.setAttribute("aria-pressed", String(visible));
+          lifecycle.modelRoot.traverse((object) => {
+            if (object.userData.modelEdges) object.visible = visible;
+          });
+          renderModelViewport(lifecycle);
+        }
+      });
+    });
+    if (preview.format === "stl") {
+      await loadStlModel(lifecycle, preview);
+    } else {
+      lifecycle.status.textContent = "Tessellating STEP geometry locally...";
+      await loadStepModel(lifecycle, preview);
+    }
+    if (lifecycle.disposed || app.modelViewers[scope] !== lifecycle) {
+      return;
+    }
+    finalizeModelViewport(lifecycle, preview);
+  } catch (error) {
+    if (isAbortError(error) || lifecycle.disposed) {
+      return;
+    }
+    container.dataset.modelState = "error";
+    container.setAttribute("aria-busy", "false");
+    status.textContent = error.message;
+    lifecycle.progress?.remove();
+    showToast(`3D preview: ${error.message}`);
+  }
+}
+
 async function renderInspector(options = {}) {
   const inspector = document.getElementById("inspector");
   const body = inspector.querySelector(".inspector-body");
-  const renderToken = ++app.inspectorRenderToken;
-  app.inspectorPreviewController?.abort();
-  app.inspectorPreviewController = null;
   if (options.deferPresence) {
     clearTimeout(app.inspectorPresenceTimer);
     app.inspectorPresenceTimer = setTimeout(() => applyInspectorPresence({ virtualRefreshDelay: 0 }), 650);
@@ -12500,11 +13185,23 @@ async function renderInspector(options = {}) {
     clearTimeout(app.inspectorPresenceTimer);
     applyInspectorPresence();
   }
+  const selection = selectedPaths(app.activePane);
+  if (
+    options.forcePreview !== true &&
+    inspectorEnabled() &&
+    selection.length === 1 &&
+    currentModelViewportMatches("inspector", app.activePane, selection[0])
+  ) {
+    return;
+  }
+  disposeModelViewport("inspector");
+  const renderToken = ++app.inspectorRenderToken;
+  app.inspectorPreviewController?.abort();
+  app.inspectorPreviewController = null;
   if (!inspectorEnabled()) {
     body.innerHTML = `<div class="muted">Preview disabled</div>`;
     return;
   }
-  const selection = selectedPaths(app.activePane);
   if (!selection.length) {
     body.innerHTML = `<div class="muted">Select an item</div>`;
     return;
@@ -12581,6 +13278,13 @@ async function renderInspector(options = {}) {
       )}" type="${escapeHtml(preview.mime || "")}"></video>`;
       return;
     }
+    if (preview.type === "model") {
+      body.innerHTML = `<h3 class="preview-name">${escapeHtml(
+        preview.name
+      )}</h3>${meta}${labelPanel}${previewActionBar(preview)}${modelViewportMarkup("inspector")}`;
+      await mountModelViewport(body.querySelector('[data-model-viewport="inspector"]'), preview, "inspector");
+      return;
+    }
     if (preview.type === "folder") {
       body.innerHTML = `<h3 class="preview-name">${escapeHtml(
         preview.name
@@ -12592,6 +13296,8 @@ async function renderInspector(options = {}) {
     const unavailableMessage =
       preview.type === "binary"
         ? "Preview unavailable for binary files"
+        : preview.type === "model-too-large"
+          ? `This model exceeds the ${formatSize(preview.maxPreviewBytes)} 3D preview limit`
         : preview.type === "large"
           ? "This file is too large for an in-app preview"
           : "Preview unavailable for this file type";
@@ -12619,7 +13325,7 @@ function viewerSupportsEntry(entry) {
     return false;
   }
   const extension = String(entry.extension || "").toLowerCase();
-  return viewerPreviewKinds.has(entry.kind) || extension === ".pdf";
+  return viewerPreviewKinds.has(entry.kind) || extension === ".pdf" || modelPreviewExtensions.has(extension);
 }
 
 function viewerCandidates(paneName) {
@@ -12681,6 +13387,9 @@ function viewerBodyMarkup(preview) {
     return `<video class="viewer-media" controls preload="metadata"><source src="${escapeHtml(
       preview.url
     )}" type="${escapeHtml(preview.mime || "")}"></video>`;
+  }
+  if (preview?.type === "model") {
+    return modelViewportMarkup("viewer");
   }
   const name = preview?.name || labelForPath(preview?.path);
   const type = preview?.type ? `Type: ${preview.type}` : "No preview available";
@@ -12764,11 +13473,16 @@ function renderViewerNav() {
 }
 
 function renderViewer(preview) {
+  disposeModelViewport("viewer");
   document.getElementById("viewer-title").textContent = preview?.name || labelForPath(preview?.path) || "Viewer";
   document.getElementById("viewer-meta").textContent = viewerMetaText(preview);
-  document.getElementById("viewer-body").innerHTML = viewerBodyMarkup(preview);
+  const body = document.getElementById("viewer-body");
+  body.innerHTML = viewerBodyMarkup(preview);
   renderViewerStrip();
   renderViewerNav();
+  if (preview?.type === "model") {
+    mountModelViewport(body.querySelector('[data-model-viewport="viewer"]'), preview, "viewer");
+  }
 }
 
 function syncViewerIndex() {
@@ -12791,24 +13505,54 @@ async function loadViewerPath(itemPath) {
   if (!itemPath) {
     return;
   }
+  const currentEntry = entryForPath(app.viewer.paneName, itemPath);
+  if (
+    samePath(itemPath, app.viewer.path) &&
+    previewMetadataMatchesEntry(app.viewer.preview, currentEntry) &&
+    (app.viewer.preview?.type !== "model" || currentModelViewportMatches("viewer", app.viewer.paneName, itemPath))
+  ) {
+    renderViewerStrip();
+    renderViewerNav();
+    return;
+  }
+  const loadToken = ++app.viewerLoadToken;
+  app.viewerPreviewController?.abort();
+  const controller = new AbortController();
+  app.viewerPreviewController = controller;
   app.viewer.path = itemPath;
   syncViewerIndex();
   renderViewer({ name: labelForPath(itemPath), path: itemPath, type: "loading" });
   try {
-    const preview = await request(`/api/preview?path=${encodeURIComponent(itemPath)}`);
+    const preview = await request(`/api/preview?path=${encodeURIComponent(itemPath)}`, { signal: controller.signal });
+    if (loadToken !== app.viewerLoadToken) {
+      return;
+    }
     app.viewer.path = preview.path || itemPath;
     app.viewer.preview = preview;
     syncViewerIndex();
     renderViewer(preview);
     selectViewerPathInPane(app.viewer.paneName, app.viewer.path);
     if (!isViewerPreview(preview)) {
-      showToast("Viewer supports text, images, PDF, audio, and video");
+      showToast("Viewer supports text, images, PDF, audio, video, STL, and STEP");
     }
   } catch (error) {
+    if (isAbortError(error) || loadToken !== app.viewerLoadToken) {
+      return;
+    }
     app.viewer.preview = null;
     renderViewer({ name: labelForPath(itemPath), path: itemPath, type: error.message });
     showToast(error.message);
+  } finally {
+    if (loadToken === app.viewerLoadToken) {
+      app.viewerPreviewController = null;
+    }
   }
+}
+
+function cancelViewerPreviewLoad() {
+  app.viewerLoadToken += 1;
+  app.viewerPreviewController?.abort();
+  app.viewerPreviewController = null;
 }
 
 async function openViewer(paneName = app.activePane, itemPath = null) {
@@ -12821,7 +13565,7 @@ async function openViewer(paneName = app.activePane, itemPath = null) {
   }
   const targetEntry = entryForPath(paneName, targetPath);
   if (targetEntry && !viewerSupportsEntry(targetEntry)) {
-    return showToast("Viewer supports text, images, PDF, audio, and video");
+    return showToast("Viewer supports text, images, PDF, audio, video, STL, and STEP");
   }
   const entries = viewerCandidates(paneName).map((entry) => entry.path);
   if (targetEntry && viewerSupportsEntry(targetEntry) && !entries.some((entryPath) => samePath(entryPath, targetPath))) {
@@ -14433,6 +15177,12 @@ function defaultExtractFolderName(archivePath) {
   return isZipPath(base) ? base.slice(0, -4) || "Extracted" : base;
 }
 
+function defaultExtractTarget(archivePath, paneName = app.activePane) {
+  const containingFolder = parentPathOf(archivePath || "");
+  if (/^[a-z]:$/i.test(containingFolder)) return `${containingFolder}\\`;
+  return containingFolder || tabOf(paneName).path;
+}
+
 function openArchiveDialogForPaths(paneName, paths, options = {}) {
   if (!paths.length) {
     return showToast("Select items first");
@@ -14443,7 +15193,7 @@ function openArchiveDialogForPaths(paneName, paths, options = {}) {
   document.getElementById("archive-target").value = tabOf(otherPane(paneName)).path;
   document.getElementById("archive-create-summary").textContent = `${paths.length} selected`;
   document.getElementById("archive-path").value = archivePath;
-  document.getElementById("archive-extract-target").value = tabOf(otherPane(paneName)).path;
+  document.getElementById("archive-extract-target").value = defaultExtractTarget(archivePath, paneName);
   document.getElementById("archive-folder").value = defaultExtractFolderName(archivePath);
   document.getElementById("archive-extract-summary").textContent = archivePath
     ? labelForPath(archivePath)
@@ -14493,6 +15243,30 @@ async function extractArchiveFromForm() {
   await syncStateAndChrome();
   document.getElementById("archive-extract-summary").textContent = labelForPath(result.extractedDir);
   showToast("ZIP extracted");
+}
+
+async function extractArchiveHere(paneName, archivePath) {
+  if (!isPaneName(paneName) || !isZipPath(archivePath)) {
+    return showToast("Select a ZIP first");
+  }
+  const targetDir = defaultExtractTarget(archivePath, paneName);
+  setStatus(`Extracting ${labelForPath(archivePath)} here...`);
+  try {
+    const result = await request("/api/archive/extract", {
+      method: "POST",
+      body: JSON.stringify({
+        archive: archivePath,
+        targetDir,
+        folderName: defaultExtractFolderName(archivePath)
+      })
+    });
+    await Promise.all([refreshPane(paneName), refreshPane(otherPane(paneName))]);
+    await syncStateAndChrome();
+    showToast(`Extracted here to ${labelForPath(result.extractedDir)}`);
+    return result;
+  } finally {
+    setStatus("Ready");
+  }
 }
 
 function openPropertiesDialog(paneName) {
@@ -17264,6 +18038,9 @@ function contextMenuItems(menu = app.contextMenu) {
       contextMenuItem("shell-verbs", "Shell Verbs", { disabled: hasZipVirtualSelection }),
       contextMenuItem("reveal", "Reveal In Explorer")
     );
+    if (isRealZipFileEntry(entry)) {
+      items.push(contextMenuItem("extract-here", "Extract Here"));
+    }
     items.push({ separator: true });
     items.push(
       contextMenuItem("copy-clip", `Copy ${selectionCount || 1} Item(s)`, {
@@ -17546,6 +18323,7 @@ async function executeContextAction(action) {
     if (action === "shortcut") await createShortcutsForSelection(paneName);
     if (action === "link") openLinkDialog(paneName);
     if (action === "archive") openArchiveDialog(paneName);
+    if (action === "extract-here" && entry) await extractArchiveHere(paneName, entry.path);
     if (action === "label") await openLabelsDialog(paneName);
     if (action === "collection") await addSelectionToCollection();
     if (action === "basket-add") await addSelectionToBasket(paneName);
@@ -24377,6 +25155,18 @@ function wireEvents() {
   });
 
   document.body.addEventListener("click", async (event) => {
+    if (!event.target.closest("[data-tab-overflow-toggle], [data-tab-overflow-menu]")) {
+      closeOtherPaneTabOverflow();
+    }
+    const tabOverflowToggle = event.target.closest("[data-tab-overflow-toggle]");
+    if (tabOverflowToggle) {
+      event.preventDefault();
+      const paneName = tabOverflowToggle.dataset.tabOverflowToggle;
+      const menu = document.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
+      if (menu?.hidden) openPaneTabOverflow(paneName);
+      else closePaneTabOverflow(paneName, { restoreFocus: true });
+      return;
+    }
     const updateActionButton = event.target.closest("[data-update-action]");
     if (updateActionButton) {
       await runAppUpdateAction(updateActionButton.dataset.updateAction);
@@ -24938,6 +25728,7 @@ function wireEvents() {
       const action = sizeAnalysisButton.dataset.sizeAnalysisAction;
       if (action === "active") {
         setSizeAnalysisPathToActive();
+        queueSizeAnalysisAutoScan(0);
         return;
       }
       if (action === "scan") {
@@ -25142,6 +25933,10 @@ function wireEvents() {
       renderSpeedDialog();
       return;
     }
+    if (event.target.id === "size-analysis-path" || event.target.id === "size-analysis-max-entries") {
+      queueSizeAnalysisAutoScan();
+      return;
+    }
     if (event.target.id === "command-input") {
       app.commandPalette.activeIndex = 0;
       renderCommands(event.target.value);
@@ -25213,6 +26008,14 @@ function wireEvents() {
     }
     if (event.target.id === "size-analysis-color-by") {
       setSizeAnalysisMapEncoding({ colorMode: event.target.value });
+      return;
+    }
+    if (
+      event.target.id === "size-analysis-path" ||
+      event.target.id === "size-analysis-max-entries" ||
+      event.target.id === "size-analysis-follow-links"
+    ) {
+      queueSizeAnalysisAutoScan(0);
       return;
     }
     if (event.target.closest("#copy-names-dialog")) {
@@ -25367,6 +26170,36 @@ function wireEvents() {
   });
 
   document.body.addEventListener("keydown", async (event) => {
+    const tabOverflowMenu = event.target.closest?.("[data-tab-overflow-menu]");
+    if (tabOverflowMenu) {
+      const paneName = tabOverflowMenu.dataset.tabOverflowMenu;
+      const items = [...tabOverflowMenu.querySelectorAll("button")];
+      const index = items.indexOf(document.activeElement);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const offset = event.key === "ArrowDown" ? 1 : -1;
+        items[(index + offset + items.length) % items.length]?.focus();
+        return;
+      }
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        items[event.key === "Home" ? 0 : items.length - 1]?.focus();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePaneTabOverflow(paneName, { restoreFocus: true });
+        return;
+      }
+    }
+    if (event.key === "Escape") {
+      const openTabMenu = document.querySelector('[data-tab-overflow-menu]:not([hidden])');
+      if (openTabMenu) {
+        event.preventDefault();
+        closePaneTabOverflow(openTabMenu.dataset.tabOverflowMenu, { restoreFocus: true });
+        return;
+      }
+    }
     const terminalSearch = event.target.closest?.("[data-terminal-search]");
     if (terminalSearch) {
       if (event.key === "Enter") {
@@ -25404,6 +26237,11 @@ function wireEvents() {
     if (event.target.id === "speed-query" && event.key === "Enter") {
       event.preventDefault();
       await searchSpeedIndex();
+      return;
+    }
+    if (event.target.id === "size-analysis-path" && event.key === "Enter") {
+      event.preventDefault();
+      queueSizeAnalysisAutoScan(0);
       return;
     }
     if (handleQuickSearchKey(event)) {
@@ -25892,6 +26730,11 @@ function wireEvents() {
       const targetPane = action.startsWith("active") ? app.activePane : otherPane(app.activePane);
       if (action.endsWith("create")) {
         document.getElementById("archive-target").value = tabOf(targetPane).path;
+      } else if (action === "here-extract") {
+        document.getElementById("archive-extract-target").value = defaultExtractTarget(
+          document.getElementById("archive-path").value,
+          app.archive?.paneName || app.activePane
+        );
       } else {
         document.getElementById("archive-extract-target").value = tabOf(targetPane).path;
       }
@@ -26571,12 +27414,20 @@ function wireEvents() {
   const sizeAnalysisDialog = document.getElementById("size-analysis-dialog");
   if (sizeAnalysisDialog) {
     const cancelActiveSizeAnalysis = () => {
+      clearSizeAnalysisAutoScan();
       if (app.sizeAnalysis.loading) {
         cancelSizeAnalysis("Scan canceled");
       }
     };
     sizeAnalysisDialog.addEventListener("cancel", cancelActiveSizeAnalysis);
     sizeAnalysisDialog.addEventListener("close", cancelActiveSizeAnalysis);
+  }
+  const viewerDialog = document.getElementById("viewer-dialog");
+  if (viewerDialog) {
+    viewerDialog.addEventListener("close", () => {
+      cancelViewerPreviewLoad();
+      disposeModelViewport("viewer");
+    });
   }
 
   const textEditorDialog = document.getElementById("text-editor-dialog");

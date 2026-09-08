@@ -91,7 +91,7 @@ async function prepareFixture() {
 
 async function inspectPaneChrome(page) {
   return page.evaluate(() => {
-    const selectors = [".pathbar", ".breadcrumb-strip", ".toolbar", ".file-head"];
+    const selectors = [".tabbar", ".tab-strip", ".pathbar", ".breadcrumb-strip", ".toolbar", ".file-head"];
     const reports = [];
     const issues = [];
     for (const pane of document.querySelectorAll(".pane")) {
@@ -120,8 +120,14 @@ async function inspectPaneChrome(page) {
               currentBreadcrumbRect.left >= rect.left - 1 &&
               currentBreadcrumbRect.right <= rect.right + 1
           );
+        const activeTabRect = element.querySelector(".tab.active")?.getBoundingClientRect();
+        const activeTabVisible =
+          selector !== ".tab-strip" ||
+          Boolean(activeTabRect && activeTabRect.left >= rect.left - 1 && activeTabRect.right <= rect.right + 1);
         const intentionalBreadcrumbScroll =
           selector === ".breadcrumb-strip" && xScrollable && style.scrollbarWidth === "none" && currentBreadcrumbVisible;
+        const intentionalTabScroll = false;
+        const intentionalHorizontalScroll = intentionalBreadcrumbScroll || intentionalTabScroll;
         const sample = {
           pane: paneName,
           selector,
@@ -142,10 +148,12 @@ async function inspectPaneChrome(page) {
           cramped,
           childrenOutside,
           currentBreadcrumbVisible,
-          intentionalBreadcrumbScroll
+          activeTabVisible,
+          intentionalBreadcrumbScroll,
+          intentionalTabScroll
         };
         reports.push(sample);
-        if ((xScrollable && !intentionalBreadcrumbScroll) || yScrollable || cramped || (childrenOutside && !intentionalBreadcrumbScroll)) {
+        if ((xScrollable && !intentionalHorizontalScroll) || yScrollable || cramped || (childrenOutside && !intentionalHorizontalScroll)) {
           issues.push(sample);
         }
       }
@@ -207,8 +215,96 @@ async function main() {
       });
       await page.waitForSelector('.pane[data-pane="left"] [data-entry-path]', { timeout: 10000 });
       await page.waitForSelector('.pane[data-pane="right"] [data-entry-path]', { timeout: 10000 });
+      for (let index = 0; index < 12; index += 1) {
+        await page.click('[data-new-tab="left"]');
+      }
       await page.waitForTimeout(250);
       const chrome = await inspectPaneChrome(page);
+      const tabState = await page.evaluate(() => {
+        const tabbar = document.querySelector('[data-tabs="left"]');
+        const strip = tabbar.querySelector('[data-tab-strip="left"]');
+        const tabs = [...strip.querySelectorAll(".tab")];
+        const visibleTabs = tabs.filter((tab) => !tab.classList.contains("tab-responsive-hidden"));
+        const hiddenTabs = tabs.filter((tab) => tab.classList.contains("tab-responsive-hidden"));
+        const active = strip.querySelector(".tab.active");
+        const stripRect = strip.getBoundingClientRect();
+        const activeRect = active.getBoundingClientRect();
+        const style = getComputedStyle(strip);
+        const toggle = tabbar.querySelector('[data-tab-overflow-toggle="left"]');
+        return {
+          tabbarHeight: Math.round(tabbar.getBoundingClientRect().height),
+          tabCount: tabs.length,
+          visibleTabCount: visibleTabs.length,
+          hiddenTabCount: hiddenTabs.length,
+          minTabWidth: Math.round(Math.min(...visibleTabs.map((tab) => tab.getBoundingClientRect().width))),
+          maxTabWidth: Math.round(Math.max(...visibleTabs.map((tab) => tab.getBoundingClientRect().width))),
+          scrollable: strip.scrollWidth > strip.clientWidth + 1,
+          scrollLeft: Math.round(strip.scrollLeft),
+          activeOffsetLeft: Math.round(active.offsetLeft),
+          activeLeft: Math.round(activeRect.left),
+          activeRight: Math.round(activeRect.right),
+          stripLeft: Math.round(stripRect.left),
+          stripRight: Math.round(stripRect.right),
+          scrollbarWidth: style.scrollbarWidth,
+          overflowY: style.overflowY,
+          activeVisible: activeRect.left >= stripRect.left - 1 && activeRect.right <= stripRect.right + 1,
+          overflowToggleVisible: !toggle.hidden,
+          overflowLabel: toggle.getAttribute("aria-label")
+        };
+      });
+      check(
+        checks,
+        `compact-tabs-${viewport.name}`,
+        tabState.tabCount >= 13 &&
+          tabState.visibleTabCount >= 1 &&
+          tabState.hiddenTabCount >= 1 &&
+          tabState.tabbarHeight <= 40 &&
+          tabState.minTabWidth >= 67 &&
+          tabState.maxTabWidth <= 169,
+        JSON.stringify(tabState)
+      );
+      check(
+        checks,
+        `tab-overflow-chrome-${viewport.name}`,
+        !tabState.scrollable &&
+          tabState.scrollbarWidth === "none" &&
+          tabState.overflowY === "hidden" &&
+          tabState.activeVisible &&
+          tabState.overflowToggleVisible &&
+          tabState.overflowLabel === `Show all ${tabState.tabCount} tabs (${tabState.hiddenTabCount} hidden)`,
+        JSON.stringify(tabState)
+      );
+      await page.click('[data-tab-overflow-toggle="left"]');
+      const tabMenuState = await page.evaluate(() => {
+        const menu = document.querySelector('[data-tab-overflow-menu="left"]');
+        const rect = menu.getBoundingClientRect();
+        return {
+          visible: !menu.hidden,
+          items: menu.querySelectorAll("button").length,
+          activeItems: menu.querySelectorAll("button.active").length,
+          insideViewport: rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight
+        };
+      });
+      check(
+        checks,
+        `tab-overflow-menu-${viewport.name}`,
+        tabMenuState.visible &&
+          tabMenuState.items === tabState.tabCount &&
+          tabMenuState.activeItems === 1 &&
+          tabMenuState.insideViewport,
+        JSON.stringify(tabMenuState)
+      );
+      await page.keyboard.press("Escape");
+      const tabMenuClosed = await page.evaluate(() => ({
+        hidden: document.querySelector('[data-tab-overflow-menu="left"]').hidden,
+        focusRestored: document.activeElement === document.querySelector('[data-tab-overflow-toggle="left"]')
+      }));
+      check(
+        checks,
+        `tab-overflow-keyboard-${viewport.name}`,
+        tabMenuClosed.hidden && tabMenuClosed.focusRestored,
+        JSON.stringify(tabMenuClosed)
+      );
       const screenshot = path.join(artifactsDir, `pane-layout-no-scrollbars-${viewport.name}.png`);
       await page.screenshot({ path: screenshot, fullPage: true });
       viewportReports.push({ ...viewport, screenshot, ...chrome });

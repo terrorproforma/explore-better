@@ -66,6 +66,7 @@
     "verify:checksums-ui": "node scripts/checksums-ui-smoke.mjs",
     "verify:organizer-ui": "node scripts/organizer-ui-smoke.mjs",
     "verify:preview-editor-properties-ui": "node scripts/preview-editor-properties-ui-smoke.mjs",
+    "verify:model-preview-ui": "node scripts/model-preview-ui-smoke.mjs",
     "verify:preferences-ui": "node scripts/preferences-ui-smoke.mjs",
     "verify:operation-journal": "node scripts/operation-journal-integrity-smoke.mjs",
     "verify:transactional-operations": "node scripts/transactional-operations-smoke.mjs",
@@ -192,7 +193,9 @@
     "electron-builder": "^26.15.3",
     "esbuild": "0.28.1",
     "lucide-static": "^1.24.0",
-    "playwright-core": "^1.61.1"
+    "occt-import-js": "0.0.23",
+    "playwright-core": "^1.61.1",
+    "three": "0.185.1"
   },
   "build": {
     "appId": "io.github.terrorproforma.explorebetter",
@@ -220,6 +223,7 @@
       "README.md",
       "USER_MANUAL.md",
       "RELEASE_NOTES.md",
+      "THIRD_PARTY_NOTICES.md",
       "LICENSE",
       "package.json"
     ],
@@ -275,5 +279,8 @@
     "node-pty": "1.1.0",
     "yauzl": "^3.4.0",
     "yazl": "3.3.1"
+  },
+  "overrides": {
+    "js-yaml": "4.3.1"
   }
 }

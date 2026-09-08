@@ -1,5 +1,49 @@
 # Explore Better Release Notes
 
+## Unreleased
+
+### Live Disk Analysis
+
+- Starts scanning when Disk Map or Analyzer opens and when its target changes, with no entry limit by default.
+- Streams native scan progress into the totals, tables, and treemap while keeping file summaries bounded.
+- Defaults disk maps to allocated size, preserves zero allocation for sparse files, and accounts for volume use that cannot be enumerated.
+- Keeps map header controls clickable and supports cancellation, warm scan reuse, and explicit partial scan limits.
+
+### Maintenance
+
+- Updated vulnerable dependency patches, including the pinned YAML parser, and excluded local editor state and backup files from version control.
+- Preserves path edits during pane refreshes and keeps drive buttons at a readable minimum width.
+
+### Local STL And STEP Preview
+
+- Added interactive 3D previews for `.stl`, `.step`, and `.stp` files in both the Preview inspector and the large Viewer.
+- Keeps an unchanged model canvas alive across selection and folder refreshes, and ignores repeat clicks on the active Viewer item, eliminating unnecessary flashes, refetches, and WebGL reconstruction.
+- Added orbit, pan, wheel and button zoom, fit, isometric/front/top views, edge toggling, dimensions, mesh counts, and triangle counts.
+- Tessellates STEP geometry locally in a dedicated OpenCascade WebAssembly worker; model files never leave the device, and the main app retains its stricter script policy.
+- Lazy-loads the 736 KB 3D renderer only after the first model selection and loads the 7.3 MB CAD engine only for STEP, keeping the normal application runtime at 567 KB.
+- Cancels stale loads and disposes workers, geometry, materials, observers, and WebGL contexts when changing models or closing Viewer. Files above 100 MB receive an explicit bounded fallback.
+- Packages the CAD runtime and complete Three.js/OpenCascade license notices for offline and release builds.
+
+### ZIP Extraction
+
+- Added `Extract Here` directly to the right-click menu for ZIP files.
+- Changed the Archive dialog's extraction target to the folder containing the selected ZIP instead of the opposite pane, with an explicit `Here` shortcut to restore that target.
+- Keeps extraction safe and undoable by creating a sibling folder named after the archive rather than scattering files into an existing folder.
+- Made long right-click menus vertically scrollable so lower actions remain reachable on shorter windows.
+
+### Compact Tab Overflow
+
+- Replaced the native horizontal scrollbar in crowded pane headers with compact 68 px minimum tabs and measured overflow—no tab buttons remain off-canvas.
+- Keeps the active tab visible automatically and moves only the tabs that do not fit into an accessible numbered menu with the complete tab name and path.
+- Preserves tab closing, locking, dragging, keyboard cycling, new-tab access, pane activity, and source/target labels in the same 40 px header row.
+
+### Verification
+
+- Added a real-browser STL/STEP suite with 15/15 passing checks across packaged runtime assets/licenses, API classification, list metadata, inspector and Viewer rendering, stable unchanged-model refreshes, every view control, worker output, dimensions/statistics, WebGL replacement/disposal, and clean browser/API diagnostics.
+- Kept startup verification at 12/12 and the focused performance guard at 20/20 with no regression watch items after separating the model runtime.
+- Added an end-to-end ZIP fixture that verifies the right-click label, containing-folder dialog default, safe sibling output, journaled completion, visible outcome, and protection against accidental opposite-pane extraction.
+- Expanded pane-layout coverage to create 13–28 tabs at 1100, 1360, and 1500 px and verify fixed header height, hidden scrollbar chrome, active-tab visibility, complete overflow-menu contents, viewport-safe positioning, Escape dismissal, and focus restoration.
+
 ## v0.2.6 - 2026-07-20
 
 ### Existing Default-App Migration

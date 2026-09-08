@@ -319,6 +319,8 @@ func handle(ctx context.Context, req request, out *writer) (interface{}, error) 
 		return map[string]interface{}{"path": req.Path, "logicalBytes": info.Size(), "allocatedBytes": allocated, "allocatedSource": source, "allocationAccuracy": accuracy, "volume": volume}, nil
 	case "scan-tree":
 		return scanTree(ctx, req, out)
+	case "analyze-tree":
+		return analyzeTree(ctx, req, out)
 	default:
 		return nil, fmt.Errorf("operation %q is not supported", req.Op)
 	}

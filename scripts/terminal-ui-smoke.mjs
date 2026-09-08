@@ -278,6 +278,14 @@ async function main() {
 
     const syncsBeforeFollowDisabled = await page.evaluate(() => window.__terminalMock.syncs.length);
     await page.fill('[data-path-input="left"]', fixture);
+    await page.evaluate(() => {
+      window.__pathEditTabLabel = document.querySelector('[data-tab="0"][data-pane="left"]');
+      document.querySelector('[data-action="refresh"][data-pane="left"]').click();
+    });
+    await page.waitForFunction(() => window.__pathEditTabLabel !== document.querySelector('[data-tab="0"][data-pane="left"]'));
+    const editedPath = await page.inputValue('[data-path-input="left"]');
+    addCheck(checks, "refresh-preserves-path-edit", editedPath === fixture, editedPath);
+    if (editedPath !== fixture) throw new Error("Pane refresh overwrote the path being edited.");
     await page.press('[data-path-input="left"]', "Enter");
     await page.waitForFunction((target) => document.querySelector('[data-path-input="left"]')?.value === target, fixture);
     await page.click('[data-terminal-action="open-folder"][data-pane="left"]');
