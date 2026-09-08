@@ -224,7 +224,7 @@ try {
   assert(navigated.result.structuredContent.data.panes.left.tabs.length >= 2, "New-tab AI navigation did not preserve the original tab.");
   const official = spawnSync("go", ["run", "./cmd/conformance", "--sidecar", path.join(process.cwd(), "native", "bin", "ExploreBetterMcp.exe"), "--profile", harness.profile.id, "--manifest", harness.manifest, "--expected-tools", String(harness.profile.tools.length)], {
     cwd: path.join(process.cwd(), "native", "mcpserver"),
-    env: harness.env,
+    env: { ...harness.env, GOTOOLCHAIN: "go1.25.12" },
     encoding: "utf8",
     windowsHide: true,
     timeout: 60_000
