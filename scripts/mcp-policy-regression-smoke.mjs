@@ -40,16 +40,18 @@ try {
   check("Concurrent changes preserve revocation", config.profiles.find(item => item.id === concurrent.id)?.enabled === false);
   check("Concurrent profile creation loses no entries", config.profiles.filter(item => item.name.startsWith("Concurrent ")).length === 8);
 
-  const writePlan = await fixture.request("plan_text_write", { path: target, content: "saved" });
+  // Keep this input in the original TEMP spelling to exercise short-path authorization.
+  const requestedTarget = path.join(fixture.requestedTemp, path.relative(fixture.temp, target));
+  const writePlan = await fixture.request("plan_text_write", { path: requestedTarget, content: "saved" });
   const applied = await fixture.request("apply_operation", { applyToken: writePlan.data.applyToken });
   const operation = await waitForOperation(fixture.request, applied.data.operationId);
   // Authorization persists real paths; Windows TEMP can use an 8.3 alias.
-  const canonicalTarget = await fs.realpath(target);
+  const canonicalTarget = await fs.realpath(requestedTarget);
   const policy = operation.mcpPolicy;
   check("Operation records persist their authorized paths and policy",
     policy?.paths?.length === 1 && policy.paths[0] === canonicalTarget &&
     /^[a-f0-9]{64}$/.test(policy.signature || "") && policy.planningTool === "plan_text_write",
-    { requestedPath: target, canonicalTarget, operationId: operation.id, storedPolicy: policy ?? null });
+    { requestedPath: requestedTarget, canonicalTarget, operationId: operation.id, storedPolicy: policy ?? null });
   await fixture.backend.upsertMcpProfile({ id: fixture.profile.id, roots: [narrow] });
   await expectCode(() => fixture.request("get_operation", { operationId: operation.id }), "PLAN_CHANGED");
   await expectCode(() => fixture.request("undo_operation", { operationId: operation.id }), "PLAN_CHANGED");
