@@ -87,6 +87,7 @@ const app = {
   newFile: null,
   duplicateResult: null,
   textEditor: null,
+  textEditorLoadToken: 0,
   viewer: { paneName: "left", path: null, entries: [], index: -1, preview: null },
   modelViewers: { inspector: null, viewer: null },
   commandPalette: { items: [], activeIndex: 0, view: "all", pins: new Set(), recents: [], loaded: false },
@@ -95,6 +96,7 @@ const app = {
     capabilitiesPromise: null,
     rendererPromise: null,
     sessions: new Map(),
+    closing: new Map(),
     bySessionId: new Map(),
     earlyEvents: new Map(),
     visible: { left: false, right: false },
@@ -236,7 +238,6 @@ const viewerPreviewKinds = new Set(["Image", "Text", "Audio", "Video", "3D Model
 const modelPreviewExtensions = new Set([".step", ".stp", ".stl"]);
 let THREE = null;
 let OrbitControls = null;
-let STLLoader = null;
 let modelRuntimePromise = null;
 
 async function ensureModelRuntime() {
@@ -244,7 +245,6 @@ async function ensureModelRuntime() {
     modelRuntimePromise = import("/generated/model-runtime.js").then((runtime) => {
       THREE = runtime.THREE;
       OrbitControls = runtime.OrbitControls;
-      STLLoader = runtime.STLLoader;
       return runtime;
     }).catch((error) => {
       modelRuntimePromise = null;
@@ -1592,11 +1592,11 @@ function mcpSemanticActionDefinitions() {
       inputSchema: { type: "object", required: ["deviceId", "action"], properties: { deviceId: { type: "string", maxLength: 200 }, action: { type: "string", enum: ["browseInApp", "browseShell"] } }, additionalProperties: false },
       outcome: "inApp", resultDescription: "Uses the selected device capability to browse inside Explore Better.", requiresFreshContext: true,
       enabled: () => document.getElementById("devices-dialog")?.open === true && !app.devices.loading, disabledReason: () => "Open the Devices view and wait for loading to finish.",
-      handler: async ({ inputs }) => {
+      handler: async ({ paneName, inputs }) => {
         const item = deviceItemById(inputs.deviceId);
         if (!item || item.capabilities?.[inputs.action] !== true) throw Object.assign(new Error("That device or capability is no longer available."), { code: "UI_PRECONDITION" });
-        await runDeviceAction(inputs.action, inputs.deviceId);
-        return { deviceId: inputs.deviceId, action: inputs.action, pane: app.activePane };
+        await runDeviceAction(inputs.action, inputs.deviceId, paneName);
+        return { deviceId: inputs.deviceId, action: inputs.action, pane: paneName };
       }
     },
     {
@@ -1626,12 +1626,12 @@ function mcpSemanticActionDefinitions() {
     },
     {
       id: "dialog.closeActive", title: "Close active dialog", category: "dialog", view: "global", inputSchema: noInputs,
-      outcome: "inApp", resultDescription: "Closes the active dialog when doing so will not discard unsaved Preferences.", requiresFreshContext: true,
+      outcome: "inApp", resultDescription: "Closes the active dialog when doing so will not discard unsaved changes.", requiresFreshContext: true,
       enabled: () => Boolean(currentDialog()), disabledReason: () => "No dialog is open.",
       handler: async () => {
         const dialog = currentDialog();
-        if (dialog?.id === "preferences-dialog" && !requestClosePreferencesDialog({ prompt: false })) throw Object.assign(new Error("Save or discard Preferences changes first."), { code: "UI_BLOCKED" });
-        dialog?.close(); return { dialogId: dialog?.id || "", visible: false };
+        if (!requestCloseAppDialog(dialog, { prompt: false })) throw Object.assign(new Error("Save or discard unsaved changes first."), { code: "UI_BLOCKED" });
+        return { dialogId: dialog?.id || "", visible: false };
       }
     }
   ];
@@ -1700,7 +1700,108 @@ async function invokeMcpSemanticAction(action = {}) {
   };
 }
 
+function describeMcpUiAction(action = {}) {
+  const paneName = mcpActionPane(action.pane);
+  const tab = tabOf(paneName);
+  const inputs = action.inputs || {};
+  if (action.type === "semantic") {
+    const definition = mcpSemanticActionDefinitions().find((item) => item.id === action.actionId);
+    if (!definition) throw Object.assign(new Error("That semantic UI action is not registered."), { code: "UNKNOWN_ACTION" });
+    validateMcpSemanticInputs(inputs, definition.inputSchema);
+    if (definition.enabled?.(paneName) === false) {
+      throw Object.assign(new Error(definition.disabledReason?.(paneName) || "This action is unavailable in the current UI state."), { code: "UI_PRECONDITION" });
+    }
+  }
+  if (action.type === "view" && action.visible !== false) {
+    const selectionDialogs = {
+      editor: "text-editor-dialog", attributes: "attributes-dialog", timestamps: "timestamps-dialog",
+      transfer: "transfer-dialog", destination: "destination-dialog", archive: "archive-dialog", bulkRename: "bulk-dialog"
+    };
+    const dialogId = selectionDialogs[action.view];
+    if (dialogId && !document.getElementById(dialogId)?.open && !selectedPaths(paneName).length) {
+      throw Object.assign(new Error("The requested view needs a compatible selection or active folder."), { code: "UI_PRECONDITION" });
+    }
+  }
+  const paths = [];
+  const add = (...values) => values.flat().filter(value => typeof value === "string" && value).forEach(value => {
+    const resolved = expandAliasPath(value);
+    paths.push(parseZipVirtualPath(resolved)?.archivePath || resolved);
+  });
+  const navigate = target => {
+    add(target);
+    if (target && linkedNavigationEnabled() && !isZipVirtualPath(tab.path) && !isZipVirtualPath(target) && !tabOf(otherPane(paneName)).virtualMode) {
+      add(linkedNavigationTarget(tab.path, expandAliasPath(target), tabOf(otherPane(paneName)).path));
+    }
+  };
+  const revealTree = target => {
+    add(target);
+    const root = folderTreeRoots().find(item => pathInsideFolder(target, item.path));
+    if (!root) return;
+    let current = root.path; add(current);
+    for (const part of pathSegmentsBetween(current, target)) {
+      current = joinPathSegment(current, part, pathSeparatorFor(current)); add(current);
+    }
+  };
+  const revealTab = targetTab => {
+    add(targetTab?.path);
+    if (inspectorEnabled() && targetTab?.selected?.size === 1) add([...targetTab.selected]);
+  };
+  if (action.type === "show") {
+    if (action.mode === "newTab") add(action.path);
+    else navigate(action.path);
+    add(action.select);
+  }
+  if (action.type === "semantic") {
+    const id = action.actionId;
+    if (id === "pane.navigate.back") navigate(tab.history?.at(-1));
+    if (id === "pane.navigate.forward") navigate(tab.future?.at(-1));
+    if (id === "pane.navigate.up") navigate(tab.parent);
+    if (id === "pane.refresh") navigate(tab.path);
+    if (id === "tab.new") add(tab.path);
+    if (id === "folderTree.revealActive") revealTree(tab.path);
+    if (id === "tab.select") revealTab(panes[paneName].tabs[inputs.index]);
+    if (id === "tab.close") {
+      const pane = panes[paneName];
+      const successorIndex = pane.activeTab < pane.tabs.length - 1 ? pane.activeTab + 1 : pane.activeTab - 1;
+      revealTab(pane.tabs[successorIndex]);
+    }
+    if (id === "folderTree.toggle") add(inputs.path);
+    if (id === "result.open") {
+      if (inputs.mode === "newTab") add(inputs.path);
+      else navigate(inputs.path);
+    }
+    if (id === "folderTree.refresh") revealTree(tabOf(app.activePane).path);
+    if (id === "search.setCriteria") add(inputs.path ?? document.getElementById("search-root")?.value);
+    if (id === "search.submit") add(document.getElementById("search-root")?.value);
+    if (id === "devices.browse" || id === "devices.openInExplorer") {
+      const item = deviceItemById(inputs.deviceId);
+      if (id === "devices.browse" && inputs.action === "browseInApp") navigate(item?.path);
+      else add(item?.path);
+      if (item?.openTarget && /^[a-z]:[\\/]|^\\\\|^\//i.test(item.openTarget)) add(item.openTarget);
+    }
+  }
+  if (action.type === "view" && action.visible !== false) {
+    if (action.view === "viewer") add(viewerInitialPath(paneName));
+    else if (action.view === "editor") add(selectedPaths(paneName)[0]);
+    else if (action.view === "diskUsage") add(sizeAnalysisDefaultPath(paneName));
+    else if (["properties", "checksums", "attributes", "timestamps", "openWith", "shellVerbs", "labels", "archive", "bulkRename"].includes(action.view)) {
+      add(selectedPaths(paneName).length ? selectedPaths(paneName) : tab.path);
+    } else if (["transfer", "destination", "compare"].includes(action.view)) {
+      add(tab.path, tabOf(otherPane(paneName)).path, selectedPaths(paneName));
+    }
+  }
+  const description = { pane: paneName, paths: [...new Set(paths)] };
+  return { ...description, contextRevision: mcpContextRevision, descriptionToken: JSON.stringify(description) };
+}
+
 async function handleMcpUiAction(action = {}) {
+  if (action.type === "describe") return describeMcpUiAction(action.request || {});
+  if (action.expectedDescriptionToken !== undefined && action.expectedDescriptionToken !== describeMcpUiAction(action).descriptionToken) {
+    throw Object.assign(new Error("The requested UI target changed. Read context and retry the action."), { code: "STALE_CONTEXT" });
+  }
+  if (Number.isInteger(action.expectedContextRevision) && action.expectedContextRevision !== mcpContextRevision) {
+    throw Object.assign(new Error("The Explore Better selection or view changed. Read context and retry the action."), { code: "STALE_CONTEXT" });
+  }
   if (action.type === "listActions") {
     return { actions: listedMcpSemanticActions(action), contextRevision: mcpContextRevision };
   }
@@ -1757,10 +1858,9 @@ async function handleMcpUiAction(action = {}) {
     const dialog = document.getElementById(view.dialogId);
     if (!dialog) throw Object.assign(new Error("The requested Explore Better view is unavailable."), { code: "UI_UNAVAILABLE" });
     if (action.visible === false) {
-      if (dialog.open && view.dialogId === "preferences-dialog" && !requestClosePreferencesDialog({ prompt: false })) {
-        throw Object.assign(new Error("Save or discard the unsaved Preferences changes before closing this view."), { code: "UI_BLOCKED" });
+      if (!requestCloseAppDialog(dialog, { prompt: false })) {
+        throw Object.assign(new Error("Save or discard unsaved changes before closing this view."), { code: "UI_BLOCKED" });
       }
-      if (dialog.open) dialog.close();
     } else if (!dialog.open) {
       const blockingDialog = [...document.querySelectorAll("dialog[open]")].find((item) => item !== dialog);
       if (blockingDialog) {
@@ -3203,6 +3303,14 @@ function cacheVisibleEntryData(tab, signature, entries) {
     app.sharedVisibleEntryCache.set(signature.entries, shared);
   }
   shared.set(sharedVisibleEntrySignatureKey(signature), data);
+  // Two panes can reuse results, but past keystrokes must not retain an entire
+  // listing and two indexes forever. Keep a small LRU with an entry budget.
+  let retainedEntries = [...shared.values()].reduce((total, result) => total + result.entries.length, 0);
+  while (shared.size > 1 && (shared.size > 4 || retainedEntries > 200_000)) {
+    const oldestKey = shared.keys().next().value;
+    retainedEntries -= shared.get(oldestKey).entries.length;
+    shared.delete(oldestKey);
+  }
   app.visibleEntryIndexes.set(entries, indexByKey);
   app.visibleEntryPathSets.set(entries, pathSet);
   return data;
@@ -3228,6 +3336,10 @@ function visibleEntryData(tab) {
   }
   const shared = app.sharedVisibleEntryCache.get(signature.entries)?.get(sharedVisibleEntrySignatureKey(signature));
   if (shared) {
+    const results = app.sharedVisibleEntryCache.get(signature.entries);
+    const key = sharedVisibleEntrySignatureKey(signature);
+    results.delete(key);
+    results.set(key, shared);
     app.visibleEntryCache.set(tab, shared);
     return shared;
   }
@@ -4211,16 +4323,18 @@ async function openDevicesDialog(options = {}) {
   }
 }
 
-async function runDeviceAction(action, id) {
+async function runDeviceAction(action, id, paneName = app.activePane) {
   const item = deviceItemById(id);
   if (!item) return showToast("That device is no longer available");
   if (action === "browseInApp" && item.capabilities?.browseInApp && item.path) {
-    await loadPane(app.activePane, item.path);
+    app.activePane = paneName;
+    await loadPane(paneName, item.path);
     document.getElementById("devices-dialog").close();
-    showToast(`Opened ${item.name} in ${app.activePane} pane`);
+    showToast(`Opened ${item.name} in ${paneName} pane`);
     return;
   }
   if (action === "browseShell" && item.capabilities?.browseShell && (item.openTarget || item.path)) {
+    app.activePane = paneName;
     document.getElementById("devices-dialog").close();
     await openShellNamespaceDialog(item.openTarget || item.path);
     return;
@@ -6052,7 +6166,11 @@ function entryAccessibleName(entry) {
   return parts.join(", ");
 }
 
-function renderEntryRow(entry, paneName, tab) {
+function entryPositionAttributes(index, total) {
+  return Number.isInteger(index) && Number.isInteger(total) ? `aria-posinset="${index + 1}" aria-setsize="${total}"` : "";
+}
+
+function renderEntryRow(entry, paneName, tab, index, total) {
   const columns = columnsForTab(tab);
   const hasLabelColumn = columns.some((column) => column.id === "label");
   const isSelected = tab.selected.has(entry.path);
@@ -6060,7 +6178,7 @@ function renderEntryRow(entry, paneName, tab) {
   const focused = tab.focusedPath === entry.path ? " focused" : "";
   const stateClasses = entryStateClasses(entry);
   const accessibleName = entryAccessibleName(entry);
-  return `<div class="file-row${selected}${focused}${stateClasses}" role="option" aria-selected="${
+  return `<div class="file-row${selected}${focused}${stateClasses}" role="option" ${entryPositionAttributes(index, total)} aria-selected="${
     isSelected ? "true" : "false"
   }" aria-label="${escapeHtml(accessibleName)}" id="${entryDomId(paneName, entry.path)}" data-entry-path="${escapeHtml(
     entry.path
@@ -6069,14 +6187,14 @@ function renderEntryRow(entry, paneName, tab) {
   </div>`;
 }
 
-function renderCompactEntry(entry, paneName, tab) {
+function renderCompactEntry(entry, paneName, tab, index, total) {
   const glyph = glyphFor(entry);
   const isSelected = tab.selected.has(entry.path);
   const selected = isSelected ? " selected" : "";
   const focused = tab.focusedPath === entry.path ? " focused" : "";
   const stateClasses = entryStateClasses(entry);
   const accessibleName = entryAccessibleName(entry);
-  return `<div class="file-row compact-row${selected}${focused}${stateClasses}" role="option" aria-selected="${
+  return `<div class="file-row compact-row${selected}${focused}${stateClasses}" role="option" ${entryPositionAttributes(index, total)} aria-selected="${
     isSelected ? "true" : "false"
   }" aria-label="${escapeHtml(accessibleName)}" id="${entryDomId(paneName, entry.path)}" data-entry-path="${escapeHtml(
     entry.path
@@ -6087,14 +6205,14 @@ function renderCompactEntry(entry, paneName, tab) {
   </div>`;
 }
 
-function renderTileEntry(entry, paneName, tab) {
+function renderTileEntry(entry, paneName, tab, index, total) {
   const glyph = glyphFor(entry);
   const isSelected = tab.selected.has(entry.path);
   const selected = isSelected ? " selected" : "";
   const focused = tab.focusedPath === entry.path ? " focused" : "";
   const stateClasses = entryStateClasses(entry);
   const accessibleName = entryAccessibleName(entry);
-  return `<div class="file-tile${selected}${focused}${stateClasses}" role="option" aria-selected="${
+  return `<div class="file-tile${selected}${focused}${stateClasses}" role="option" ${entryPositionAttributes(index, total)} aria-selected="${
     isSelected ? "true" : "false"
   }" aria-label="${escapeHtml(accessibleName)}" id="${entryDomId(paneName, entry.path)}" data-entry-path="${escapeHtml(
     entry.path
@@ -6393,7 +6511,7 @@ function fileRenderLimits(viewMode) {
 function renderEntriesMarkup(entries, paneName, tab, renderer, start = 0, end = entries.length) {
   return entries
     .slice(start, end)
-    .map((entry) => renderer(entry, paneName, tab))
+    .map((entry, offset) => renderer(entry, paneName, tab, start + offset, entries.length))
     .join("");
 }
 
@@ -6537,7 +6655,7 @@ function renderVirtualFileWindow(paneName, force = false) {
   for (let index = start; index < end; index += 1) {
     let node = state.nodes.get(index);
     if (!node) {
-      template.innerHTML = state.renderer(state.entries[index], paneName, state.tab);
+      template.innerHTML = state.renderer(state.entries[index], paneName, state.tab, index, state.entries.length);
       node = template.content.firstElementChild;
       state.nodes.set(index, node);
       if (state.tab.viewMode === "tiles") newImages.push(...node.querySelectorAll(".tile-thumb-image[data-thumb-src]"));
@@ -6548,6 +6666,7 @@ function renderVirtualFileWindow(paneName, force = false) {
   if (state.tab.viewMode === "tiles") {
     hydrateLazyThumbnailImages(paneName, list, newImages);
   }
+  syncPaneActiveDescendant(paneName);
 }
 
 function renderVirtualFileList(paneName, tab, entries, renderer, renderToken, list) {
@@ -6918,6 +7037,7 @@ function renderPane(paneName) {
               ? `<button type="button" data-action="new-folder" data-pane="${paneName}"><span class="lucide-icon icon-folder-plus" aria-hidden="true"></span>New folder</button>`
               : ""}
         </div>`;
+    syncPaneActiveDescendant(paneName);
     if (paneName === app.activePane) {
       updateSelectionReadout();
     }
@@ -6938,6 +7058,7 @@ function renderPane(paneName) {
   list.innerHTML =
     renderEntriesMarkup(entries, paneName, tab, renderer, 0, initialLimit) +
     (initialLimit < entries.length ? renderFileRenderProgress(initialLimit, entries.length) : "");
+  syncPaneActiveDescendant(paneName);
   hydrateLazyThumbnails(paneName);
   if (initialLimit < entries.length) {
     requestAnimationFrame(() =>
@@ -8976,11 +9097,13 @@ function emptyFileClipboard() {
   return { mode: null, paths: [], sourcePane: null, sourcePath: null, capturedAt: null };
 }
 
+let windowsClipboardWrite = Promise.resolve();
 async function publishWindowsFileClipboard(mode, paths) {
-  return request("/api/clipboard/files", {
+  windowsClipboardWrite = windowsClipboardWrite.catch(() => {}).then(() => request("/api/clipboard/files", {
     method: "POST",
     body: JSON.stringify({ mode, paths })
-  });
+  }));
+  return windowsClipboardWrite;
 }
 
 async function readWindowsFileClipboard() {
@@ -8995,12 +9118,13 @@ async function readWindowsFileClipboard() {
     sourcePane: null,
     sourcePath: null,
     capturedAt: new Date().toISOString(),
+    sequence: result.sequence,
     source: "windows"
   };
 }
 
-async function clearWindowsFileClipboard() {
-  return request("/api/clipboard/files/clear", { method: "POST" });
+async function clearWindowsFileClipboard(expectedSequence) {
+  return request("/api/clipboard/files/clear", { method: "POST", body: JSON.stringify({ expectedSequence }) });
 }
 
 async function setFileClipboard(mode, paneName) {
@@ -9017,13 +9141,15 @@ async function setFileClipboard(mode, paneName) {
     sourcePath: tabOf(paneName).path,
     capturedAt: new Date().toISOString()
   };
+  const clipboard = app.fileClipboard;
   renderAll();
   updateClipboardReadout();
   setStatus(clipboardSummaryText());
   showToast(`${clipboardModeLabel(mode)} ${itemWord(paths.length, "item")}`);
   try {
-    await publishWindowsFileClipboard(clipboardMode, paths);
-    setStatus(`${clipboardSummaryText()} / Windows clipboard`);
+    const published = await publishWindowsFileClipboard(clipboardMode, paths);
+    clipboard.sequence = published.sequence;
+    if (app.fileClipboard === clipboard) setStatus(`${clipboardSummaryText()} / Windows clipboard`);
   } catch (error) {
     console.warn("Windows file clipboard sync failed", error);
     setStatus(`${clipboardSummaryText()} / Windows clipboard unavailable`);
@@ -9058,15 +9184,18 @@ function clipboardHasSourceInTarget(paths, targetDir) {
 }
 
 async function pasteFileClipboard(paneName) {
-  let clipboard = app.fileClipboard;
-  if (!clipboard.paths.length) {
-    try {
-      clipboard = (await readWindowsFileClipboard()) || clipboard;
-    } catch (error) {
-      console.warn("Windows file clipboard read failed", error);
-      showToast("Clipboard is empty");
-      return;
+  const previousClipboard = app.fileClipboard;
+  let clipboard = previousClipboard;
+  try {
+    await windowsClipboardWrite.catch(() => {});
+    clipboard = (await readWindowsFileClipboard()) || emptyFileClipboard();
+    if (app.fileClipboard === previousClipboard) {
+      app.fileClipboard = clipboard;
+      renderAll();
+      updateClipboardReadout();
     }
+  } catch (error) {
+    console.warn("Windows file clipboard read failed; using app clipboard", error);
   }
   if (!clipboard.paths.length) {
     return showToast("Clipboard is empty");
@@ -9110,9 +9239,9 @@ async function pasteFileClipboard(paneName) {
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   if (clipboard.mode === "move") {
-    app.fileClipboard = emptyFileClipboard();
+    if (app.fileClipboard === clipboard) app.fileClipboard = emptyFileClipboard();
     try {
-      await clearWindowsFileClipboard();
+      if (Number.isInteger(clipboard.sequence)) await clearWindowsFileClipboard(clipboard.sequence);
     } catch (error) {
       console.warn("Windows file clipboard clear failed", error);
     }
@@ -10159,6 +10288,40 @@ function updatePaneSelectionDom(paneName) {
     element.classList.toggle("focused", focused);
     element.setAttribute("aria-selected", selected ? "true" : "false");
   });
+  syncPaneActiveDescendant(paneName);
+}
+
+function syncPaneActiveDescendant(paneName) {
+  const list = document.querySelector(`[data-list="${paneName}"]`);
+  if (!list) return;
+  list.querySelector("[data-virtual-focus-proxy]")?.remove();
+  const tab = tabOf(paneName);
+  const entries = visibleEntries(paneName);
+  const index = tab.focusedPath ? visibleIndex(entries, tab.focusedPath) : -1;
+  if (index < 0) {
+    list.removeAttribute("aria-activedescendant");
+    return;
+  }
+  const entry = entries[index];
+  const id = entryDomId(paneName, entry.path);
+  if (!document.getElementById(id) && app.virtualLists[paneName]) {
+    // Retain one accessible active option when pointer scrolling recycles its
+    // visual row. It is replaced by the real row when it returns to the window.
+    const proxy = document.createElement("div");
+    proxy.className = "sr-only";
+    proxy.style.top = "0";
+    proxy.style.left = "0";
+    proxy.dataset.virtualFocusProxy = "true";
+    proxy.id = id;
+    proxy.setAttribute("role", "option");
+    proxy.setAttribute("aria-label", entryAccessibleName(entry));
+    proxy.setAttribute("aria-selected", String(tab.selected.has(entry.path)));
+    proxy.setAttribute("aria-posinset", String(index + 1));
+    proxy.setAttribute("aria-setsize", String(entries.length));
+    list.append(proxy);
+  }
+  if (document.getElementById(id)) list.setAttribute("aria-activedescendant", id);
+  else list.removeAttribute("aria-activedescendant");
 }
 
 function commitSelectionChange(paneName, options = {}) {
@@ -13024,12 +13187,17 @@ function appendModelMesh(lifecycle, geometry, options = {}) {
   if (!geometry.getAttribute("normal")) {
     geometry.computeVertexNormals();
   }
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  if (!geometry.boundingSphere) geometry.computeBoundingSphere();
   const mesh = new THREE.Mesh(geometry, modelMaterial(options.color));
   mesh.name = options.name || "Model";
   lifecycle.modelRoot.add(mesh);
-  const edgesGeometry = new THREE.EdgesGeometry(geometry, 28);
+  const triangles = geometry.index ? Math.floor(geometry.index.count / 3) : Math.floor(geometry.getAttribute("position").count / 3);
+  const edgesGeometry = options.edgePositions
+    ? new THREE.BufferGeometry().setAttribute("position", new THREE.BufferAttribute(options.edgePositions, 3))
+    : options.edgesPrepared || triangles > 50_000 || lifecycle.triangleCount + triangles > 100_000
+      ? null : new THREE.EdgesGeometry(geometry, 28);
+  if (edgesGeometry) {
   const edges = new THREE.LineSegments(
     edgesGeometry,
     new THREE.LineBasicMaterial({ color: 0x18312b, transparent: true, opacity: 0.62 })
@@ -13037,6 +13205,7 @@ function appendModelMesh(lifecycle, geometry, options = {}) {
   edges.name = `${mesh.name} edges`;
   edges.userData.modelEdges = true;
   lifecycle.modelRoot.add(edges);
+  }
   lifecycle.meshCount += 1;
   lifecycle.triangleCount += geometry.index
     ? Math.floor(geometry.index.count / 3)
@@ -13115,8 +13284,30 @@ async function loadStlModel(lifecycle, preview) {
   if (lifecycle.disposed) {
     throw new DOMException("Model preview canceled", "AbortError");
   }
-  const geometry = new STLLoader().parse(buffer);
-  appendModelMesh(lifecycle, geometry, { name: preview.name, color: [0.47, 0.72, 0.66] });
+  lifecycle.status.textContent = "Preparing STL geometry...";
+  const data = await new Promise((resolve, reject) => {
+    const worker = new Worker("/generated/model-worker.js");
+    lifecycle.worker = worker;
+    const finish = () => {
+      clearTimeout(lifecycle.workerTimer);
+      lifecycle.controller.signal.removeEventListener("abort", cancel);
+      worker.terminate();
+      if (lifecycle.worker === worker) lifecycle.worker = null;
+    };
+    const cancel = () => { finish(); reject(new DOMException("Model preview canceled", "AbortError")); };
+    lifecycle.controller.signal.addEventListener("abort", cancel, { once: true });
+    lifecycle.workerTimer = setTimeout(() => { finish(); reject(new Error("STL preview timed out while preparing geometry.")); }, 45_000);
+    worker.onmessage = ({ data }) => { finish(); data.error ? reject(new Error(data.error)) : resolve(data); };
+    worker.onerror = (event) => { finish(); reject(new Error(event.message || "STL parser failed")); };
+    worker.postMessage({ buffer }, [buffer]);
+  });
+  if (lifecycle.disposed) throw new DOMException("Model preview canceled", "AbortError");
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(data.positions, 3));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(data.normals, 3));
+  geometry.boundingBox = new THREE.Box3(new THREE.Vector3(...data.box.min), new THREE.Vector3(...data.box.max));
+  geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(...data.sphere.center), data.sphere.radius);
+  appendModelMesh(lifecycle, geometry, { name: preview.name, color: [0.47, 0.72, 0.66], edgesPrepared: true, edgePositions: data.edges });
 }
 
 function renderModelViewport(lifecycle) {
@@ -13190,6 +13381,11 @@ function finalizeModelViewport(lifecycle, preview) {
   lifecycle.container.dataset.triangleCount = String(lifecycle.triangleCount);
   lifecycle.status.textContent = summary;
   lifecycle.progress?.remove();
+  const edgesButton = lifecycle.container.querySelector('[data-model-action="edges"]');
+  if (edgesButton && !lifecycle.modelRoot.children.some(object => object.userData.modelEdges)) {
+    edgesButton.disabled = true;
+    edgesButton.title = "Edge outlines are available for smaller models";
+  }
 }
 
 async function mountModelViewport(container, preview, scope) {
@@ -13807,22 +14003,34 @@ function applyTextEditorPreview(paneName, preview, message = "") {
   updateTextEditorSummary(message);
 }
 
-function textEditorSaveError(error) {
+function textEditorSaveError(error, editor = app.textEditor) {
+  if (app.textEditor !== editor || !editor) return;
   const conflict = /changed on disk/i.test(error?.message || "");
   setTextEditorConflictAction(conflict);
   updateTextEditorSummary(error.message);
   showToast(error.message);
 }
 
-function closeTextEditor() {
+function closeTextEditor({ prompt = true } = {}) {
   const dialog = document.getElementById("text-editor-dialog");
   if (!dialog?.open) {
     return true;
   }
-  if (textEditorIsDirty() && !confirm("Discard unsaved edits and close the editor?")) {
+  if (textEditorIsDirty() && (!prompt || !confirm("Discard unsaved edits and close the editor?"))) {
     showToast("Editor kept open");
     return false;
   }
+  app.textEditorLoadToken += 1;
+  app.textEditor = null;
+  setTextEditorConflictAction(false);
+  dialog.close();
+  return true;
+}
+
+function requestCloseAppDialog(dialog, { prompt = true } = {}) {
+  if (!dialog?.open) return true;
+  if (dialog.id === "text-editor-dialog") return closeTextEditor({ prompt });
+  if (dialog.id === "preferences-dialog") return requestClosePreferencesDialog({ prompt });
   dialog.close();
   return true;
 }
@@ -13858,7 +14066,10 @@ async function openTextEditor(paneName = app.activePane, itemPath = null) {
   if (isZipVirtualPath(targetPath)) {
     return showToast("Extract the ZIP to edit files inside it");
   }
+  if (document.getElementById("text-editor-dialog")?.open && !closeTextEditor()) return;
+  const token = ++app.textEditorLoadToken;
   const preview = await request(`/api/preview?path=${encodeURIComponent(targetPath)}`);
+  if (token !== app.textEditorLoadToken) return;
   if (preview.type !== "text") {
     return showToast("Select a small text file");
   }
@@ -13877,8 +14088,16 @@ async function reloadTextEditor() {
   if (textEditorIsDirty() && !confirm("Discard unsaved edits and reload the file from disk?")) {
     return showToast("Reload canceled");
   }
-  const paneName = app.textEditor.paneName || app.activePane;
-  const preview = await request(`/api/preview?path=${encodeURIComponent(app.textEditor.path)}`);
+  const editor = app.textEditor;
+  const content = textEditorContent();
+  const token = ++app.textEditorLoadToken;
+  const paneName = editor.paneName || app.activePane;
+  const preview = await request(`/api/preview?path=${encodeURIComponent(editor.path)}`);
+  if (token !== app.textEditorLoadToken || app.textEditor !== editor) return;
+  if (textEditorContent() !== content) {
+    updateTextEditorSummary("Reload canceled: you edited the file while it was loading");
+    return;
+  }
   if (preview.type !== "text") {
     return showToast("This file can no longer be edited as text");
   }
@@ -13891,25 +14110,33 @@ async function saveTextEditor(force = false) {
   if (!app.textEditor?.path) {
     return showToast("No text file loaded");
   }
+  const editor = app.textEditor;
+  if (editor.saving) return editor.saving;
+  const content = textEditorContent();
   updateTextEditorSummary("Saving...");
+  const save = async () => {
   const result = await request("/api/text/save", {
     method: "POST",
     body: JSON.stringify({
-      path: app.textEditor.path,
-      content: textEditorContent(),
-      expectedModified: app.textEditor.modified,
+      path: editor.path,
+      content,
+      expectedModified: editor.modified,
       force
     })
   });
-  app.textEditor.originalContent = textEditorContent();
-  app.textEditor.modified = result.modified;
-  app.textEditor.size = result.bytes;
-  setTextEditorConflictAction(false);
-  await refreshPane(app.textEditor.paneName || app.activePane);
+  editor.originalContent = content;
+  editor.modified = result.modified;
+  editor.size = result.bytes;
+  if (app.textEditor === editor) setTextEditorConflictAction(false);
+  await refreshPane(editor.paneName || app.activePane);
   await syncStateAndChrome();
   renderInspector();
-  updateTextEditorSummary("Saved");
+  if (app.textEditor === editor) updateTextEditorSummary(textEditorIsDirty() ? "Saved earlier edits; newer changes are unsaved" : "Saved");
   showToast("Text saved");
+  };
+  editor.saving = save();
+  try { return await editor.saving; }
+  finally { editor.saving = null; }
 }
 
 function selectEntry(paneName, entryPath, event = {}, options = {}) {
@@ -13938,7 +14165,16 @@ function selectEntry(paneName, entryPath, event = {}, options = {}) {
 
 function scheduleEntryPointerFocus(paneName) {
   clearTimeout(app.entryFocusTimer);
-  app.entryFocusTimer = setTimeout(() => focusPaneList(paneName), 650);
+  const tabId = tabOf(paneName)?.id;
+  const focusOwner = document.activeElement;
+  app.entryFocusTimer = setTimeout(() => {
+    app.entryFocusTimer = null;
+    // A later click, keyboard action or dialog owns focus now. This delayed
+    // gesture must not steal it back from a menu or an editor.
+    if (document.activeElement !== focusOwner || document.querySelector("dialog[open]") ||
+        app.activePane !== paneName || tabOf(paneName)?.id !== tabId) return;
+    focusPaneList(paneName);
+  }, 650);
 }
 
 function entryOpenRecently(paneName, entryPath) {
@@ -24861,8 +25097,9 @@ async function initializeTerminalBridge() {
 async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides = {}) {
   const bridge = desktopTerminalBridge();
   if (!bridge) return null;
-  if (app.terminals.sessions.has(tab.id)) return app.terminals.sessions.get(tab.id);
-  await terminalCapabilities();
+  const existing = app.terminals.sessions.get(tab.id);
+  if (existing) return existing.creation || existing;
+  const focusOwner = document.activeElement;
   const element = document.createElement("div");
   element.className = "terminal-session-surface";
   const session = {
@@ -24876,6 +25113,7 @@ async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides =
     requestedCwd: tab.path,
     busy: false,
     starting: true,
+    disposed: false,
     exited: false,
     error: "",
     element,
@@ -24883,9 +25121,20 @@ async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides =
   };
   app.terminals.sessions.set(tab.id, session);
   renderPaneTerminal(paneName);
-  const createPromise = bridge.create(terminalCreateRequest(tab, session, overrides));
+  const ownsSession = () => !session.disposed && app.terminals.sessions.get(tab.id) === session;
+  session.creation = (async () => {
+  let createPromise;
   try {
+    await app.terminals.closing.get(tab.id);
+    await terminalCapabilities();
+    if (!ownsSession()) return null;
+    createPromise = bridge.create(terminalCreateRequest(tab, session, overrides));
     const [loadedRenderer, metadata] = await Promise.all([loadTerminalRenderer(), createPromise]);
+    if (!ownsSession()) {
+      await bridge.dispose(metadata.sessionId).catch(() => false);
+      app.terminals.earlyEvents.delete(metadata.sessionId);
+      return null;
+    }
     session.view = loadedRenderer.createView({
       host: element,
       settings: terminalViewSettings(),
@@ -24900,11 +25149,13 @@ async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides =
       await bridge.syncDirectory(session.sessionId, session.requestedCwd);
     }
     renderPaneTerminal(paneName);
-    session.view.focus();
+    if (app.terminals.visible[paneName] && app.activePane === paneName && tabOf(paneName)?.id === tab.id &&
+        (document.activeElement === focusOwner || element.contains(document.activeElement))) session.view.focus();
     return session;
   } catch (error) {
-    const created = await createPromise.catch(() => null);
+    const created = await createPromise?.catch(() => null);
     if (created?.sessionId) await bridge.dispose(created.sessionId).catch(() => false);
+    if (!ownsSession()) return null;
     session.starting = false;
     session.exited = true;
     session.error = error.message;
@@ -24912,6 +25163,8 @@ async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides =
     renderPaneTerminal(paneName);
     throw error;
   }
+  })();
+  return session.creation;
 }
 
 async function ensureTerminalForPane(paneName) {
@@ -24959,13 +25212,20 @@ async function disposeTerminalForTab(tab, { confirmBusy = true } = {}) {
   const session = app.terminals.sessions.get(tab?.id);
   if (!session) return true;
   if (confirmBusy && session.busy && !window.confirm("This terminal is running a command. Close it and its child processes?")) return false;
+  session.disposed = true;
+  app.terminals.sessions.delete(tab.id);
+  if (session.creation) {
+    const closing = session.creation.catch(() => null).finally(() => {
+      if (app.terminals.closing.get(tab.id) === closing) app.terminals.closing.delete(tab.id);
+    });
+    app.terminals.closing.set(tab.id, closing);
+  }
   if (session.sessionId) {
     await desktopTerminalBridge()?.dispose(session.sessionId).catch(() => false);
     app.terminals.bySessionId.delete(session.sessionId);
   }
   session.view?.dispose();
   session.element?.remove();
-  app.terminals.sessions.delete(tab.id);
   return true;
 }
 
@@ -24982,10 +25242,7 @@ async function restartPaneTerminal(paneName = app.activePane, overrides = {}) {
   const tab = tabOf(paneName);
   let session = activeTerminalSession(paneName);
   if (!session || !session.sessionId) {
-    if (session) {
-      session.view?.dispose();
-      app.terminals.sessions.delete(tab.id);
-    }
+    if (session && !(await disposeTerminalForTab(tab))) return null;
     app.terminals.visible[paneName] = true;
     return createTerminalForTab(paneName, tab, overrides);
   }
@@ -24996,6 +25253,11 @@ async function restartPaneTerminal(paneName = app.activePane, overrides = {}) {
   renderPaneTerminal(paneName);
   try {
     const metadata = await bridge.restart(oldSessionId, terminalCreateRequest(tab, session, overrides));
+    if (session.disposed || app.terminals.sessions.get(tab.id) !== session) {
+      await bridge.dispose(metadata.sessionId).catch(() => false);
+      app.terminals.earlyEvents.delete(metadata.sessionId);
+      return null;
+    }
     app.terminals.bySessionId.delete(oldSessionId);
     Object.assign(session, metadata, { starting: false, exited: false, error: "", busy: false });
     app.terminals.bySessionId.set(session.sessionId, session);
@@ -26657,6 +26919,7 @@ function wireEvents() {
 
     const textEditorActionButton = event.target.closest("[data-text-editor-action]");
     if (textEditorActionButton) {
+      const editor = app.textEditor;
       try {
         const action = textEditorActionButton.dataset.textEditorAction;
         if (action === "reload") await reloadTextEditor();
@@ -26668,7 +26931,7 @@ function wireEvents() {
           });
         }
       } catch (error) {
-        textEditorSaveError(error);
+        textEditorSaveError(error, editor);
       }
       return;
     }
@@ -27555,7 +27818,7 @@ function wireEvents() {
         requestClosePreferencesDialog();
         return;
       }
-      document.getElementById(button.dataset.closeDialog).close();
+      requestCloseAppDialog(document.getElementById(button.dataset.closeDialog));
     });
   });
 
@@ -27585,6 +27848,8 @@ function wireEvents() {
       closeTextEditor();
     });
     textEditorDialog.addEventListener("close", () => {
+      if (textEditorDialog.open || !app.textEditor) return;
+      app.textEditorLoadToken += 1;
       app.textEditor = null;
       setTextEditorConflictAction(false);
     });
@@ -28090,10 +28355,11 @@ function wireEvents() {
 
   document.getElementById("text-editor-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const editor = app.textEditor;
     try {
       await saveTextEditor();
     } catch (error) {
-      textEditorSaveError(error);
+      textEditorSaveError(error, editor);
     }
   });
 

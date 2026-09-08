@@ -20,10 +20,10 @@ await fs.mkdir(outputDir, { recursive: true });
 
 const result = spawnSync(
   "go",
-  ["build", "-trimpath", "-ldflags", `-s -w -X main.version=${packageJson.version}`, "-o", candidateOutput, "."],
+  ["build", "-buildvcs=false", "-trimpath", "-ldflags", `-s -w -X main.version=${packageJson.version}`, "-o", candidateOutput, "."],
   {
     cwd: moduleDir,
-    env: { ...process.env, GOTOOLCHAIN: "go1.25.12" },
+    env: { ...process.env, CGO_ENABLED: "0", GOTOOLCHAIN: "go1.25.12" },
     encoding: "utf8",
     windowsHide: true
   }

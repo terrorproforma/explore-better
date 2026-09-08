@@ -79,7 +79,7 @@ async function prepareFixture() {
 }
 
 function paneRow(page, name) {
-  return page.locator('.pane[data-pane="left"] [data-entry-path]').filter({ hasText: name }).first();
+  return page.locator(`.pane[data-pane="left"] [data-entry-path=${JSON.stringify(path.join(fixture, name))}]`);
 }
 
 async function selectRow(page, name, modifiers = []) {
@@ -382,7 +382,7 @@ async function main() {
     await selectRow(page, path.basename(textFile));
     await clickDockAction(page, "editText");
     await page.waitForSelector("#text-editor-dialog[open]", { timeout: 10000 });
-    await page.waitForTimeout(20);
+    await page.waitForFunction(expected => document.getElementById("text-editor-path")?.value === expected && document.getElementById("text-editor-content")?.value === "original editor content\n", textFile);
     const diskVersion = "external disk version\n";
     await fs.writeFile(textFile, diskVersion, "utf8");
     await editor.fill("editor version after conflict\n");

@@ -171,6 +171,10 @@ async function main() {
         return visible ? (dialog ? { response, dialog } : null) : (!dialog ? { response, dialog: null } : null);
       }, 15_000, 100);
 
+    for (const pane of ["right", "left"]) {
+      const scoped = await callTool("show_in_explore_better", { path: harness.fixture, pane, mode: "replace" });
+      assert(!scoped.result?.isError, `Could not establish the authorized ${pane} test pane: ${JSON.stringify(scoped.result)}`);
+    }
     const initialContext = await getContext();
     assert((initialContext.result?.structuredContent?.data?.selection || []).length === 0, "MCP UI matrix did not start with an empty selection.");
     for (const view of requiresSelection) {

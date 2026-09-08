@@ -7,6 +7,17 @@ const artifacts = path.join(root, "artifacts");
 const reportPath = path.join(artifacts, "terminal-verification-latest.json");
 const markdownPath = path.join(artifacts, "terminal-verification-latest.md");
 const electron = path.join(root, "node_modules", "electron", "dist", process.platform === "win32" ? "electron.exe" : "electron");
+await fs.mkdir(artifacts, { recursive: true });
+const runRoot = await fs.mkdtemp(path.join(artifacts, "terminal-native-"));
+const fixture = path.join(runRoot, "Workspace");
+const appData = path.join(runRoot, "appdata");
+const firstDirectory = path.join(fixture, "First Folder");
+const latestDirectory = path.join(fixture, "100% complete α");
+await Promise.all([fs.mkdir(firstDirectory, { recursive: true }), fs.mkdir(latestDirectory, { recursive: true }), fs.mkdir(appData, { recursive: true })]);
+await fs.writeFile(path.join(fixture, "example.txt"), "terminal regression fixture\n");
+const testEnvironment = { ...process.env, LOCALAPPDATA: appData, APPDATA: appData,
+  EXPLORE_BETTER_USER_DATA_DIR: path.join(appData, "Electron"), EXPLORE_BETTER_WORKSPACE_ROOT: fixture,
+  EXPLORE_BETTER_TERMINAL_SMOKE_FIRST_CWD: firstDirectory, EXPLORE_BETTER_TERMINAL_SMOKE_LATEST_CWD: latestDirectory };
 
 function stopTree(pid) {
   if (!pid) return;
@@ -18,7 +29,7 @@ function run(label, command, args, timeoutMs) {
   return new Promise((resolve, reject) => {
     console.log(`\n[terminal] ${label}`);
     const startedAt = Date.now();
-    const child = spawn(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(command, args, { cwd: root, env: testEnvironment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {

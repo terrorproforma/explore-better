@@ -61,6 +61,12 @@ const modelResult = await build({
 });
 const modelOutput = modelResult.outputFiles.find((file) => file.path.endsWith(".js")) || modelResult.outputFiles[0];
 const modelChanged = await writeIfChanged(modelOutputPath, modelOutput.contents);
+const workerResult = await build({
+  entryPoints: [path.join(root, "public", "model-worker.js")],
+  bundle: true, format: "iife", platform: "browser", target: ["chrome136"],
+  minify: true, sourcemap: false, legalComments: "none", write: false
+});
+await writeIfChanged(path.join(outputDir, "model-worker.js"), workerResult.outputFiles[0].contents);
 console.log(`Explore Better app runtime ${changed ? "built" : "unchanged"}.`);
 console.log(`Explore Better 3D renderer ${modelChanged ? "built" : "unchanged"}.`);
 console.log(`Explore Better local CAD runtime ${copiedOcctAssets ? `updated (${copiedOcctAssets} assets)` : "unchanged"}.`);

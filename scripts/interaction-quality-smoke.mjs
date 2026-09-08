@@ -128,6 +128,14 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-list="left"] [data-entry-path]')?.dataset.entryPath.endsWith("Document 350.txt"));
   check("sort-updates-recycled-rows", (await list.locator('[data-entry-path]').first().getAttribute('data-entry-path')).endsWith("Document 350.txt"));
 
+  // File clicks defer list focus for double-click navigation. A newer menu
+  // interaction must keep focus after that timer's deadline, including Escape.
+  await list.locator('[data-entry-path]').first().click();
+  await page.locator("#dock-overflow-toggle").click();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(750);
+  check("delayed-row-focus-does-not-steal-menu-focus", await page.locator('#dock-overflow-toggle').evaluate(node => document.activeElement === node));
+
   await page.locator("#dock-overflow-toggle").click();
   const search = page.getByRole("searchbox", { name: "Find a shelf action" });
   check("overflow-focuses-search", await search.evaluate(node => document.activeElement === node));
@@ -149,17 +157,13 @@ try {
     toggleHidden: document.getElementById('dock-overflow-toggle').hidden,
     toggleWidth: document.getElementById('dock-overflow-toggle').getBoundingClientRect().width
   }));
-  const focusEvidence = {};
   await page.locator('[data-close-dialog="preferences-dialog"]').click();
-  focusEvidence.closedDialog = await focusState();
   await page.locator("#dock-overflow-toggle").click();
-  focusEvidence.openedMenu = await focusState();
   await page.keyboard.press("Escape");
-  focusEvidence.escaped = await focusState();
   await page.setViewportSize({ width: 1120, height: 960 });
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  focusEvidence.resized = await focusState();
-  check("overflow-escape-restores-focus", await page.locator('#dock-overflow-toggle').evaluate(node => document.activeElement === node), JSON.stringify(focusEvidence));
+  const restoredFocus = await focusState();
+  check("overflow-escape-restores-focus", restoredFocus.id === 'dock-overflow-toggle', JSON.stringify(restoredFocus));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#topbar-more-toggle').click();
   const topbarAction = await page.locator('#topbar-more-menu [data-topbar-action]').first().getAttribute('data-topbar-action');

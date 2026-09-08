@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { pathSnapshot, validSnapshot, decodeEditableText, encodeEditableText, assertSafeDestination, physicalPath, insidePath, durableWrite, replaceFileTransaction, sameFileIdentity } from "./filesystem-integrity.mjs";
 
 const require = createRequire(import.meta.url);
 const yauzl = require("yauzl");
@@ -1010,6 +1011,11 @@ function appendOperationEvent(operation, event) {
   return true;
 }
 
+function sanitizeOperationPolicy(value) {
+  if (!value || !/^[a-f0-9]{64}$/.test(String(value.signature || "")) || !Array.isArray(value.paths)) return null;
+  return { signature: value.signature, planningTool: String(value.planningTool || "").slice(0, 120), paths: [...new Set(value.paths.filter(item => typeof item === "string" && item.length > 0 && item.length <= 32768))].slice(0, 1000) };
+}
+
 function sanitizeStoredOperation(operation) {
   if (!operation || typeof operation !== "object" || Array.isArray(operation)) {
     return null;
@@ -1053,6 +1059,7 @@ function sanitizeStoredOperation(operation) {
     relatedOperationId: sanitizeReferenceId(operation.relatedOperationId),
     mcpProfileId: sanitizeReferenceId(operation.mcpProfileId),
     mcpSessionId: sanitizeReferenceId(operation.mcpSessionId),
+    mcpPolicy: sanitizeOperationPolicy(operation.mcpPolicy),
     pausedAt: sanitizeOperationTimestamp(operation.pausedAt, null),
     resumedAt: sanitizeOperationTimestamp(operation.resumedAt, null),
     events: (Array.isArray(operation.events) ? operation.events : []).map(sanitizeOperationEvent).filter(Boolean).slice(-64)
@@ -1655,7 +1662,7 @@ async function writeState(state) {
     appDataRoot,
     `state.json.${process.pid}.${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}.tmp`
   );
-  await fs.writeFile(tempFile, text, "utf8");
+  await durableWrite(tempFile, Buffer.from(text, "utf8"));
   if (testStateWriteDelayMs) {
     await new Promise((resolve) => setTimeout(resolve, testStateWriteDelayMs));
   }
@@ -2714,7 +2721,8 @@ function retryBodyForOperation(type, body = {}) {
     const committedDest = retryString(source.dest);
     const targetDir = retryString(source.targetDir);
     return pendingSource && committedDest && targetDir
-      ? { source: pendingSource, dest: committedDest, targetDir, paths }
+      ? { source: pendingSource, dest: committedDest, targetDir, paths,
+          ...(validSnapshot(source.moveSnapshot?.source) && validSnapshot(source.moveSnapshot?.destination) ? { moveSnapshot: source.moveSnapshot } : {}) }
       : null;
   }
   if (type === "delete" || type === "recycle" || type === "trash" || type === "trash-delete") {
@@ -2992,6 +3000,7 @@ async function enqueueOperation(type, label, runner, options = {}) {
     relatedOperationId: options.relatedOperationId ? String(options.relatedOperationId).slice(0, 120) : options.retryOf ? String(options.retryOf).slice(0, 120) : null,
     mcpProfileId: options.mcpProfileId ? String(options.mcpProfileId).slice(0, 120) : null,
     mcpSessionId: options.mcpSessionId ? String(options.mcpSessionId).slice(0, 120) : null,
+    mcpPolicy: sanitizeOperationPolicy(options.mcpPolicy),
     events: []
   };
 
@@ -3161,54 +3170,16 @@ async function writeTextTransaction(body, hooks = {}) {
     throw error;
   }
 
-  const content = String(body.content ?? "").slice(0, 1_000_000);
-  const transactionId = crypto.randomUUID();
-  const staging = path.join(parent, `.explore-better-staging-${transactionId}-${path.basename(target)}`);
-  const backup = current
-    ? path.join(parent, `.explore-better-backup-${transactionId}-${path.basename(target)}`)
-    : null;
-  await hooks.updateProgress?.({ unit: "bytes", total: Buffer.byteLength(content), completed: 0, phase: "Staging", currentPath: target });
-
-  let originalMoved = false;
-  try {
-    const handle = await fs.open(staging, "wx", 0o600);
-    try {
-      await handle.writeFile(content, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    hooks.throwIfCanceled?.();
-    if (backup) {
-      await fs.rename(target, backup);
-      originalMoved = true;
-      await hooks.updateRecovery?.({
-        transaction: { phase: "backup-created", stagingPath: staging, destinationPath: target, backupPath: backup },
-        undo: { type: "text-write-restore", path: target, backup }
-      });
-    }
-    await fs.rename(staging, target);
-    const stats = await fs.stat(target);
-    await hooks.updateProgress?.({ unit: "bytes", total: stats.size, completed: stats.size, phase: "Committed", currentPath: target });
-    return {
-      result: {
-        path: target,
-        bytes: stats.size,
-        modified: stats.mtimeMs,
-        transaction: { phase: "complete", stagingPath: null, destinationPath: target, backupPath: backup }
-      },
-      undo: backup
-        ? { type: "text-write-restore", path: target, backup }
-        : { type: "trash-created", items: [{ path: target }] }
-    };
-  } catch (error) {
-    await fs.rm(staging, { force: true }).catch(() => {});
-    if (originalMoved && backup && (await pathExists(backup))) {
-      await fs.rm(target, { recursive: true, force: true }).catch(() => {});
-      await fs.rename(backup, target).catch(() => {});
-    }
-    throw error;
-  }
+  const encoding = current ? await editableTextSnapshot(target) : { encoding: "utf8", bom: false };
+  const bytes = encodeEditableText(String(body.content ?? ""), encoding);
+  if (bytes.length > 1_000_000) throw new Error("Text editor limit is 1000000 bytes.");
+  await hooks.updateProgress?.({ unit: "bytes", total: bytes.length, completed: 0, phase: "Staging", currentPath: target });
+  const transaction = await replaceFileTransaction(target, (staging) => durableWrite(staging, bytes), {
+    hooks, expectedModified: current && !body.force ? current.mtimeMs : undefined, failCommit: testFailStagingRename, backupRoot: trashRoot
+  });
+  const stats = await fs.stat(target);
+  await hooks.updateProgress?.({ unit: "bytes", total: stats.size, completed: stats.size, phase: "Committed", currentPath: target });
+  return { result: { ...transaction.result, bytes: stats.size, modified: stats.mtimeMs }, undo: transaction.undo };
 }
 
 async function enqueueRetryableOperation(type, body, runner, options = {}) {
@@ -3258,15 +3229,22 @@ async function runRetryableOperation(type, body, options = {}) {
         currentPath: pendingSource
       });
       if (await pathExists(pendingSource)) {
-        await removeCommittedMoveSource(pendingSource, committedDest);
+        await removeCommittedMoveSource(pendingSource, committedDest, { hooks, moveSnapshot: body.moveSnapshot });
+      } else if (!validSnapshot(body.moveSnapshot?.destination) || (await pathSnapshot(committedDest, { signal: hooks.signal })).stateDigest !== body.moveSnapshot.destination.stateDigest) {
+        throw new Error("The committed destination changed or lacks a verified snapshot; the move was not resumed.");
       }
+      await updateLabelsForTransfers([{ source: pendingSource, dest: committedDest }], "move");
       if (!remainingPaths.length) {
         return {
           result: { sourceRemoved: pendingSource, destinationCommitted: committedDest, moved: [committedDest] },
           undo: { type: "move-back", items: [{ from: committedDest, to: pendingSource }] }
         };
       }
-      return movePaths(remainingPaths, body.targetDir, hooks);
+      const remaining = await movePaths(remainingPaths, body.targetDir, hooks);
+      return {
+        result: { ...remaining.result, sourceRemoved: pendingSource, destinationCommitted: committedDest, moved: [committedDest, ...(remaining.result.moved || [])] },
+        undo: { type: "move-back", items: [{ from: committedDest, to: pendingSource }, ...(remaining.undo?.items || [])] }
+      };
     }, options);
   }
   if (type === "delete") {
@@ -3294,7 +3272,7 @@ async function runRetryableOperation(type, body, options = {}) {
     return enqueueRetryableOperation(type, body, (hooks) => syncCompareItems(body, hooks), options);
   }
   if (type === "archive-create") {
-    return enqueueRetryableOperation(type, body, () => createZipArchive(body), options);
+    return enqueueRetryableOperation(type, body, (hooks) => createZipArchive(body, hooks), options);
   }
   if (type === "archive-extract") {
     return enqueueRetryableOperation(type, body, () => extractZipArchive(body), options);
@@ -3387,7 +3365,7 @@ async function runRetryableOperation(type, body, options = {}) {
     }, options);
   }
   if (type === "bulk-rename") {
-    return enqueueRetryableOperation(type, body, () => applyBulkRename(body), options);
+    return enqueueRetryableOperation(type, body, (hooks) => applyBulkRename(body, hooks), options);
   }
   throw new Error("This operation cannot be retried.");
 }
@@ -3690,14 +3668,14 @@ $ErrorActionPreference = "Stop"
 $runDir = Split-Path -Parent $PayloadPath
 $manifestPath = Join-Path -Path $runDir -ChildPath "manifest.json"
 if (Test-Path -LiteralPath $manifestPath) {
-  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
   $expectedHash = ([string]$manifest.payloadSha256).ToLowerInvariant()
   $actualHash = (Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($expectedHash -and $actualHash -ne $expectedHash) {
     throw "Payload hash mismatch. The elevated retry payload may have changed after preparation."
   }
 }
-$payload = Get-Content -LiteralPath $PayloadPath -Raw | ConvertFrom-Json
+$payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
 function Get-UniquePath {
   param(
@@ -4900,7 +4878,7 @@ async function readEditableTimestamps(itemPath) {
 async function setWindowsTimestampsForItems(items) {
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 function Convert-Time($Value) {
   if ([string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
   return [DateTimeOffset]::Parse(
@@ -9759,6 +9737,7 @@ function siblingStagingPath(target) {
 async function copyToStagingAndCommit(source, dest, options = {}) {
   const src = resolveUserPath(source);
   const target = resolveUserPath(dest);
+  await assertSafeDestination(src, target);
   const staging = siblingStagingPath(target);
   if (await pathExists(target)) {
     throw existingTargetError(target);
@@ -9791,10 +9770,21 @@ async function copyToStagingAndCommit(source, dest, options = {}) {
   }
 }
 
-async function removeCommittedMoveSource(source, dest) {
+async function removeCommittedMoveSource(source, dest, options = {}) {
   const src = resolveUserPath(source);
   const target = resolveUserPath(dest);
+  const moveSnapshot = options.moveSnapshot;
   try {
+    if (!validSnapshot(moveSnapshot?.source) || !validSnapshot(moveSnapshot?.destination) || moveSnapshot.source.contentDigest !== moveSnapshot.destination.contentDigest) {
+      throw new Error("This move has no verified recovery snapshot. Keep both files and compare them before reconciling the move.");
+    }
+    const [currentSource, currentDestination] = await Promise.all([
+      pathSnapshot(src, { signal: options.hooks?.signal }),
+      pathSnapshot(target, { signal: options.hooks?.signal })
+    ]);
+    if (currentSource.stateDigest !== moveSnapshot.source.stateDigest || currentDestination.stateDigest !== moveSnapshot.destination.stateDigest) {
+      throw new Error("The source or destination changed after this move was copied. Both paths were preserved; compare them before reconciling the move.");
+    }
     if (testFailSourceRemoval) {
       const injected = new Error("Injected source removal failure.");
       injected.code = "EB_TEST_SOURCE_REMOVE";
@@ -9808,16 +9798,34 @@ async function removeCommittedMoveSource(source, dest) {
       destinationCommitted: true,
       source: src,
       dest: target,
+      moveSnapshot,
       transaction: {
         version: 1,
         phase: "source-removal-pending",
         source: src,
         destinationPath: target,
-        stagingPath: null
+        stagingPath: null,
+        moveSnapshot
       }
     };
     throw error;
   }
+}
+
+async function copyAcrossVolumesAndRemoveSource(source, dest, options = {}) {
+  const sourceSnapshot = await pathSnapshot(source, { signal: options.hooks?.signal });
+  const progressState = options.progressState || createCopyProgressState(await scanCopyFootprints([source], options.hooks || {}));
+  await copyToStagingAndCommit(source, dest, { ...options, progressState });
+  const destinationSnapshot = await pathSnapshot(dest, { signal: options.hooks?.signal });
+  const moveSnapshot = { version: 1, source: sourceSnapshot, destination: destinationSnapshot };
+  const remainingPaths = options.moveRecovery?.paths || [];
+  const completed = options.moveRecovery?.completed || [];
+  const retry = retryRequestForOperation("move-resume", { source, dest, targetDir: options.moveRecovery?.targetDir || path.dirname(dest), paths: remainingPaths, moveSnapshot });
+  await options.hooks?.updateRecovery?.({
+    transaction: { version: 1, phase: "source-removal-pending", source, destinationPath: dest, stagingPath: null, moveSnapshot },
+    recovery: { type: "move", sourceRemovalPending: true, destinationCommitted: true, pendingSource: source, committedDestination: dest, retry, canRetryRemaining: true, completed, remaining: [source, ...remainingPaths].map((item, index) => ({ path: item, index: index + completed.length })), remainingCount: remainingPaths.length + 1, completedCount: completed.length }
+  });
+  await removeCommittedMoveSource(source, dest, { ...options, moveSnapshot });
 }
 
 async function copyOne(source, targetDir, options = {}) {
@@ -9843,8 +9851,7 @@ async function moveOne(source, targetDir, options = {}) {
     if (error.code !== "EXDEV") {
       throw error;
     }
-    await copyToStagingAndCommit(src, dest, options);
-    await removeCommittedMoveSource(src, dest);
+    await copyAcrossVolumesAndRemoveSource(src, dest, options);
   }
   return dest;
 }
@@ -9867,8 +9874,7 @@ async function moveToExactOrUnique(source, requestedTarget, options = {}) {
     if (error.code !== "EXDEV") {
       throw error;
     }
-    await copyToStagingAndCommit(src, dest, options);
-    await removeCommittedMoveSource(src, dest);
+    await copyAcrossVolumesAndRemoveSource(src, dest, options);
   }
   return dest;
 }
@@ -9961,18 +9967,17 @@ async function movePaths(paths, targetDir, hooks = {}) {
   const resolvedTargetDir = resolveUserPath(targetDir);
   for (const source of resolvedSources) {
     const stats = await fs.lstat(source);
+    await assertSafeDestination(source, resolvedTargetDir);
+    await assertSafeDestination(source, resolvedTargetDir);
+    await assertSafeDestination(source, resolvedTargetDir);
     if (stats.isDirectory() && isInsidePath(resolvedTargetDir, source)) {
       throw new Error("A folder cannot be moved into itself or one of its descendants.");
     }
   }
   let activeIndex = 0;
   try {
-    await hooks.updateProgress?.({ unit: "items", total, completed: 0, phase: "Scanning" });
-    const progressState = createCopyProgressState(
-      await scanCopyFootprints(resolvedSources, hooks, (itemPath, index) => {
-        activeIndex = index;
-      })
-    );
+    await hooks.updateProgress?.({ unit: "items", total, completed: 0, phase: "Preparing" });
+    const progressState = null;
     await updateCopyProgress(hooks, progressState, { unit: "items", total, completed: 0, phase: "Preparing" });
     for (const [index, source] of paths.entries()) {
       activeIndex = index;
@@ -9986,7 +9991,7 @@ async function movePaths(paths, targetDir, hooks = {}) {
         currentPath: resolvedSource
       });
       await updateCopyProgress(hooks, progressState, progressFields());
-      const dest = await moveOne(resolvedSource, targetDir, { hooks, progressState, progressFields });
+      const dest = await moveOne(resolvedSource, targetDir, { hooks, progressState, progressFields, moveRecovery: { paths: resolvedSources.slice(index + 1), completed: moved, targetDir } });
       moved.push({ source: resolvedSource, dest });
       await updateCopyProgress(hooks, progressState, {
         unit: "items",
@@ -10043,7 +10048,8 @@ async function movePaths(paths, targetDir, hooks = {}) {
         source: transactionFailure.source,
         dest: transactionFailure.dest,
         targetDir,
-        paths: remainingPaths
+        paths: remainingPaths,
+        moveSnapshot: transactionFailure.moveSnapshot
       });
       details.destinationCommitted = transactionFailure.dest;
       details.sourceRemovalPending = transactionFailure.source;
@@ -10065,12 +10071,15 @@ async function movePaths(paths, targetDir, hooks = {}) {
   }
 }
 
-function assertSafePermanentDeletePath(itemPath) {
+async function assertSafePermanentDeletePath(itemPath) {
   const resolved = resolveUserPath(itemPath);
-  if (sameResolvedPath(resolved, path.parse(resolved).root)) {
+  const stat = await fs.lstat(resolved);
+  const physical = stat.isSymbolicLink() ? path.join(await physicalPath(path.dirname(resolved)), path.basename(resolved)) : await physicalPath(resolved);
+  const physicalAppData = await physicalPath(appDataRoot);
+  if (sameResolvedPath(physical, path.parse(physical).root)) {
     throw new Error("Deleting a drive or filesystem root is not allowed.");
   }
-  if (isInsidePath(resolved, appDataRoot) || isInsidePath(appDataRoot, resolved)) {
+  if (isInsidePath(physical, physicalAppData) || isInsidePath(physicalAppData, physical)) {
     throw new Error("Deleting Explore Better application state through the file operation API is not allowed.");
   }
 }
@@ -10080,7 +10089,7 @@ async function deletePaths(paths, hooks = {}) {
   const total = paths.length;
   const resolvedSources = paths.map((source) => resolveUserPath(source));
   for (const source of resolvedSources) {
-    assertSafePermanentDeletePath(source);
+    await assertSafePermanentDeletePath(source);
   }
   let activeIndex = 0;
   try {
@@ -10168,7 +10177,7 @@ async function recycleOnePath(itemPath) {
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName Microsoft.VisualBasic
-$payload = Get-Content -LiteralPath $PayloadPath -Raw | ConvertFrom-Json
+$payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $ui = [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs
 $recycle = [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
 if ($payload.isDirectory) {
@@ -10976,7 +10985,7 @@ async function createWindowsShortcuts(body) {
   const plan = await buildShortcutPlan(body.paths, body.targetDir || body.path, conflictMode);
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Shell = New-Object -ComObject WScript.Shell
 $Created = @()
 foreach ($Item in @($Payload.items)) {
@@ -11115,7 +11124,7 @@ async function createFilesystemLinks(body) {
   };
 }
 
-async function createZipArchive(body) {
+async function createZipArchive(body, hooks = {}) {
   const sources = (Array.isArray(body.paths) ? body.paths : [])
     .filter(Boolean)
     .map((item) => resolveUserPath(item));
@@ -11133,20 +11142,20 @@ async function createZipArchive(body) {
   const zipName = cleanZipFileName(body.name, sources);
   const requestedDest = path.join(targetDir, zipName);
   const dest = body.overwrite ? requestedDest : await uniquePath(targetDir, zipName);
-  if (body.overwrite && (await pathExists(dest))) {
-    await fs.rm(dest, { recursive: true, force: true });
-  }
+  for (const source of sources) await assertSafeDestination(source, dest);
 
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-$payload = Get-Content -LiteralPath $PayloadPath -Raw | ConvertFrom-Json
+$payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $paths = @($payload.sources)
 Compress-Archive -LiteralPath $paths -DestinationPath $payload.dest -Force
 `;
-  await runPowerShellPayload(script, { sources, dest });
+  const transaction = await replaceFileTransaction(dest, async (staging) => {
+    await runPowerShellPayload(script, { sources, dest: staging });
+  }, { hooks, overwrite: body.overwrite === true, suffix: ".partial.zip", failCommit: testFailStagingRename, backupRoot: trashRoot });
   return {
-    result: { archive: dest, sources },
-    undo: { type: "trash-created", items: [{ path: dest }] }
+    result: { ...transaction.result, archive: dest, sources },
+    undo: transaction.undo
   };
 }
 
@@ -11164,7 +11173,7 @@ async function extractZipArchive(body) {
 
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-$payload = Get-Content -LiteralPath $PayloadPath -Raw | ConvertFrom-Json
+$payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
 Expand-Archive -LiteralPath $payload.archive -DestinationPath $payload.dest -Force
 `;
   await runPowerShellPayload(script, { archive, dest });
@@ -11209,6 +11218,7 @@ function resolveRelativeUnderRoot(root, rel) {
 
 async function scanCompareTree(rootPath, options = {}) {
   const root = resolveUserPath(rootPath);
+  const guard = await createTraversalGuard(root, options);
   const recursive = options.recursive !== false;
   const includeHidden = Boolean(options.includeHidden);
   const maxEntries = Math.max(100, Math.min(Number(options.maxEntries || 20_000), 100_000));
@@ -11221,13 +11231,17 @@ async function scanCompareTree(rootPath, options = {}) {
     const current = stack.pop();
     let dirents;
     try {
+      if (!(await guard(current))) { skipped.push({ path: current, reason: "link-or-repeated-directory" }); continue; }
       dirents = await fs.readdir(current, { withFileTypes: true });
     } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) throw error;
       skipped.push({ path: current, reason: error.code || "unreadable" });
       continue;
     }
 
     for (const dirent of dirents) {
+      throwIfAborted(options.signal);
+      if (dirent.isSymbolicLink()) { skipped.push({ path: path.join(current, dirent.name), reason: "link" }); continue; }
       if (scanned >= maxEntries) {
         break;
       }
@@ -11243,7 +11257,7 @@ async function scanCompareTree(rootPath, options = {}) {
       const fullPath = path.join(current, dirent.name);
       const relative = normalizeRelativePath(path.relative(root, fullPath));
       try {
-        const entry = await statEntry(current, dirent);
+        const entry = await statEntry(current, dirent, new Map(), { signal: options.signal });
         entry.relative = relative;
         entries.set(compareKey(relative), entry);
         scanned += 1;
@@ -11251,6 +11265,7 @@ async function scanCompareTree(rootPath, options = {}) {
           stack.push(fullPath);
         }
       } catch (error) {
+        if (isAbortError(error) || options.signal?.aborted) throw error;
         skipped.push({ path: fullPath, reason: error.code || "unavailable" });
       }
     }
@@ -11280,7 +11295,9 @@ function comparePair(left, right, toleranceMs) {
   return "different";
 }
 
-async function compareDirectories(options) {
+async function compareDirectories(options, context = {}) {
+  options = { ...options, signal: context.signal || options.signal };
+  throwIfAborted(options.signal);
   const left = await scanCompareTree(options.leftPath, options);
   const right = await scanCompareTree(options.rightPath, options);
   const toleranceMs = Math.max(0, Number(options.toleranceMs || 2000));
@@ -11599,8 +11616,7 @@ function pathIdentity(itemPath) {
 function isInsidePath(candidatePath, parentPath) {
   const candidate = resolveUserPath(candidatePath);
   const parent = resolveUserPath(parentPath);
-  const relative = path.relative(parent, candidate);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return insidePath(candidate, parent);
 }
 
 function resolveTrashItemPath(value) {
@@ -11614,6 +11630,7 @@ function resolveTrashItemPath(value) {
 function originalPathLookupFromOperations(operations = []) {
   const lookup = new Map();
   for (const operation of operations) {
+    if (operation?.undo?.backup && operation?.undo?.path) lookup.set(pathIdentity(operation.undo.backup), operation.undo.path);
     const items = operation?.undo?.items || operation?.result?.items || [];
     for (const item of Array.isArray(items) ? items : []) {
       if (item?.from && item?.to) {
@@ -11760,7 +11777,7 @@ async function listWindowsRecycleBin(options = {}) {
   }
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Limit = [Math]::Max(1, [int]$Payload.limit)
 $Shell = New-Object -ComObject Shell.Application
 $Bin = $Shell.Namespace(10)
@@ -11866,7 +11883,7 @@ async function restoreWindowsRecycleBinItems(body = {}, hooks = {}) {
   await hooks.updateProgress?.({ unit: "items", total: paths.length, completed: 0, phase: dryRun ? "Checking" : "Restoring" });
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Shell = New-Object -ComObject Shell.Application
 $Bin = $Shell.Namespace(10)
 if (-not $Bin) {
@@ -12154,6 +12171,7 @@ async function buildTransferPlan(body) {
 
     try {
       stats = await fs.stat(source);
+      await assertSafeDestination(source, targetDir);
       if (stats.isDirectory() && isInsidePath(targetDir, source)) {
         status = "invalid";
         reason = "Target is inside the selected folder.";
@@ -12400,8 +12418,7 @@ async function moveExact(source, dest, options = {}) {
     if (error.code !== "EXDEV") {
       throw error;
     }
-    await copyToStagingAndCommit(src, target, options);
-    await removeCommittedMoveSource(src, target);
+    await copyAcrossVolumesAndRemoveSource(src, target, options);
   }
   return target;
 }
@@ -12431,7 +12448,7 @@ async function applyTransfer(body, hooks = {}) {
   let activeIndex = 0;
   try {
     await hooks.updateProgress?.({ unit: "items", total: ready.length, completed: 0, phase: "Scanning" });
-    const progressState = createCopyProgressState(
+    const progressState = plan.mode === "move" ? null : createCopyProgressState(
       await scanCopyFootprints(
         ready.map((item) => item.source),
         hooks,
@@ -12701,6 +12718,11 @@ async function buildBulkRenamePlan(body) {
     if (item.status !== "ready") {
       continue;
     }
+    if (items.some(parent => parent.isDirectory && parent.source !== item.source && isInsidePath(item.source, parent.source))) {
+      item.status = "invalid";
+      item.reason = "Rename a folder and its descendants in separate operations.";
+      continue;
+    }
     const targetKey = pathIdentity(item.dest);
     if ((targetCounts.get(targetKey) || 0) > 1) {
       item.status = "duplicate";
@@ -12727,7 +12749,7 @@ async function buildBulkRenamePlan(body) {
   };
 }
 
-async function applyBulkRename(body) {
+async function applyBulkRename(body, hooks = {}) {
   const plan = await buildBulkRenamePlan(body);
   const blockers = plan.items.filter((item) =>
     ["invalid", "duplicate", "collision", "missing"].includes(item.status)
@@ -12743,29 +12765,43 @@ async function applyBulkRename(body) {
     throw new Error("No selected items would be renamed.");
   }
 
+  const journal = [];
+  for (const item of ready) {
+    const stat = await fs.lstat(item.source);
+    journal.push({ ...item, temp: await uniqueTemporaryRenamePath(item.parent, item.index), identity: { dev: String(stat.dev), ino: String(stat.ino) }, phase: "pending" });
+  }
+  const recordJournal = async () => hooks.updateRecovery?.({
+    transaction: { version: 1, phase: "bulk-rename-staging", items: journal },
+    recovery: { type: "bulk-rename", retry: null, canRetryRemaining: false, partialCompletionUnverified: false, remainingCount: journal.length, completedCount: 0, reason: "Use Undo to restore original names from the durable rename journal." },
+    undo: { type: "bulk-rename-recover", items: journal }
+  });
+  await recordJournal();
   const staged = [];
   const applied = [];
   try {
-    for (const item of ready) {
-      const temp = await uniqueTemporaryRenamePath(item.parent, item.index);
-      await fs.rename(item.source, temp);
-      staged.push({ ...item, temp });
+    for (const item of journal) {
+      hooks.throwIfCanceled?.();
+      await fs.rename(item.source, item.temp);
+      item.phase = "staged";
+      staged.push(item);
+      await recordJournal();
+      await testOperationDelayAfterCheckpoint(hooks, "bulk-rename", staged.length);
     }
 
     for (const item of staged) {
+      hooks.throwIfCanceled?.();
       await fs.rename(item.temp, item.dest);
+      item.phase = "applied";
       applied.push({ source: item.source, dest: item.dest, originalName: item.originalName, newName: item.newName });
+      await recordJournal();
     }
   } catch (error) {
-    for (const item of [...applied].reverse()) {
-      if (await pathExists(item.dest)) {
-        await moveToExactOrUnique(item.dest, item.source);
-      }
-    }
-    for (const item of [...staged].reverse()) {
-      if (await pathExists(item.temp)) {
-        await moveToExactOrUnique(item.temp, item.source);
-      }
+    try {
+      await recoverBulkRenameJournal(journal);
+      await hooks.updateRecovery?.({ transaction: { phase: "rolled-back" }, undo: null });
+    } catch (rollbackError) {
+      await recordJournal();
+      error.message += ` Original-name recovery is available through Undo: ${rollbackError.message}`;
     }
     throw error;
   }
@@ -12778,6 +12814,20 @@ async function applyBulkRename(body) {
       items: applied.map((item) => ({ from: item.dest, to: item.source }))
     }
   };
+}
+
+async function recoverBulkRenameJournal(items) {
+  const moves = [];
+  for (const item of items || []) {
+    let current;
+    for (const candidate of new Set([item.temp, item.dest, item.source])) {
+      const stats = await fs.lstat(candidate).catch(error => error.code === "ENOENT" ? null : Promise.reject(error));
+      if (stats && sameFileIdentity(item.identity, stats)) { current = candidate; break; }
+    }
+    if (!current) throw new Error(`The renamed item changed or is missing: ${item.source}`);
+    if (!sameResolvedPath(current, item.source)) moves.push({ from: current, to: item.source });
+  }
+  return restoreBulkRenameItems(moves);
 }
 
 async function restoreBulkRenameItems(items) {
@@ -12999,6 +13049,25 @@ async function undoRecordedOperation(operation) {
 
   const undo = operation.undo;
   const restored = [];
+
+  if (undo.type === "bulk-rename-recover") {
+    const restored = await recoverBulkRenameJournal(undo.items);
+    operation.undo.appliedAt = new Date().toISOString();
+    operation.undo.result = { restored };
+    return { result: { undone: operation.id, restored }, undo: null };
+  }
+
+  if (undo.type === "replace-file-restore") {
+    const target = resolveUserPath(undo.path);
+    const backup = resolveUserPath(undo.backup);
+    if (!(await pathExists(backup))) throw new Error("The original file backup is no longer available.");
+    const current = await pathSnapshot(target);
+    if (current.contentDigest !== undo.committedContentDigest) throw new Error("The file changed after this operation. Both the current file and backup were preserved.");
+    const result = await replaceFileTransaction(target, (staging) => fs.copyFile(backup, staging, 1), { backupRoot: trashRoot });
+    operation.undo.appliedAt = new Date().toISOString();
+    operation.undo.result = { restored: target, replacedBackup: result.result.transaction.backupPath };
+    return { result: { undone: operation.id, restored: target }, undo: result.undo };
+  }
 
   if (undo.type === "trash-created") {
     const paths = undo.items.map((item) => item.path);
@@ -14112,13 +14181,17 @@ async function previewFile(targetPath) {
   }
 
   const buffer = await fs.readFile(file);
-  if (!textExtensions.has(ext) && hasBinaryBytes(buffer)) {
+  let decoded;
+  try {
+    decoded = decodeEditableText(buffer);
+  } catch (error) {
     return {
       type: "binary",
       name: path.basename(file),
       path: file,
       size: stats.size,
-      modified: stats.mtimeMs
+      modified: stats.mtimeMs,
+      reason: error.message
     };
   }
 
@@ -14129,7 +14202,7 @@ async function previewFile(targetPath) {
     size: stats.size,
     modified: stats.mtimeMs,
     extension: ext,
-    content: buffer.toString("utf8")
+    ...decoded
   };
 }
 
@@ -14144,24 +14217,22 @@ async function editableTextSnapshot(targetPath, maxBytes = 1_000_000) {
     throw new Error(`Text editor limit is ${byteLimit} bytes.`);
   }
   const buffer = await fs.readFile(file);
-  const ext = path.extname(file).toLowerCase();
-  if (!textExtensions.has(ext) && hasBinaryBytes(buffer)) {
-    throw new Error("Only text files can be edited here.");
-  }
+  const decoded = decodeEditableText(buffer);
   return {
     path: file,
     name: path.basename(file),
     size: stats.size,
     modified: stats.mtimeMs,
-    content: buffer.toString("utf8")
+    ...decoded
   };
 }
 
-async function saveTextFile(body) {
+async function saveTextFile(body, hooks = {}) {
   const snapshot = await editableTextSnapshot(body.path);
   const content = String(body.content ?? "");
   const maxBytes = Math.max(1024, Math.min(Number(body.maxBytes || 1_000_000), 2_000_000));
-  const nextBytes = Buffer.byteLength(content, "utf8");
+  const bytes = encodeEditableText(content, snapshot);
+  const nextBytes = bytes.length;
   if (nextBytes > maxBytes) {
     throw new Error(`Text editor limit is ${maxBytes} bytes.`);
   }
@@ -14169,29 +14240,27 @@ async function saveTextFile(body) {
   if (expectedModified && Math.abs(snapshot.modified - expectedModified) > 2 && !body.force) {
     throw new Error("File changed on disk. Reload before saving, or save again with force.");
   }
-  await fs.writeFile(snapshot.path, content, "utf8");
+  const transaction = await replaceFileTransaction(snapshot.path, (staging) => durableWrite(staging, bytes), {
+    hooks, expectedModified: body.force ? undefined : snapshot.modified, failCommit: testFailStagingRename, backupRoot: trashRoot
+  });
   const stats = await fs.stat(snapshot.path);
   const output = {
     result: {
+      ...transaction.result,
       path: snapshot.path,
       bytes: stats.size,
       previousBytes: snapshot.size,
       modified: stats.mtimeMs
     },
-    undo: {
-      type: "restore-text",
-      path: snapshot.path,
-      content: snapshot.content,
-      bytes: snapshot.size,
-      modified: snapshot.modified
-    }
+    undo: transaction.undo
   };
   output.result.cacheInvalidation = invalidateDirectoryListingCachesForOperation("edit-text", body, output);
   output.result.backgroundIndexInvalidation = await safelyInvalidateBackgroundIndexesForOperation("edit-text", body, output);
   return output;
 }
 
-async function hashFile(file, algorithm, maxHashBytes) {
+async function hashFile(file, algorithm, maxHashBytes, { signal } = {}) {
+  throwIfAborted(signal);
   const stats = await fs.stat(file);
   if (!stats.isFile()) {
     return null;
@@ -14204,23 +14273,32 @@ async function hashFile(file, algorithm, maxHashBytes) {
     };
   }
 
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash(algorithm);
-    const stream = createReadStream(file);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", () => {
-      resolve({
-        algorithm,
-        value: hash.digest("hex"),
-        skipped: false
-      });
-    });
-  });
+  const hash = crypto.createHash(algorithm);
+  for await (const chunk of createReadStream(file, { signal })) {
+    throwIfAborted(signal);
+    hash.update(chunk);
+  }
+  return { algorithm, value: hash.digest("hex"), skipped: false };
+}
+
+async function createTraversalGuard(root, { signal } = {}) {
+  throwIfAborted(signal);
+  const physicalRoot = await fs.realpath(root);
+  const visited = new Set();
+  return async (current) => {
+    throwIfAborted(signal);
+    if (!sameResolvedPath(root, current) && (await fs.lstat(current)).isSymbolicLink()) return false;
+    const physical = await fs.realpath(current);
+    const key = pathIdentity(physical);
+    if (!insidePath(physical, physicalRoot) || visited.has(key)) return false;
+    visited.add(key);
+    return true;
+  };
 }
 
 async function scanFolderProperties(rootPath, options = {}) {
   const root = resolveUserPath(rootPath);
+  const guard = await createTraversalGuard(root, options);
   const maxEntries = Math.max(1, Math.min(Number(options.maxEntries || 20_000), 100_000));
   const stack = [root];
   const skipped = [];
@@ -14238,21 +14316,25 @@ async function scanFolderProperties(rootPath, options = {}) {
     const current = stack.pop();
     let dirents;
     try {
+      if (!(await guard(current))) { skipped.push({ path: current, reason: "link-or-repeated-directory" }); continue; }
       dirents = await fs.readdir(current, { withFileTypes: true });
     } catch (error) {
       skipped.push({ path: current, reason: error.code || "unreadable" });
+      if (isAbortError(error) || options.signal?.aborted) throw error;
       continue;
     }
 
     for (const dirent of dirents) {
+      throwIfAborted(options.signal);
       if (scanned >= maxEntries) {
         truncated = true;
         break;
       }
       const fullPath = path.join(current, dirent.name);
       try {
-        const stats = await fs.stat(fullPath);
+        const stats = await fs.lstat(fullPath);
         scanned += 1;
+        if (stats.isSymbolicLink()) { skipped.push({ path: fullPath, reason: "link" }); continue; }
         if (stats.isDirectory()) {
           folders += 1;
           stack.push(fullPath);
@@ -14261,6 +14343,7 @@ async function scanFolderProperties(rootPath, options = {}) {
           bytes += stats.size;
         }
       } catch (error) {
+        if (isAbortError(error) || options.signal?.aborted) throw error;
         skipped.push({ path: fullPath, reason: error.code || "unavailable" });
       }
     }
@@ -14321,13 +14404,13 @@ async function propertiesForPath(targetPath, options = {}, index = 0) {
       ? options.hashAlgorithm
       : "sha256";
     const maxHashBytes = Math.max(1, Math.min(Number(options.maxHashBytes || 134_217_728), 1_073_741_824));
-    item.hash = await hashFile(itemPath, algorithm, maxHashBytes);
+    item.hash = await hashFile(itemPath, algorithm, maxHashBytes, options);
   }
 
   return item;
 }
 
-async function propertiesReport(body) {
+async function propertiesReport(body, context = {}) {
   const paths = Array.isArray(body.paths)
     ? body.paths.slice(0, 200)
     : body.path
@@ -14338,6 +14421,7 @@ async function propertiesReport(body) {
   }
 
   const options = {
+    signal: context.signal || body.signal,
     recursive: body.recursive !== false,
     hash: Boolean(body.hash),
     hashAlgorithm: String(body.hashAlgorithm || "sha256").toLowerCase(),
@@ -14348,9 +14432,11 @@ async function propertiesReport(body) {
   const skipped = [];
 
   for (let index = 0; index < paths.length; index += 1) {
+    throwIfAborted(options.signal);
     try {
       items.push(await propertiesForPath(paths[index], options, index));
     } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) throw error;
       skipped.push({
         index,
         path: resolveUserPath(paths[index]),
@@ -16068,7 +16154,9 @@ function checksumTextForReport(report) {
   return report.items.map((item) => `${item.hash} *${item.name}`).join("\n") + (report.items.length ? "\n" : "");
 }
 
-async function checksumReport(body) {
+async function checksumReport(body, context = {}) {
+  const signal = context.signal || body.signal;
+  throwIfAborted(signal);
   const paths = Array.isArray(body.paths)
     ? body.paths.slice(0, 500)
     : body.path
@@ -16085,6 +16173,7 @@ async function checksumReport(body) {
   const skipped = [];
 
   for (let index = 0; index < selected.length; index += 1) {
+    throwIfAborted(signal);
     const itemPath = selected[index];
     try {
       const stats = await fs.stat(itemPath);
@@ -16097,7 +16186,7 @@ async function checksumReport(body) {
         });
         continue;
       }
-      const hash = await hashFile(itemPath, options.algorithm, options.maxHashBytes);
+      const hash = await hashFile(itemPath, options.algorithm, options.maxHashBytes, { signal });
       if (!hash || hash.skipped) {
         skipped.push({
           index,
@@ -16120,6 +16209,7 @@ async function checksumReport(body) {
         hash: hash.value
       });
     } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw error;
       skipped.push({
         index,
         path: itemPath,
@@ -17064,7 +17154,7 @@ async function listShellNamespace(body = {}) {
   }
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Target = [string]$Payload.target
 $Limit = [Math]::Max(1, [int]$Payload.limit)
 $Shell = New-Object -ComObject Shell.Application
@@ -17570,6 +17660,7 @@ function contentSnippet(content, query) {
 
 async function advancedSearchUncached(options) {
   const root = resolveUserPath(options.path || options.root || workspaceRoot);
+  const guard = await createTraversalGuard(root, options);
   const nameNeedle = String(options.query || options.name || "").toLowerCase();
   const contentNeedle = String(options.content || "").trim();
   const kind = String(options.kind || "all");
@@ -17599,13 +17690,16 @@ async function advancedSearchUncached(options) {
     const current = stack.pop();
     let listing;
     try {
+      if (!(await guard(current))) { skipped.push({ path: current, reason: "link-or-repeated-directory" }); continue; }
       listing = await listDirectory(current, {
+        signal: options.signal,
         showHidden: true,
         includeAttributes: false,
         includeSignature: true,
         priority: "foreground"
       });
     } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) throw error;
       skipped.push({ path: current, reason: error.code || "unreadable" });
       continue;
     }
@@ -17615,13 +17709,19 @@ async function advancedSearchUncached(options) {
     }
 
     for (const listedEntry of listing?.entries || []) {
+      throwIfAborted(options.signal);
       if (results.length >= limit || scanned >= maxScanned) {
         break;
       }
       scanned += 1;
-      const entry = listedEntry;
+      const entry = { ...listedEntry };
       const fullPath = entry.path || path.join(current, entry.name || "");
       const lowerName = String(entry.name || "").toLowerCase();
+
+      if (entry.isSymlink || entry.linkType || entry.reparse) {
+        skipped.push({ path: fullPath, reason: "link" });
+        continue;
+      }
 
       if (!includeHidden && !visibleByHiddenSetting(entry, false)) {
         continue;
@@ -17632,16 +17732,17 @@ async function advancedSearchUncached(options) {
       const criteriaOk = searchCriteriaMatches(entry, criteria);
       let contentOk = !contentNeedle;
 
-      if (contentNeedle && entry.isFile && textExtensions.has(entry.extension)) {
+      if (nameOk && kindOk && criteriaOk && contentNeedle && entry.isFile && textExtensions.has(entry.extension)) {
         if (Number(entry.size || 0) <= maxContentBytes) {
           try {
-            const content = await fs.readFile(entry.path, "utf8");
+            const content = await fs.readFile(entry.path, { encoding: "utf8", signal: options.signal });
             contentScanned += 1;
             contentOk = containsText(content, contentNeedle);
             if (contentOk) {
               entry.matchSnippet = contentSnippet(content, contentNeedle);
             }
           } catch (error) {
+            if (isAbortError(error) || options.signal?.aborted) throw error;
             skipped.push({ path: entry.path, reason: error.code || "content-unreadable" });
           }
         } else {
@@ -17685,12 +17786,14 @@ function advancedSearchCacheKey(options = {}) {
   const root = resolveUserPath(options.path || options.root || workspaceRoot);
   const ordered = {};
   for (const key of Object.keys(options).sort()) {
+    if (key === "signal") continue;
     ordered[key] = options[key];
   }
   return `${pathIdentity(root)}\u001f${crypto.createHash("sha256").update(JSON.stringify(ordered)).digest("hex")}`;
 }
 
 async function advancedSearch(options = {}) {
+  throwIfAborted(options.signal);
   const rootPath = resolveUserPath(options.path || options.root || workspaceRoot);
   const cacheKey = advancedSearchCacheKey(options);
   const now = Date.now();
@@ -17701,12 +17804,12 @@ async function advancedSearch(options = {}) {
   }
   if (cached) advancedSearchCache.delete(cacheKey);
   const existing = advancedSearchInFlight.get(cacheKey);
-  if (existing) {
-    const report = await existing.promise;
+  if (existing && !existing.controller.signal.aborted) {
+    const report = await joinSearchTask(existing, options.signal);
     return { ...report, searchCache: { hit: false, coalesced: true } };
   }
-  const record = { rootPath, invalidated: false, promise: null };
-  record.promise = advancedSearchUncached(options).then((report) => {
+  const record = { rootPath, invalidated: false, promise: null, controller: new AbortController(), waiters: new Set() };
+  record.promise = advancedSearchUncached({ ...options, signal: record.controller.signal }).then((report) => {
     if (!record.invalidated) {
       advancedSearchCache.set(cacheKey, { rootPath, report, createdAt: Date.now(), lastAccess: Date.now() });
       while (advancedSearchCache.size > 24) {
@@ -17716,22 +17819,41 @@ async function advancedSearch(options = {}) {
       }
     }
     return report;
+  }).finally(() => {
+    if (advancedSearchInFlight.get(cacheKey) === record) advancedSearchInFlight.delete(cacheKey);
   });
   advancedSearchInFlight.set(cacheKey, record);
+  const report = await joinSearchTask(record, options.signal);
+  return { ...report, searchCache: { hit: false, coalesced: false } };
+}
+
+async function joinSearchTask(record, signal) {
+  throwIfAborted(signal);
+  const waiter = Symbol();
+  record.waiters.add(waiter);
+  let onAbort;
   try {
-    const report = await record.promise;
-    return { ...report, searchCache: { hit: false, coalesced: false } };
+    return await Promise.race([
+      record.promise,
+      new Promise((_, reject) => {
+        onAbort = () => reject(signal.reason || abortError());
+        signal?.addEventListener("abort", onAbort, { once: true });
+      })
+    ]);
   } finally {
-    if (advancedSearchInFlight.get(cacheKey) === record) advancedSearchInFlight.delete(cacheKey);
+    signal?.removeEventListener("abort", onAbort);
+    record.waiters.delete(waiter);
+    if (!record.waiters.size) record.controller.abort();
   }
 }
 
-async function searchDirectory(rootPath, query, limit = 200) {
-  return advancedSearch({ path: rootPath, query, limit });
+async function searchDirectory(rootPath, query, limit = 200, { signal } = {}) {
+  return advancedSearch({ path: rootPath, query, limit, signal });
 }
 
 async function flatView(options = {}) {
   const root = resolveUserPath(options.path || options.root || workspaceRoot);
+  const guard = await createTraversalGuard(root, options);
   const mode = ["all", "files", "folders"].includes(options.mode) ? options.mode : "files";
   const limit = Math.max(1, Math.min(Number(options.limit || 1000), 10_000));
   const maxScanned = Math.max(100, Math.min(Number(options.maxScanned || 20_000), 100_000));
@@ -17746,13 +17868,17 @@ async function flatView(options = {}) {
     const current = stack.pop();
     let dirents;
     try {
+      if (!(await guard(current))) { skipped.push({ path: current, reason: "link-or-repeated-directory" }); continue; }
       dirents = await fs.readdir(current, { withFileTypes: true });
     } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) throw error;
       skipped.push({ path: current, reason: error.code || "unreadable" });
       continue;
     }
 
     for (const dirent of dirents) {
+      throwIfAborted(options.signal);
+      if (dirent.isSymbolicLink()) { skipped.push({ path: path.join(current, dirent.name), reason: "link" }); continue; }
       if (entries.length >= limit || scanned >= maxScanned) {
         break;
       }
@@ -17775,8 +17901,9 @@ async function flatView(options = {}) {
       scanned += 1;
       let entry;
       try {
-        entry = await statEntry(current, dirent);
+        entry = await statEntry(current, dirent, new Map(), { signal: options.signal });
       } catch (error) {
+        if (isAbortError(error) || options.signal?.aborted) throw error;
         skipped.push({ path: fullPath, reason: error.code || "unavailable" });
         continue;
       }
@@ -17807,8 +17934,10 @@ async function flatView(options = {}) {
   };
 }
 
-async function duplicateFiles(options = {}) {
+async function duplicateFiles(options = {}, context = {}) {
+  options = { ...options, signal: context.signal || options.signal };
   const root = resolveUserPath(options.path || options.root || workspaceRoot);
+  const guard = await createTraversalGuard(root, options);
   const mode = options.mode === "hash" ? "hash" : "size";
   const recursive = options.recursive !== false;
   const includeHidden = Boolean(options.includeHidden);
@@ -17827,13 +17956,17 @@ async function duplicateFiles(options = {}) {
     const current = stack.pop();
     let dirents;
     try {
+      if (!(await guard(current))) { skipped.push({ path: current, reason: "link-or-repeated-directory" }); continue; }
       dirents = await fs.readdir(current, { withFileTypes: true });
     } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) throw error;
       skipped.push({ path: current, reason: error.code || "unreadable" });
       continue;
     }
 
     for (const dirent of dirents) {
+      throwIfAborted(options.signal);
+      if (dirent.isSymbolicLink()) { skipped.push({ path: path.join(current, dirent.name), reason: "link" }); continue; }
       if (scanned >= maxEntries) {
         break;
       }
@@ -17855,7 +17988,7 @@ async function duplicateFiles(options = {}) {
 
       scanned += 1;
       try {
-        const entry = await statEntry(current, dirent);
+        const entry = await statEntry(current, dirent, new Map(), { signal: options.signal });
         entry.relative = normalizeRelativePath(path.relative(root, entry.path));
         if (entry.isFile) {
           files += 1;
@@ -17872,6 +18005,7 @@ async function duplicateFiles(options = {}) {
           }
         }
       } catch (error) {
+        if (isAbortError(error) || options.signal?.aborted) throw error;
         skipped.push({ path: fullPath, reason: error.code || "unavailable" });
       }
     }
@@ -17884,8 +18018,9 @@ async function duplicateFiles(options = {}) {
     for (const sizeGroup of candidateGroups) {
       const hashGroups = new Map();
       for (const item of sizeGroup.items) {
+        throwIfAborted(options.signal);
         try {
-          const digest = await hashFile(item.path, "sha256", maxHashBytes);
+          const digest = await hashFile(item.path, "sha256", maxHashBytes, options);
           if (!digest || digest.skipped) {
             skipped.push({
               path: item.path,
@@ -17900,6 +18035,7 @@ async function duplicateFiles(options = {}) {
           }
           hashGroups.get(digest.value).push(item);
         } catch (error) {
+          if (isAbortError(error) || options.signal?.aborted) throw error;
           skipped.push({ path: item.path, reason: error.code || error.message || "hash-unavailable" });
         }
       }
@@ -18087,7 +18223,7 @@ async function openWithTerminal(targetPath) {
   const stats = await fs.stat(item);
   const dir = stats.isDirectory() ? item : path.dirname(item);
   const script = `param([string]$PayloadPath)
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Dir = $Payload.dir
 if (Get-Command wt.exe -ErrorAction SilentlyContinue) {
   Start-Process wt.exe -ArgumentList @("-d", $Dir)
@@ -18153,7 +18289,7 @@ async function openWindowsProperties(body = {}) {
   }
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Target = [string]$Payload.path
 if (-not (Test-Path -LiteralPath $Target)) {
   throw "Missing target: $Target"
@@ -18250,7 +18386,7 @@ function normalizeShellVerbList(parsed = {}, target = "") {
 function shellVerbsPowerShellScript(invoke = false) {
   return `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Target = [string]$Payload.path
 if (-not (Test-Path -LiteralPath $Target)) {
   throw "Missing target: $Target"
@@ -18415,7 +18551,7 @@ async function writeClipboardText(text) {
     throw new Error("Clipboard text is too large.");
   }
   const script = `param([string]$PayloadPath)
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Text = [string]$Payload.text
 Set-Clipboard -Value $Text
 Write-Output $Text.Length
@@ -18456,13 +18592,27 @@ async function resolveClipboardFilePaths(paths) {
   return resolved;
 }
 
+function clipboardNativePowerShell() {
+  return `Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class EBClipboard {
+  [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool OpenClipboard(IntPtr owner);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool EmptyClipboard();
+  [DllImport("user32.dll")] public static extern bool CloseClipboard();
+}
+'@`;
+}
+
 async function writeClipboardFiles(body = {}) {
   const paths = await resolveClipboardFilePaths(body.paths);
   const mode = normalizeClipboardFileMode(body.mode);
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
-$Payload = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+${clipboardNativePowerShell()}
+$Payload = Get-Content -Raw -Encoding UTF8 -LiteralPath $PayloadPath | ConvertFrom-Json
 $Collection = New-Object System.Collections.Specialized.StringCollection
 foreach ($ItemPath in @($Payload.paths)) {
   if ($null -ne $ItemPath -and [string]$ItemPath -ne "") {
@@ -18497,6 +18647,7 @@ while ($true) {
   paths = @($Payload.paths)
   mode = [string]$Payload.mode
   count = $Collection.Count
+  sequence = [EBClipboard]::GetClipboardSequenceNumber()
 } | ConvertTo-Json -Compress
 `;
   const result = await runPowerShellPayload(script, { paths, mode }, { sta: true });
@@ -18504,7 +18655,8 @@ while ($true) {
   return {
     paths,
     mode,
-    count: Number(parsed.count || paths.length)
+    count: Number(parsed.count || paths.length),
+    sequence: Number(parsed.sequence)
   };
 }
 
@@ -18512,6 +18664,10 @@ async function readClipboardFiles() {
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
+${clipboardNativePowerShell()}
+$Attempts = 0
+do {
+$Sequence = [EBClipboard]::GetClipboardSequenceNumber()
 $Paths = @()
 $Mode = "copy"
 $Effect = $null
@@ -18538,11 +18694,16 @@ if ($Data -and $Data.GetDataPresent("Preferred DropEffect")) {
 if ($Effect -eq 2) {
   $Mode = "move"
 }
+$Changed = $Sequence -ne [EBClipboard]::GetClipboardSequenceNumber()
+$Attempts += 1
+if ($Changed -and $Attempts -ge 8) { throw "Clipboard changed while reading it. Try Paste again." }
+} while ($Changed)
 [pscustomobject]@{
   paths = $Paths
   mode = $Mode
   count = $Paths.Count
   effect = $Effect
+  sequence = $Sequence
 } | ConvertTo-Json -Compress
 `;
   const result = await runPowerShellPayload(script, {}, { sta: true });
@@ -18554,31 +18715,35 @@ if ($Effect -eq 2) {
     paths,
     mode: normalizeClipboardFileMode(parsed.mode),
     count: paths.length,
-    effect: parsed.effect ?? null
+    effect: parsed.effect ?? null,
+    sequence: Number(parsed.sequence)
   };
 }
 
-async function clearClipboardFiles() {
+async function clearClipboardFiles(body = {}) {
+  const expectedSequence = body.expectedSequence;
+  if (expectedSequence !== undefined && (!Number.isInteger(expectedSequence) || expectedSequence < 0 || expectedSequence > 0xffffffff)) {
+    throw new Error("Invalid clipboard sequence.");
+  }
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Windows.Forms
+${clipboardNativePowerShell()}
+$Payload = Get-Content -Raw -Encoding UTF8 -LiteralPath $PayloadPath | ConvertFrom-Json
 $Attempts = 0
-while ($true) {
-  try {
-    [System.Windows.Forms.Clipboard]::Clear()
-    break
-  } catch {
-    $Attempts += 1
-    if ($Attempts -ge 8) {
-      throw
-    }
-    Start-Sleep -Milliseconds 80
-  }
+while (-not [EBClipboard]::OpenClipboard([IntPtr]::Zero)) {
+  $Attempts += 1
+  if ($Attempts -ge 8) { throw "Clipboard is busy. Try again." }
+  Start-Sleep -Milliseconds 80
 }
-[pscustomobject]@{ cleared = $true } | ConvertTo-Json -Compress
+try {
+  $Sequence = [EBClipboard]::GetClipboardSequenceNumber()
+  $Matches = $null -eq $Payload.expectedSequence -or [uint32]$Payload.expectedSequence -eq $Sequence
+  if ($Matches -and -not [EBClipboard]::EmptyClipboard()) { throw "Could not clear clipboard." }
+  [pscustomobject]@{ cleared = $Matches; sequence = [EBClipboard]::GetClipboardSequenceNumber() } | ConvertTo-Json -Compress
+} finally { [void][EBClipboard]::CloseClipboard() }
 `;
-  const result = await runPowerShellPayload(script, {}, { sta: true });
-  return parsePowerShellJson(result, { cleared: true });
+  const result = await runPowerShellPayload(script, { expectedSequence }, { sta: true });
+  return parsePowerShellJson(result, { cleared: false });
 }
 
 function findInstalledAppBrowser() {
@@ -20470,15 +20635,15 @@ async function handleApi(req, res, url) {
 
   if (route === "POST /api/text/save") {
     const body = await readJson(req);
-    const operation = await enqueueOperation("edit-text", operationLabel("edit-text", body), () =>
-      saveTextFile(body)
+    const operation = await enqueueOperation("edit-text", operationLabel("edit-text", body), (hooks) =>
+      saveTextFile(body, hooks)
     );
     return sendJson(res, 200, { ...operation.result, operation });
   }
 
   if (route === "POST /api/properties") {
     const body = await readJson(req);
-    return sendJson(res, 200, await propertiesReport(body));
+    return sendJson(res, 200, await propertiesReport(body, { signal: requestAbortSignal(req, res) }));
   }
 
   if (route === "POST /api/size-analysis") {
@@ -20516,7 +20681,7 @@ async function handleApi(req, res, url) {
 
   if (route === "POST /api/checksums") {
     const body = await readJson(req);
-    return sendJson(res, 200, await checksumReport(body));
+    return sendJson(res, 200, await checksumReport(body, { signal: requestAbortSignal(req, res) }));
   }
 
   if (route === "POST /api/checksums/verify") {
@@ -20531,29 +20696,30 @@ async function handleApi(req, res, url) {
       await searchDirectory(
         url.searchParams.get("path"),
         url.searchParams.get("q"),
-        Number(url.searchParams.get("limit") || 200)
+        Number(url.searchParams.get("limit") || 200),
+        { signal: requestAbortSignal(req, res) }
       )
     );
   }
 
   if (route === "POST /api/search") {
     const body = await readJson(req);
-    return sendJson(res, 200, await advancedSearch(body));
+    return sendJson(res, 200, await advancedSearch({ ...body, signal: requestAbortSignal(req, res) }));
   }
 
   if (route === "POST /api/flat") {
     const body = await readJson(req);
-    return sendJson(res, 200, await flatView(body));
+    return sendJson(res, 200, await flatView({ ...body, signal: requestAbortSignal(req, res) }));
   }
 
   if (route === "POST /api/duplicates") {
     const body = await readJson(req);
-    return sendJson(res, 200, await duplicateFiles(body));
+    return sendJson(res, 200, await duplicateFiles(body, { signal: requestAbortSignal(req, res) }));
   }
 
   if (route === "POST /api/compare") {
     const body = await readJson(req);
-    return sendJson(res, 200, await compareDirectories(body));
+    return sendJson(res, 200, await compareDirectories(body, { signal: requestAbortSignal(req, res) }));
   }
 
   if (route === "POST /api/sync") {
@@ -20581,6 +20747,12 @@ async function handleApi(req, res, url) {
     const cacheControl = versioned ? "private, max-age=604800, immutable" : "private, max-age=0, must-revalidate";
     const commonHeaders = {
       "content-type": contentType,
+      "x-content-type-options": "nosniff",
+      ...([".html", ".svg"].includes(ext) ? {
+        "content-security-policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "x-frame-options": "DENY",
+        ...(ext === ".html" ? { "content-disposition": "attachment" } : {})
+      } : {}),
       "accept-ranges": "bytes",
       "cache-control": cacheControl,
       etag,
@@ -20946,7 +21118,8 @@ async function handleApi(req, res, url) {
   }
 
   if (route === "POST /api/clipboard/files/clear") {
-    return sendJson(res, 200, { ok: true, ...(await clearClipboardFiles()) });
+    const body = await readJson(req);
+    return sendJson(res, 200, { ok: true, ...(await clearClipboardFiles(body)) });
   }
 
   if (route === "POST /api/clipboard/text") {
@@ -21078,6 +21251,8 @@ const server = http.createServer(async (req, res) => {
 
 let serverStartPromise = null;
 
+export { advancedSearch, checksumReport, duplicateFiles, compareDirectories, propertiesReport };
+
 export async function startServer() {
   if (server.listening) {
     return server;
@@ -21197,7 +21372,8 @@ async function startMcpUndoOperation(operationId, principal) {
     returnQueued: true,
     relatedOperationId: operationId,
     mcpProfileId: principal.profileId,
-    mcpSessionId: principal.sessionId
+    mcpSessionId: principal.sessionId,
+    mcpPolicy: principal.operationPolicy
   });
   await recordRelatedOperation(operationId, operation, "undo", "Undo operation linked.");
   return operation;
@@ -21236,7 +21412,8 @@ async function getMcpAutomationService() {
         startOperation: (type, body, principal) => runRetryableOperation(type, body, {
           returnQueued: true,
           mcpProfileId: principal.profileId,
-          mcpSessionId: principal.sessionId
+          mcpSessionId: principal.sessionId,
+          mcpPolicy: principal.operationPolicy
         }),
         getOperation: async (operationId) => {
           const state = await readState();
@@ -21250,7 +21427,8 @@ async function getMcpAutomationService() {
           if (action === "retry") return retryRecordedOperation(operationId, {
             returnQueued: true,
             mcpProfileId: principal.profileId,
-            mcpSessionId: principal.sessionId
+            mcpSessionId: principal.sessionId,
+            mcpPolicy: principal.operationPolicy
           });
           throw new Error("Unsupported operation control action.");
         },

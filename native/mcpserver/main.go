@@ -87,22 +87,23 @@ type bridgeManifest struct {
 }
 
 type bridgeFrame struct {
-	Version     int             `json:"version"`
-	ID          string          `json:"id,omitempty"`
-	Type        string          `json:"type,omitempty"`
-	Op          string          `json:"op,omitempty"`
-	Nonce       string          `json:"nonce,omitempty"`
-	ProfileID   string          `json:"profileId,omitempty"`
-	SessionID   string          `json:"sessionId,omitempty"`
-	ClientInfo  any             `json:"clientInfo,omitempty"`
-	ClientRoots []string        `json:"clientRoots,omitempty"`
-	Tool        string          `json:"tool,omitempty"`
-	Args        json.RawMessage `json:"args,omitempty"`
-	URI         string          `json:"uri,omitempty"`
-	Revision    int             `json:"revision,omitempty"`
-	RequestID   string          `json:"requestId,omitempty"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	Error       *bridgeError    `json:"error,omitempty"`
+	Version             int             `json:"version"`
+	ID                  string          `json:"id,omitempty"`
+	Type                string          `json:"type,omitempty"`
+	Op                  string          `json:"op,omitempty"`
+	Nonce               string          `json:"nonce,omitempty"`
+	ProfileID           string          `json:"profileId,omitempty"`
+	SessionID           string          `json:"sessionId,omitempty"`
+	ClientInfo          any             `json:"clientInfo,omitempty"`
+	ClientRoots         []string        `json:"clientRoots,omitempty"`
+	ClientRootsProvided bool            `json:"clientRootsProvided,omitempty"`
+	Tool                string          `json:"tool,omitempty"`
+	Args                json.RawMessage `json:"args,omitempty"`
+	URI                 string          `json:"uri,omitempty"`
+	Revision            int             `json:"revision,omitempty"`
+	RequestID           string          `json:"requestId,omitempty"`
+	Result              json.RawMessage `json:"result,omitempty"`
+	Error               *bridgeError    `json:"error,omitempty"`
 }
 
 type bridgeError struct {
@@ -127,6 +128,7 @@ type bridgeClient struct {
 	mu              sync.Mutex
 	writeMu         sync.Mutex
 	conn            net.Conn
+	closed          bool
 	pending         map[string]chan bridgeFrame
 	disconnected    chan struct{}
 	sessionID       string
@@ -225,6 +227,12 @@ func launchHost(appPath, appDir string) error {
 func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, clientInfo any) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if b.closed {
+		return errors.New("the AI Bridge connection is closed")
+	}
 	if b.conn != nil {
 		return nil
 	}
@@ -239,7 +247,9 @@ func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, cl
 		}
 		deadline := time.Now().Add(12 * time.Second)
 		for time.Now().Before(deadline) {
-			time.Sleep(150 * time.Millisecond)
+			if err := waitForBridge(ctx, 150*time.Millisecond); err != nil {
+				return err
+			}
 			manifest, err = readManifest(b.manifest)
 			if err == nil {
 				break
@@ -268,7 +278,9 @@ func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, cl
 		}
 		deadline := time.Now().Add(12 * time.Second)
 		for time.Now().Before(deadline) {
-			time.Sleep(150 * time.Millisecond)
+			if err := waitForBridge(ctx, 150*time.Millisecond); err != nil {
+				return err
+			}
 			candidate, manifestErr := readManifest(b.manifest)
 			if manifestErr != nil || candidate.Nonce == manifest.Nonce {
 				continue
@@ -283,6 +295,13 @@ func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, cl
 			return fmt.Errorf("connect to Explore Better AI Bridge: %w", err)
 		}
 	}
+	deadline := time.Now().Add(5 * time.Second)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = conn.SetDeadline(deadline)
+	stopHandshakeCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopHandshakeCancel()
 	helloID := randomID()
 	hello := bridgeFrame{
 		Version: bridgeProtocolVersion, ID: helloID, Op: "hello", Nonce: manifest.Nonce,
@@ -292,7 +311,8 @@ func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, cl
 		conn.Close()
 		return err
 	}
-	response, err := readBridgeFrame(bufio.NewReaderSize(conn, 64*1024))
+	reader := bufio.NewReaderSize(conn, 64*1024)
+	response, err := readBridgeFrame(reader)
 	if err != nil {
 		conn.Close()
 		return err
@@ -304,6 +324,12 @@ func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, cl
 		}
 		return errors.New("Explore Better AI Bridge handshake failed")
 	}
+	stopHandshakeCancel()
+	if err := ctx.Err(); err != nil {
+		conn.Close()
+		return err
+	}
+	_ = conn.SetDeadline(time.Time{})
 	b.conn = conn
 	b.pending = make(map[string]chan bridgeFrame)
 	b.disconnected = make(chan struct{})
@@ -312,12 +338,23 @@ func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, cl
 	if b.subscriptions == nil {
 		b.subscriptions = make(map[string]struct{})
 	}
-	go b.readLoop(conn)
+	go b.readLoop(conn, reader)
 	go b.heartbeat(conn, b.disconnected)
 	for uri := range b.subscriptions {
 		_ = writeBridgeFrame(conn, bridgeFrame{Version: bridgeProtocolVersion, ID: randomID(), Op: "subscribe", URI: uri})
 	}
 	return nil
+}
+
+func waitForBridge(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (b *bridgeClient) heartbeat(conn net.Conn, disconnected <-chan struct{}) {
@@ -340,6 +377,9 @@ func (b *bridgeClient) heartbeat(conn net.Conn, disconnected <-chan struct{}) {
 }
 
 func writeBridgeFrame(writer io.Writer, frame bridgeFrame) error {
+	if writer == nil {
+		return errors.New("the AI Bridge connection is unavailable")
+	}
 	data, err := json.Marshal(frame)
 	if err != nil {
 		return err
@@ -348,18 +388,32 @@ func writeBridgeFrame(writer io.Writer, frame bridgeFrame) error {
 		return errors.New("AI Bridge request exceeds the 4 MiB frame limit")
 	}
 	data = append(data, '\n')
-	_, err = writer.Write(data)
+	if conn, ok := writer.(net.Conn); ok {
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		defer conn.SetWriteDeadline(time.Time{})
+	}
+	written, err := writer.Write(data)
+	if err == nil && written != len(data) {
+		return io.ErrShortWrite
+	}
 	return err
 }
 
 func readBridgeFrame(reader *bufio.Reader) (bridgeFrame, error) {
 	var frame bridgeFrame
-	line, err := reader.ReadBytes('\n')
-	if err != nil {
-		return frame, err
-	}
-	if len(line) > maxBridgeFrameBytes {
-		return frame, errors.New("AI Bridge response exceeds the 4 MiB frame limit")
+	var line []byte
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > maxBridgeFrameBytes {
+			return frame, errors.New("AI Bridge response exceeds the 4 MiB frame limit")
+		}
+		line = append(line, fragment...)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return frame, err
+		}
 	}
 	if err := json.Unmarshal(line, &frame); err != nil {
 		return frame, err
@@ -367,9 +421,9 @@ func readBridgeFrame(reader *bufio.Reader) (bridgeFrame, error) {
 	return frame, nil
 }
 
-func (b *bridgeClient) readLoop(conn net.Conn) {
-	reader := bufio.NewReaderSize(conn, 64*1024)
+func (b *bridgeClient) readLoop(conn net.Conn, reader *bufio.Reader) {
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		frame, err := readBridgeFrame(reader)
 		if err != nil {
 			b.disconnect(conn, err)
@@ -421,6 +475,10 @@ func (b *bridgeClient) call(ctx context.Context, sessionID string, clientInfo an
 
 	b.mu.Lock()
 	conn := b.conn
+	if conn == nil {
+		b.mu.Unlock()
+		return nil, &bridgeError{Code: "BRIDGE_RESTARTING", Message: "The AI Bridge disconnected before the request was sent.", Retryable: true}
+	}
 	b.pending[payload.ID] = responseChannel
 	b.mu.Unlock()
 
@@ -451,10 +509,11 @@ func (b *bridgeClient) call(ctx context.Context, sessionID string, clientInfo an
 
 func (b *bridgeClient) close() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.conn != nil {
-		b.conn.Close()
-		b.conn = nil
+	b.closed = true
+	conn := b.conn
+	b.mu.Unlock()
+	if conn != nil {
+		b.disconnect(conn, errors.New("the AI Bridge connection closed"))
 	}
 }
 
@@ -469,15 +528,15 @@ func sessionIdentity(requestSession *mcp.ServerSession) (string, any) {
 	return requestSession.ID(), params.ClientInfo
 }
 
-func clientRoots(ctx context.Context, session *mcp.ServerSession) []string {
+func clientRoots(ctx context.Context, session *mcp.ServerSession) ([]string, bool, error) {
 	if session == nil || session.InitializeParams() == nil || session.InitializeParams().Capabilities == nil || session.InitializeParams().Capabilities.RootsV2 == nil {
-		return nil
+		return nil, false, nil
 	}
 	rootCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	result, err := session.ListRoots(rootCtx, nil)
 	if err != nil || result == nil {
-		return nil
+		return nil, true, &bridgeError{Code: "CLIENT_ROOTS_UNAVAILABLE", Message: "The client workspace folders could not be confirmed. Retry after the client responds to roots/list."}
 	}
 	roots := make([]string, 0, len(result.Roots))
 	for _, root := range result.Roots {
@@ -485,7 +544,7 @@ func clientRoots(ctx context.Context, session *mcp.ServerSession) []string {
 			roots = append(roots, root.URI)
 		}
 	}
-	return roots
+	return roots, true, nil
 }
 
 func toolResult(raw json.RawMessage, err error) *mcp.CallToolResult {
@@ -659,8 +718,12 @@ func main() {
 			if len(args) == 0 {
 				args = json.RawMessage(`{}`)
 			}
+			roots, rootsProvided, rootsErr := clientRoots(ctx, request.Session)
+			if rootsErr != nil {
+				return toolResult(nil, rootsErr), nil
+			}
 			raw, callErr := bridge.call(ctx, sessionID, clientInfo, "invoke", bridgeFrame{
-				Tool: toolDefinition.Name, Args: args, ClientRoots: clientRoots(ctx, request.Session),
+				Tool: toolDefinition.Name, Args: args, ClientRoots: roots, ClientRootsProvided: rootsProvided,
 			})
 			return toolResult(raw, callErr), nil
 		})
@@ -668,7 +731,11 @@ func main() {
 
 	resourceHandler := func(ctx context.Context, request *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		sessionID, clientInfo := sessionIdentity(request.Session)
-		raw, callErr := bridge.call(ctx, sessionID, clientInfo, "resource", bridgeFrame{URI: request.Params.URI, ClientRoots: clientRoots(ctx, request.Session)})
+		roots, rootsProvided, rootsErr := clientRoots(ctx, request.Session)
+		if rootsErr != nil {
+			return nil, rootsErr
+		}
+		raw, callErr := bridge.call(ctx, sessionID, clientInfo, "resource", bridgeFrame{URI: request.Params.URI, ClientRoots: roots, ClientRootsProvided: rootsProvided})
 		if callErr != nil {
 			return nil, callErr
 		}

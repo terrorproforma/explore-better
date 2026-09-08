@@ -34,7 +34,9 @@ export async function removeTreeEventually(target) {
 }
 
 export async function createBackendFixture({ access = "read-only", clientType = "generic", allowPermanentDelete = false } = {}) {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "eb-mcp-backend-"));
+  const requestedTemp = await fs.mkdtemp(path.join(os.tmpdir(), "eb-mcp-backend-"));
+  // Match the real paths returned by authorization, including Windows 8.3 TEMP aliases.
+  const temp = await fs.realpath(requestedTemp);
   const fixture = path.join(temp, "authorized");
   const outside = path.join(temp, "outside");
   await fs.mkdir(fixture, { recursive: true });
@@ -55,6 +57,7 @@ export async function createBackendFixture({ access = "read-only", clientType = 
   });
   return {
     temp,
+    requestedTemp,
     fixture,
     outside,
     backend,
@@ -95,7 +98,7 @@ export async function waitForOperation(request, operationId, timeoutMs = 30_000)
 }
 
 export async function startElectronMcp({ visible = false, prepareFixture = null, electronArgs = [], beforeSidecar = null, access = "read-only", tools = null } = {}) {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "eb-mcp-electron-"));
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "eb-mcp-electron-")));
   const fixture = path.join(temp, "authorized");
   await fs.mkdir(fixture, { recursive: true });
   await fs.writeFile(path.join(fixture, "hello.txt"), "hello MCP\n");

@@ -23,8 +23,10 @@ jobs:
           cache: npm
       - uses: actions/setup-go@v6
         with:
-          go-version: 1.23.4
-          cache-dependency-path: native/fshelper/go.mod
+          go-version: 1.25.12
+          cache-dependency-path: |
+            native/fshelper/go.mod
+            native/mcpserver/go.sum
       - run: npm ci
       - run: npm audit --audit-level=high
       - run: npm run verify:privacy
@@ -33,12 +35,45 @@ jobs:
       - run: npm run build:renderer
       - run: npm run build:mcp-server
       - run: npm run build:mcpb
+      - run: npm run verify:terminal-service
+      - run: npm run verify:terminal-native-lifecycle
+      - run: npm run verify:backend-integrity
+      - run: npm run verify:mcp-reliability
+      - run: npm run verify:mcp-policy-regression
+      - run: npm run verify:mcp-client-roots
+      - run: npm run verify:mcp-clients
+      - run: npm run verify:mcp-operations
+      - name: Native protocol tests
+        working-directory: native/mcpserver
+        env:
+          GOTOOLCHAIN: go1.25.12
+        run: go test ./...
       - run: npm run verify:security-boundary
       - run: npm run verify:transactional-operations
       - run: npm run verify:native-helper
       - run: npm run verify:terminal
       - run: npm run verify:mcp-value
+      - run: npm run verify:mcp-context
+      - run: npm run verify:mcp-ui-views
+      - run: npm run verify:mcp-semantic-ui
+      - run: npm run verify:mcp-operation-wait
       - run: npm run verify:mcpb
       - run: npm run verify:seo-discovery
       - run: npm run verify:layout
       - run: npm run verify:interaction-quality
+      - run: npm run verify:renderer-state
+      - run: npm run verify:clipboard-sequence
+      - run: npm run verify:mcp-release
+      - name: Preserve verification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            artifacts/*latest.json
+            artifacts/*latest.md
+            artifacts/*latest*.png
+            artifacts/interaction-quality-*/workspace.png
+            artifacts/renderer-state-*/**/*.png
