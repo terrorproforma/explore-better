@@ -5,7 +5,10 @@ import { createBackendFixture, expectCode, waitForOperation, waitFor } from "./m
 
 const fixture = await createBackendFixture({ access: "read-write", allowPermanentDelete: true });
 const checks = [];
-const check = (name, condition) => { assert(condition, name); checks.push(name); };
+const check = (name, condition, details) => {
+  assert(condition, details ? `${name}\n${JSON.stringify(details, null, 2)}` : name);
+  checks.push(name);
+};
 const reset = () => fixture.backend.upsertMcpProfile({ id: fixture.profile.id, roots: [fixture.fixture], allowPermanentDelete: true });
 try {
   const target = path.join(fixture.fixture, "draft.txt");
@@ -40,7 +43,13 @@ try {
   const writePlan = await fixture.request("plan_text_write", { path: target, content: "saved" });
   const applied = await fixture.request("apply_operation", { applyToken: writePlan.data.applyToken });
   const operation = await waitForOperation(fixture.request, applied.data.operationId);
-  check("Operation records persist their authorized paths and policy", operation.mcpPolicy?.paths?.includes(target) && operation.mcpPolicy?.signature?.length === 64);
+  // Authorization persists real paths; Windows TEMP can use an 8.3 alias.
+  const canonicalTarget = await fs.realpath(target);
+  const policy = operation.mcpPolicy;
+  check("Operation records persist their authorized paths and policy",
+    policy?.paths?.length === 1 && policy.paths[0] === canonicalTarget &&
+    /^[a-f0-9]{64}$/.test(policy.signature || "") && policy.planningTool === "plan_text_write",
+    { requestedPath: target, canonicalTarget, operationId: operation.id, storedPolicy: policy ?? null });
   await fixture.backend.upsertMcpProfile({ id: fixture.profile.id, roots: [narrow] });
   await expectCode(() => fixture.request("get_operation", { operationId: operation.id }), "PLAN_CHANGED");
   await expectCode(() => fixture.request("undo_operation", { operationId: operation.id }), "PLAN_CHANGED");

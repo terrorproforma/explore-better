@@ -34,6 +34,7 @@ jobs:
       - run: npm run build:mcp-server
       - run: npm run build:mcpb
       - run: npm run verify:terminal-service
+      - run: npm run verify:terminal-native-lifecycle
       - run: npm run verify:backend-integrity
       - run: npm run verify:mcp-reliability
       - run: npm run verify:mcp-policy-regression

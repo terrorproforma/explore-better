@@ -56,6 +56,7 @@ const coreSuites = [
   ["accessibility", "scripts/accessibility-verify.mjs", 180000],
   ["terminal", "scripts/terminal-verify.mjs", 300000],
   ["terminal-service", "scripts/terminal-service.test.mjs", 30000],
+  ["terminal-native-lifecycle", "scripts/terminal-native-lifecycle-smoke.mjs", 120000],
   ["backend-integrity", "scripts/backend-integrity-smoke.mjs", 120000],
   ["renderer-state", "scripts/renderer-state-regression-smoke.mjs", 120000],
   ["clipboard-sequence", "scripts/clipboard-sequence-smoke.mjs", 60000],

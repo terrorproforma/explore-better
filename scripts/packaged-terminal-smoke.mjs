@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -9,7 +10,8 @@ const runRoot = path.join(artifactsDir, `packaged-terminal-${stamp}`);
 const appData = path.join(runRoot, "appdata");
 const fixture = path.join(runRoot, "Folder With Spaces Unicode");
 const executable = path.join(root, "dist", "win-unpacked", "Explore Better.exe");
-const ptyPrebuild = path.join(root, "dist", "win-unpacked", "resources", "app.asar.unpacked", "node_modules", "node-pty", "prebuilds", "win32-x64", "pty.node");
+const ptyPrebuild = path.join(root, "dist", "win-unpacked", "resources", "app.asar.unpacked", "node_modules", "node-pty", "prebuilds", "win32-x64", "conpty.node");
+const conptyDll = path.join(path.dirname(ptyPrebuild), "conpty", "conpty.dll");
 const terminalBundle = path.join(root, "dist", "win-unpacked", "resources", "app.asar");
 const latestJson = path.join(artifactsDir, "packaged-terminal-latest.json");
 const latestMd = path.join(artifactsDir, "packaged-terminal-latest.md");
@@ -74,9 +76,14 @@ async function main() {
   const add = (pass, name, detail) => checks.push({ pass: Boolean(pass), name, detail });
   await fs.access(executable);
   await fs.access(ptyPrebuild);
+  await fs.access(conptyDll);
   await fs.access(terminalBundle);
   add(true, "Packaged executable exists", executable);
   add(true, "Native node-pty x64 prebuild is unpacked", ptyPrebuild);
+  add(true, "ConPTY runtime is unpacked", conptyDll);
+  const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const sourcePrebuild = path.join(root, "node_modules", "node-pty", "prebuilds", "win32-x64", "conpty.node");
+  add(hash(await fs.readFile(ptyPrebuild)) === hash(await fs.readFile(sourcePrebuild)), "Packaged native terminal matches the installed build", ptyPrebuild);
   add(true, "Packaged application archive exists", terminalBundle);
 
   const smokeFolders = {

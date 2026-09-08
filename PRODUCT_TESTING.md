@@ -65,6 +65,10 @@ The final 100,000-entry browser check passed three desktop runs: median first pa
 
 Native terminal verification passes with both Command Prompt and Windows PowerShell, using isolated app data and folders with spaces, Unicode and percent signs. Administrator argument quoting is exercised through ordinary non-elevated `Start-Process`; interactive UAC behavior is outside that automated check. Raw active-content protection is covered by harmless response-header assertions; the previously blocked active-content execution reproduction was not repeated.
 
+The installed `node-pty@1.1.0` contained the unsynchronized Windows handle registry documented in [upstream issue 921](https://github.com/microsoft/node-pty/issues/921). The exact `1.2.0-beta.14` pin includes [the upstream fix](https://github.com/microsoft/node-pty/pull/922) and subsequent Windows spawn/error cleanup changes. This is an intentionally pinned prerelease; it avoids the later worker-timeout behavior introduced in beta.15. Its published package integrity and loaded Windows native binary were checked. The local access violation had no captured native stack, so correspondence to that known race is an inference, not a proven crash-site diagnosis.
+
+`verify:terminal-native-lifecycle` exercises repeated simultaneous native sessions, input/output, resize and real exit completion in an isolated child process. It is included in Windows CI alongside the service and product UI checks.
+
 Cross-volume recovery performs additional hashing to establish that copied data still matches. Interrupted moves from older versions without durable snapshots require manual reconciliation. Text files with unsupported legacy encodings remain read-only in the built-in editor. These are deliberate recovery limits, rather than silently accepting unverifiable data.
 
 ### Interaction and visual review — 2026-09-08

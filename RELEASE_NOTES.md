@@ -17,6 +17,7 @@
 - Parse STL models in a worker and bound edge generation, keeping browsing responsive during model preparation.
 - Cancel terminal creation when its owner closes, clean up sessions on reload, and wait for native exit during shutdown. Preserve percent signs in folder markers and quote administrator launch arguments correctly.
 - Resolve each PowerShell profile's own modules first, preventing inherited module paths from stalling Windows PowerShell startup.
+- Pin the native terminal component to `node-pty@1.2.0-beta.14`, which includes Microsoft's fix for concurrent Windows terminal exit races.
 
 ### AI Bridge Reliability
 

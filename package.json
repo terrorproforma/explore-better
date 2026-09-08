@@ -164,6 +164,7 @@
     "verify:accessibility": "node scripts/accessibility-verify.mjs",
     "verify:terminal": "node scripts/terminal-verify.mjs",
     "verify:terminal-service": "node --test scripts/terminal-service.test.mjs",
+    "verify:terminal-native-lifecycle": "node scripts/terminal-native-lifecycle-smoke.mjs",
     "verify:mcp-reliability": "node scripts/mcp-reliability-smoke.mjs",
     "verify:mcp-policy-regression": "node scripts/mcp-policy-regression-smoke.mjs",
     "verify:mcp-client-roots": "node scripts/mcp-client-roots-smoke.mjs",
@@ -288,7 +289,7 @@
     "@xterm/xterm": "6.0.0",
     "electron-updater": "^6.8.9",
     "jsonc-parser": "3.3.1",
-    "node-pty": "1.1.0",
+    "node-pty": "1.2.0-beta.14",
     "yauzl": "^3.4.0",
     "yazl": "3.3.1"
   },
