@@ -12,6 +12,7 @@
 ### Maintenance
 
 - Updated vulnerable dependency patches, including the pinned YAML parser, and excluded local editor state and backup files from version control.
+- Preserves path edits during pane refreshes and keeps drive buttons at a readable minimum width.
 
 ### Local STL And STEP Preview
 

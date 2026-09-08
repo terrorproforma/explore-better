@@ -6756,6 +6756,8 @@ function paneTabOverflowMenuMarkup(paneName, pane) {
     .join("");
 }
 
+const panePathInputRenderState = new WeakMap();
+
 function renderPane(paneName) {
   scheduleMcpContextPublish();
   const pane = panes[paneName];
@@ -6797,7 +6799,12 @@ function renderPane(paneName) {
   observePaneTabOverflow(paneName);
   schedulePaneTabOverflow(paneName);
 
-  document.querySelector(`[data-path-input="${paneName}"]`).value = tab.path;
+  const pathInput = document.querySelector(`[data-path-input="${paneName}"]`);
+  const previousPathState = panePathInputRenderState.get(pathInput);
+  const editingCurrentPath = document.activeElement === pathInput &&
+    previousPathState?.tabId === tab.id && previousPathState?.path === tab.path;
+  if (!editingCurrentPath) pathInput.value = tab.path;
+  panePathInputRenderState.set(pathInput, { tabId: tab.id, path: tab.path });
   const breadcrumbs = document.querySelector(`[data-breadcrumbs="${paneName}"]`);
   if (breadcrumbs) {
     breadcrumbs.innerHTML = renderBreadcrumbs(paneName, tab.path);
