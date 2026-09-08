@@ -142,6 +142,8 @@ try {
   await page.locator('[data-close-dialog="preferences-dialog"]').click();
   await page.locator("#dock-overflow-toggle").click();
   await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 1120, height: 960 });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   check("overflow-escape-restores-focus", await page.locator('#dock-overflow-toggle').evaluate(node => document.activeElement === node));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#topbar-more-toggle').click();
@@ -153,6 +155,10 @@ try {
   });
   check("topbar-menu-survives-status-update", await page.locator('#topbar-more-menu').isVisible());
   check("topbar-menu-preserves-focus", await page.locator(`#topbar-more-menu [data-topbar-action="${topbarAction}"]`).evaluate(node => document.activeElement === node));
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 410, height: 844 });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  check("topbar-toggle-focus-survives-resize", await page.locator('#topbar-more-toggle').evaluate(node => document.activeElement === node));
   check("no-browser-errors", errors.length === 0, errors.join("\n"));
   await page.screenshot({ path: path.join(run, "workspace.png") });
 } catch (error) {

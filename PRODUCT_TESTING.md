@@ -49,7 +49,7 @@ Reproduce with `npm run build:renderer` followed by `npm run perf:renderer -- --
 
 Current validation:
 
-- New interaction suite: 32 checks passed, covering stable focus/DOM, offscreen selection and scroll preservation on refresh, changed metadata, all three virtualized views, filter recovery, menu search, resizing, status updates, and unclipped source/target badges. Added to Windows CI and the acceptance runner.
+- New interaction suite: 33 checks passed, covering stable focus/DOM, offscreen selection and scroll preservation on refresh, changed metadata, all three virtualized views, filter recovery, menu search, resizing, status updates, and unclipped source/target badges. The resize checks explicitly exercise focus immediately after closing overflow menus. Added to Windows CI and the acceptance runner.
 - Navigation, folder tree, keyboard workflows, preferences, listing cache, rapid navigation, dual-pane safety, workspace panels, pane activity, and resize suites passed.
 - Layout passed at six widths (390–1920 px); accessibility passed on desktop and mobile; adaptive pane chrome passed 26 checks and pane scrollbar checks passed 15.
 - Preview/editor/properties passed 26 checks; thumbnails passed 13; terminal UI passed 30 using its mocked terminal bridge; disk analysis UI passed 42; ZIP browsing passed. MCP context passed.
@@ -57,6 +57,8 @@ Current validation:
 - Privacy and brand checks passed; dependency audit reported zero vulnerabilities.
 
 The backend performance trend separately flagged the 500-file content-index build at 182.1 ms against an earlier 86.7 ms median; it remains within the 8,000 ms guard. This change does not alter backend indexing. The previously identified native Windows PowerShell 5 ConPTY issue remains outside this renderer change; the terminal UI result above does not establish native-shell compatibility.
+
+Additional native validation passed with Command Prompt locally (120 ms first prompt, output, folder following, dual sessions, cleanup and hostile IPC). One CI PowerShell 7 run exited with `0xC0000409` after its functional checks passed; a rerun passed the terminal stage. That intermittent native process-exit failure is not claimed resolved by the renderer changes.
 
 ### Earlier comprehensive acceptance
 

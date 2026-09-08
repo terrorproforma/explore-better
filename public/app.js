@@ -6731,6 +6731,7 @@ function updatePaneTabOverflow(paneName) {
   const toggle = tabbar?.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
   const menu = tabbar?.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
   if (!tabbar || !strip || !toggle || !menu) return;
+  const toggleFocused = document.activeElement === toggle;
 
   const tabs = [...strip.querySelectorAll(".tab")];
   tabs.forEach((tab) => tab.classList.remove("tab-responsive-hidden"));
@@ -6767,6 +6768,7 @@ function updatePaneTabOverflow(paneName) {
   const tabCount = panes[paneName]?.tabs?.length || 0;
   toggle.title = `Show all ${tabCount} tabs (${hiddenCount} hidden)`;
   toggle.setAttribute("aria-label", toggle.title);
+  if (toggleFocused && !toggle.hidden) toggle.focus({ preventScroll: true });
   toggle.querySelector(".tab-overflow-count").textContent = String(hiddenCount);
   if (!menu.hidden) positionPaneTabOverflow(paneName);
 }
@@ -11843,6 +11845,7 @@ function updateDockOverflow() {
   const count = document.getElementById("dock-overflow-count");
   const menu = document.getElementById("dock-overflow-menu");
   if (!strip || !toggle || !count || !menu) return;
+  const toggleFocused = document.activeElement === toggle;
   const wasOpen = !menu.hidden;
   const previousSearch = menu.querySelector("input");
   const query = previousSearch?.value || "";
@@ -11893,6 +11896,7 @@ function updateDockOverflow() {
   }
   filterDockOverflowMenu();
   if (wasOpen) positionDockOverflowMenu();
+  if (toggleFocused && !toggle.hidden) toggle.focus({ preventScroll: true });
 }
 
 function scheduleDockOverflowUpdate() {
@@ -12018,6 +12022,7 @@ function updateTopbarOverflow() {
   const toggle = document.getElementById("topbar-more-toggle");
   const menu = document.getElementById("topbar-more-menu");
   if (!topbar || !rootStrip || !status || !toggle || !menu) return;
+  const toggleFocused = document.activeElement === toggle;
   const wasOpen = !menu.hidden;
   const focusedAction = menu.contains(document.activeElement) ? document.activeElement.dataset.topbarAction : "";
   const buttons = [...topbar.querySelectorAll(".topbar-actions [data-topbar-action]")];
@@ -12078,6 +12083,7 @@ function updateTopbarOverflow() {
     positionTopbarMoreMenu();
     if (changed && focusedAction) menu.querySelector(`[data-topbar-action="${CSS.escape(focusedAction)}"]`)?.focus({ preventScroll: true });
   }
+  if (toggleFocused && !toggle.hidden) toggle.focus({ preventScroll: true });
 }
 
 function scheduleTopbarOverflowUpdate() {
