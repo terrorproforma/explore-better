@@ -40,6 +40,10 @@ try {
   assert.ok(ready, `Server did not start: ${output}`);
   browser = await chromium.launch({ executablePath: process.env.EB_INTERACTION_BROWSER || "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+  if (process.env.EB_INTERACTION_CPU_THROTTLE) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.EB_INTERACTION_CPU_THROTTLE) });
+  }
   page.on("pageerror", error => errors.push(error.message));
   const start = async () => {
     await page.goto(`${url}/?left=${encodeURIComponent(fixture)}&right=${encodeURIComponent(empty)}`);
@@ -139,12 +143,23 @@ try {
   await page.keyboard.press("Enter");
   await page.waitForSelector('#preferences-dialog[open]');
   check("overflow-runs-found-action", await page.locator('#preferences-dialog').isVisible());
+  const focusState = () => page.evaluate(() => ({
+    tag: document.activeElement?.tagName, id: document.activeElement?.id, role: document.activeElement?.getAttribute('role'),
+    menuHidden: document.getElementById('dock-overflow-menu').hidden,
+    toggleHidden: document.getElementById('dock-overflow-toggle').hidden,
+    toggleWidth: document.getElementById('dock-overflow-toggle').getBoundingClientRect().width
+  }));
+  const focusEvidence = {};
   await page.locator('[data-close-dialog="preferences-dialog"]').click();
+  focusEvidence.closedDialog = await focusState();
   await page.locator("#dock-overflow-toggle").click();
+  focusEvidence.openedMenu = await focusState();
   await page.keyboard.press("Escape");
+  focusEvidence.escaped = await focusState();
   await page.setViewportSize({ width: 1120, height: 960 });
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  check("overflow-escape-restores-focus", await page.locator('#dock-overflow-toggle').evaluate(node => document.activeElement === node));
+  focusEvidence.resized = await focusState();
+  check("overflow-escape-restores-focus", await page.locator('#dock-overflow-toggle').evaluate(node => document.activeElement === node), JSON.stringify(focusEvidence));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#topbar-more-toggle').click();
   const topbarAction = await page.locator('#topbar-more-menu [data-topbar-action]').first().getAttribute('data-topbar-action');
