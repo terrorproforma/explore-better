@@ -269,9 +269,12 @@ async function main() {
   let mapEncoding = null;
   let overviewRestored = null;
   let staleReportProbe = null;
+  let autoPathProbe = null;
+  let activePathProbe = null;
   let screenshot = null;
   let cancelProbe = null;
   let warmRenderProbe = null;
+  let liveProgressProbe = null;
   try {
     await waitForServer(baseUrl, server, () => serverOutput);
     apiReport = await requestJson(baseUrl, "/api/size-analysis", {
@@ -304,7 +307,8 @@ async function main() {
       during: null,
       after: null
     };
-    await page.route("**/api/size-analysis", async (route) => {
+    const sizeAnalysisRoute = /\/api\/size-analysis(?:\/stream)?$/;
+    await page.route(sizeAnalysisRoute, async (route) => {
       if (!cancelProbe.intercepted) {
         cancelProbe.intercepted = true;
         try {
@@ -314,8 +318,8 @@ async function main() {
           cancelProbe.released = true;
           await route.fulfill({
             status: 200,
-            contentType: "application/json",
-            body: JSON.stringify({
+            contentType: "application/x-ndjson",
+            body: `${JSON.stringify({ type: "result", report: {
               generatedAt: new Date().toISOString(),
               path: fixture,
               requestedPath: fixture,
@@ -331,7 +335,7 @@ async function main() {
               topFiles: [],
               extensions: [],
               cache: { hit: false, source: "ui-cancel-probe" }
-            })
+            } })}\n`
           });
           cancelProbe.fulfilled = true;
         } catch (error) {
@@ -348,7 +352,6 @@ async function main() {
     await clickDockAction(page, "sizeAnalysis");
     await page.waitForSelector("#size-analysis-dialog[open]", { timeout: 10000 });
 
-    await page.locator('[data-size-analysis-action="scan"]').click();
     await page.waitForFunction(
       () =>
         document.getElementById("size-analysis-dialog")?.open &&
@@ -383,8 +386,16 @@ async function main() {
     }));
     releaseCanceledRoute?.();
     await Promise.race([routeSettled, page.waitForTimeout(500)]);
-    await page.unroute("**/api/size-analysis").catch(() => {});
+    await page.unroute(sizeAnalysisRoute).catch(() => {});
 
+    await page.evaluate(() => {
+      window.__exploreBetterSizeProgress = [];
+      const strip = document.getElementById("size-analysis-scan-strip");
+      window.__exploreBetterSizeProgressObserver = new MutationObserver(() => {
+        window.__exploreBetterSizeProgress.push(strip?.textContent?.trim().replace(/\s+/g, " ") || "");
+      });
+      window.__exploreBetterSizeProgressObserver.observe(strip, { childList: true, characterData: true, subtree: true });
+    });
     await page.locator('[data-size-analysis-action="scan"]').click();
     await page.waitForFunction(
       () => {
@@ -394,6 +405,10 @@ async function main() {
       null,
       { timeout: 10000 }
     );
+    liveProgressProbe = await page.evaluate(() => {
+      window.__exploreBetterSizeProgressObserver?.disconnect();
+      return window.__exploreBetterSizeProgress || [];
+    });
     await page.evaluate(() => {
       window.__exploreBetterWarmFileNode = document.querySelector("#size-analysis-files .size-analysis-row");
       window.__exploreBetterWarmCanvasLabel = document.getElementById("size-analysis-treemap")?.getAttribute("aria-label") || "";
@@ -460,6 +475,12 @@ async function main() {
         dialogClass: document.getElementById("size-analysis-dialog")?.className || "",
         selectedTab: document.querySelector('[data-size-analysis-view="map"]')?.getAttribute("aria-selected") || "",
         overviewDisplay: getComputedStyle(document.querySelector(".size-analysis-main")).display,
+        headerAppRegion: getComputedStyle(document.querySelector(".size-analysis-dialog > .dialog-head")).getPropertyValue(
+          "-webkit-app-region"
+        ),
+        actionAppRegion: getComputedStyle(
+          document.querySelector('.size-analysis-dialog > .dialog-head [data-size-analysis-action="scan"]')
+        ).getPropertyValue("-webkit-app-region"),
         canvasWidth: Math.round(rect?.width || 0),
         canvasHeight: Math.round(rect?.height || 0),
         overviewHeight: Math.round(overviewHeight || 0)
@@ -486,10 +507,48 @@ async function main() {
     await page.screenshot({ path: screenshot, fullPage: true });
     await page.locator('[data-close-dialog="size-analysis-dialog"]').click();
     await page.locator('[data-topbar-action="sizeAnalysis"]').click();
+    await page.waitForFunction(
+      () => {
+        const summary = document.getElementById("size-analysis-summary")?.textContent || "";
+        return !/Scanning/i.test(summary) && /file/i.test(summary);
+      },
+      null,
+      { timeout: 10000 }
+    );
     staleReportProbe = await page.evaluate(() => ({
       path: document.getElementById("size-analysis-path")?.value || "",
       summary: document.getElementById("size-analysis-summary")?.textContent?.trim() || "",
       ariaLabel: document.getElementById("size-analysis-treemap")?.getAttribute("aria-label") || ""
+    }));
+    const docsPath = path.join(fixture, "docs");
+    await page.locator("#size-analysis-path").fill(docsPath);
+    await page.waitForFunction(
+      (expectedPath) => {
+        const input = document.getElementById("size-analysis-path");
+        const summary = document.getElementById("size-analysis-summary")?.textContent || "";
+        return input?.value === expectedPath && /2 files/i.test(summary) && !/Scanning/i.test(summary);
+      },
+      docsPath,
+      { timeout: 10000 }
+    );
+    autoPathProbe = await page.evaluate(() => ({
+      path: document.getElementById("size-analysis-path")?.value || "",
+      summary: document.getElementById("size-analysis-summary")?.textContent?.trim() || "",
+      files: document.getElementById("size-analysis-file-count")?.textContent?.trim() || ""
+    }));
+    await page.locator('[data-size-analysis-action="active"]').click();
+    await page.waitForFunction(
+      () => {
+        const input = document.getElementById("size-analysis-path");
+        const summary = document.getElementById("size-analysis-summary")?.textContent || "";
+        return /movie\.mkv$/i.test(input?.value || "") && /1 file/i.test(summary) && !/Scanning/i.test(summary);
+      },
+      null,
+      { timeout: 10000 }
+    );
+    activePathProbe = await page.evaluate(() => ({
+      path: document.getElementById("size-analysis-path")?.value || "",
+      summary: document.getElementById("size-analysis-summary")?.textContent?.trim() || ""
     }));
 
     check(checks, "api-summary-bytes", Number(apiReport.summary?.bytes || 0) > 700000, `${apiReport.summary?.bytes || 0} bytes`);
@@ -541,6 +600,12 @@ async function main() {
       JSON.stringify(apiReport.space || null)
     );
     check(checks, "ui-summary-ready", /file/i.test(ui.summary), ui.summary);
+    check(
+      checks,
+      "ui-live-stream-updates",
+      liveProgressProbe.some((value) => /Scanning.*1 item checked/i.test(value)),
+      JSON.stringify(liveProgressProbe)
+    );
     check(
       checks,
       "ui-warm-render-preserves-map",
@@ -629,6 +694,12 @@ async function main() {
     );
     check(
       checks,
+      "ui-map-header-controls-clickable",
+      mapWorkspace?.headerAppRegion === "no-drag" && mapWorkspace?.actionAppRegion === "no-drag",
+      JSON.stringify(mapWorkspace)
+    );
+    check(
+      checks,
       "ui-map-encoding-controls",
       mapEncoding?.sizeMode === "allocated" &&
         mapEncoding?.colorMode === "folder" &&
@@ -645,11 +716,23 @@ async function main() {
     );
     check(
       checks,
-      "ui-treemap-stale-report-cleared",
+      "ui-treemap-new-target-auto-scanned",
       /movie\.mkv$/i.test(staleReportProbe?.path || "") &&
-        /Ready/i.test(staleReportProbe?.summary || "") &&
-        /Scan to draw/i.test(staleReportProbe?.ariaLabel || ""),
+        /file/i.test(staleReportProbe?.summary || "") &&
+        /mapped file block/i.test(staleReportProbe?.ariaLabel || ""),
       JSON.stringify(staleReportProbe)
+    );
+    check(
+      checks,
+      "ui-path-edit-auto-scanned",
+      /docs$/i.test(autoPathProbe?.path || "") && /2 files/i.test(autoPathProbe?.summary || "") && autoPathProbe?.files === "2",
+      JSON.stringify(autoPathProbe)
+    );
+    check(
+      checks,
+      "ui-active-path-auto-scanned",
+      /movie\.mkv$/i.test(activePathProbe?.path || "") && /1 file/i.test(activePathProbe?.summary || ""),
+      JSON.stringify(activePathProbe)
     );
     check(
       checks,
@@ -694,10 +777,13 @@ async function main() {
     mapEncoding,
     overviewRestored,
     staleReportProbe,
+    autoPathProbe,
+    activePathProbe,
     apiReport,
     ui,
     cancelProbe,
     warmRenderProbe,
+    liveProgressProbe,
     pageErrors,
     consoleMessages,
     failedResponses,

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -71,6 +71,26 @@ async function requestJson(baseUrl, route, options = {}) {
     throw new Error(data.error || `Request failed: ${response.status}`);
   }
   return data;
+}
+
+async function analyzeStream(baseUrl, body) {
+  const response = await fetch(`${baseUrl}/api/size-analysis/stream`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Streaming analysis failed: ${response.status} ${text}`);
+  const events = text
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const error = events.find((event) => event.type === "error");
+  if (error) throw new Error(error.error || "Streaming analysis failed.");
+  return {
+    progress: events.filter((event) => event.type === "progress").map((event) => event.report),
+    result: events.find((event) => event.type === "result")?.report || null
+  };
 }
 
 async function timed(task) {
@@ -456,9 +476,10 @@ async function main() {
       check(
         checks,
         "cold-native-single-pass",
-        cold.scanProvider === "native-go-helper-single-pass" &&
+        cold.scanProvider === "native-go-helper-summary-single-pass" &&
           cold.native?.singlePass === true &&
-          cold.native?.wireFormat === "columns-v1",
+          cold.native?.wireFormat === "summary-v1" &&
+          cold.native?.summaryOnly === true,
         `provider=${cold.scanProvider || "missing"}; native=${JSON.stringify(cold.native || null)}.`
       );
       check(
@@ -494,6 +515,30 @@ async function main() {
       "warm-same-total",
       Number(warm.summary.bytes || 0) === Number(cold.summary.bytes || 0) && Number(warm.summary.files || 0) === Number(cold.summary.files || 0),
       `cold=${cold.summary.bytes}/${cold.summary.files}; warm=${warm.summary.bytes}/${warm.summary.files}.`
+    );
+
+    const streamed = await analyzeStream(baseUrl, { ...body, maxEntries: 0, maxDepth: 7, maxChildren: 94 });
+    check(
+      checks,
+      "stream-emits-live-progress",
+      streamed.progress.length >= 1 &&
+        streamed.progress.every((item) => item.partial === true) &&
+        Number(streamed.progress.at(-1)?.scanned || 0) >= 10_000,
+      `events=${streamed.progress.length}; scanned=${streamed.progress.map((item) => item.scanned).join(",")}.`
+    );
+    check(
+      checks,
+      "stream-final-result-complete",
+      streamed.result?.partial !== true &&
+        streamed.result?.truncated === false &&
+        Number(streamed.result?.maxEntries ?? -1) === 0 &&
+        Number(streamed.result?.summary?.files || 0) === count,
+      JSON.stringify({
+        partial: streamed.result?.partial,
+        truncated: streamed.result?.truncated,
+        maxEntries: streamed.result?.maxEntries,
+        files: streamed.result?.summary?.files
+      })
     );
 
     const cappedBody = { ...body, maxEntries: Math.max(100, Math.floor(count / 4)) };
@@ -628,6 +673,30 @@ async function main() {
     check(checks, "post-mutation-warm-cache-hit", postMutationWarm.cache?.hit === true, JSON.stringify(postMutationWarm.cache || null));
     budgetCheck(checks, "post-mutation-warm-wall-budget", postMutationWarm.wallMs, warmWallBudgetMs, "Repeat scan after rewarming cache.");
 
+    if (process.platform === "win32") {
+      const sparseRoot = path.join(runRoot, "sparse-fixture");
+      const sparsePath = path.join(sparseRoot, "unallocated.bin");
+      await fs.mkdir(sparseRoot, { recursive: true });
+      await fs.writeFile(sparsePath, "");
+      const sparseSetup = spawnSync("fsutil.exe", ["sparse", "setflag", sparsePath], {
+        encoding: "utf8",
+        windowsHide: true
+      });
+      if (sparseSetup.status !== 0) throw new Error(`Sparse fixture setup failed: ${sparseSetup.stderr || sparseSetup.error || sparseSetup.stdout}`);
+      await fs.truncate(sparsePath, 1024 * 1024);
+      const sparseReport = await requestJson(baseUrl, "/api/size-analysis", {
+        method: "POST",
+        body: JSON.stringify({ path: sparseRoot, maxEntries: 0 })
+      });
+      check(
+        checks,
+        "sparse-file-preserves-zero-allocation",
+        sparseReport.summary.bytes === 1024 * 1024 && sparseReport.summary.allocated === 0 &&
+          sparseReport.topFiles[0]?.allocated === 0 && sparseReport.extensions[0]?.allocated === 0,
+        JSON.stringify({ summary: sparseReport.summary, file: sparseReport.topFiles[0], extension: sparseReport.extensions[0] })
+      );
+    }
+
     const summary = summaryFor(checks);
     const report = {
       generatedAt: new Date().toISOString(),
@@ -673,6 +742,11 @@ async function main() {
       snapshots: {
         cold,
         warm,
+        streamed: {
+          progressEvents: streamed.progress.length,
+          progressScanned: streamed.progress.map((item) => item.scanned),
+          result: summarizeAnalysis({ wallMs: 0, result: streamed.result })
+        },
         cappedCold,
         cappedWarm,
         afterMutation,

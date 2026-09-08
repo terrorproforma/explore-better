@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func browseDirectory(ctx context.Context, root string, maxEntries int, showHidden *bool, compact bool) (map[string]interface{}, error) {
@@ -106,6 +107,72 @@ func collectTreeEntries(ctx context.Context, root string, maxEntries int) (treeS
 		return nil
 	})
 	return result, err
+}
+
+func analyzeTree(ctx context.Context, req request, out *writer) (map[string]interface{}, error) {
+	started := time.Now()
+	root := filepath.Clean(req.Path)
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+	acc := newAnalysisAccumulator(root, rootInfo.ModTime().UnixMilli())
+	foldersByPath := map[string]int{root: 0}
+	err = filepath.WalkDir(root, func(itemPath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			acc.Skipped++
+			return nil
+		}
+		if itemPath == root {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if req.MaxEntries > 0 && acc.Scanned >= req.MaxEntries {
+			acc.Truncated = true
+			return filepath.SkipAll
+		}
+		acc.Scanned++
+		if entry.Type()&os.ModeSymlink != 0 {
+			acc.Skipped++
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			acc.Skipped++
+			return nil
+		}
+		parent := foldersByPath[filepath.Dir(itemPath)]
+		if entry.IsDir() {
+			foldersByPath[itemPath] = acc.addFolder(entry.Name(), itemPath, parent, info.ModTime().UnixMilli())
+			return nil
+		}
+		logical := uint64(max(info.Size(), 0))
+		allocated, _, _, allocationErr := allocatedSize(itemPath, info.Size())
+		if allocationErr != nil {
+			allocated = logical
+			acc.Skipped++
+		}
+		acc.addFile(entry.Name(), itemPath, parent, logical, allocated, info.ModTime().UnixMilli())
+		if acc.Scanned == 1 || acc.Scanned%10000 == 0 {
+			out.send(response{Version: protocolVersion, ID: req.ID, Type: "progress", OK: true, Data: acc.progressResult(root, req.MaxEntries)})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	volume, volumeErr := volumeInfo(root)
+	if volumeErr != nil {
+		volume = map[string]interface{}{"clusterSize": 0, "allocationAccuracy": "unknown", "error": volumeErr.Error()}
+	}
+	return acc.result(root, req.MaxEntries, volume, float64(time.Since(started).Microseconds())/1000), nil
 }
 
 func allocatedSize(_ string, logical int64) (uint64, string, string, error) {

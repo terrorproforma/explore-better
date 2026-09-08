@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Live Disk Analysis
+
+- Starts scanning when Disk Map or Analyzer opens and when its target changes, with no entry limit by default.
+- Streams native scan progress into the totals, tables, and treemap while keeping file summaries bounded.
+- Defaults disk maps to allocated size, preserves zero allocation for sparse files, and accounts for volume use that cannot be enumerated.
+- Keeps map header controls clickable and supports cancellation, warm scan reuse, and explicit partial scan limits.
+
+### Maintenance
+
+- Updated vulnerable dependency patches, including the pinned YAML parser, and excluded local editor state and backup files from version control.
+
 ### Local STL And STEP Preview
 
 - Added interactive 3D previews for `.stl`, `.step`, and `.stp` files in both the Preview inspector and the large Viewer.

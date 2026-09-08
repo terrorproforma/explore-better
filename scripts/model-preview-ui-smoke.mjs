@@ -255,7 +255,11 @@ async function main() {
     await page.screenshot({ path: screenshotPath, fullPage: true });
 
     await page.locator('[data-close-dialog="viewer-dialog"]').click();
-    await page.waitForFunction(() => !document.getElementById("viewer-dialog")?.open);
+    await page.waitForFunction(
+      () => !document.getElementById("viewer-dialog")?.open && !document.querySelector("#viewer-body canvas"),
+      null,
+      { timeout: 5000 }
+    );
     check(checks, "viewer-disposes-on-close", await page.locator("#viewer-body canvas").count() === 0, `viewer canvases=${await page.locator("#viewer-body canvas").count()}`);
     check(checks, "browser-page-errors-clean", pageErrors.length === 0, JSON.stringify(pageErrors));
     check(checks, "browser-console-errors-clean", consoleErrors.length === 0, JSON.stringify(consoleErrors));

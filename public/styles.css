@@ -5650,6 +5650,17 @@ textarea:focus {
   border-radius: 4px;
 }
 
+.size-analysis-dialog.map-view > .dialog-head {
+  padding-right: calc(10px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.size-analysis-dialog.map-view > .dialog-head button {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
 .select-dialog {
   width: min(1040px, calc(100vw - 28px));
 }

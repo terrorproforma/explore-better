@@ -63,7 +63,7 @@ const app = {
     treemapSelection: null,
     treemapFocusPath: "",
     viewMode: "overview",
-    sizeMode: "logical",
+    sizeMode: "allocated",
     colorMode: "type"
   },
   pathSuggest: { paneName: null, items: [], activeIndex: 0, keyboardSelected: false, requestId: 0 },
@@ -2300,6 +2300,49 @@ async function request(url, options = {}) {
   const { backgroundWork, ...requestOptions } = options;
   try {
     return await requestWithoutForegroundTracking(url, requestOptions);
+  } finally {
+    release?.();
+  }
+}
+
+async function requestSizeAnalysisStream(body, signal, onProgress) {
+  const release = beginForegroundActivity("analysis");
+  try {
+    const response = await fetch("/api/size-analysis/stream", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal,
+      headers: { "content-type": "application/json" }
+    });
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `Request failed: ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let result = null;
+    const consumeLine = (line) => {
+      if (!line.trim()) return;
+      const event = JSON.parse(line);
+      if (event.type === "progress" && event.report) onProgress?.(event.report);
+      if (event.type === "result" && event.report) result = event.report;
+      if (event.type === "error") throw new Error(event.error || "Size analysis failed.");
+    };
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        consumeLine(line);
+      }
+      if (done) break;
+    }
+    consumeLine(buffer);
+    if (!result) throw new Error("Size analysis stream ended before the final result.");
+    return result;
   } finally {
     release?.();
   }
@@ -7500,6 +7543,25 @@ function setSizeAnalysisPathToActive() {
   }
 }
 
+let sizeAnalysisAutoScanTimer = 0;
+
+function clearSizeAnalysisAutoScan() {
+  if (sizeAnalysisAutoScanTimer) {
+    clearTimeout(sizeAnalysisAutoScanTimer);
+    sizeAnalysisAutoScanTimer = 0;
+  }
+}
+
+function queueSizeAnalysisAutoScan(delay = 450) {
+  clearSizeAnalysisAutoScan();
+  if (!document.getElementById("size-analysis-dialog")?.open) return;
+  sizeAnalysisAutoScanTimer = setTimeout(() => {
+    sizeAnalysisAutoScanTimer = 0;
+    if (!document.getElementById("size-analysis-dialog")?.open) return;
+    void runSizeAnalysis();
+  }, Math.max(0, Number(delay) || 0));
+}
+
 function updateSizeAnalysisActionState() {
   const scanning = app.sizeAnalysis.loading === true;
   const scan = document.querySelector('[data-size-analysis-action="scan"]');
@@ -7640,6 +7702,13 @@ function sizeAnalysisTreemapValue(item) {
   return app.sizeAnalysis.sizeMode === "allocated" ? sizeAnalysisAllocatedOf(item) : Number(item?.size || 0);
 }
 
+function sizeAnalysisTreemapTotal(report) {
+  if (app.sizeAnalysis.sizeMode === "allocated") {
+    return Number(report?.summary?.allocated || 0) + Number(report?.summary?.unmappedAllocated || 0);
+  }
+  return Number(report?.summary?.bytes || 0);
+}
+
 function sizeAnalysisTreemapColor(item) {
   if (app.sizeAnalysis.colorMode === "folder") {
     return item?.folderColor || sizeAnalysisStablePaletteColor(item?.parent || item?.path || item?.name);
@@ -7741,7 +7810,9 @@ function sizeAnalysisScanStrip(report) {
   const elapsed = Math.round(Number(report?.summary?.elapsedMs || 0));
   const scanned = Number(report?.scanned || 0);
   const skipped = Number(report?.summary?.skipped || 0);
-  const cap = report?.cache?.hit
+  const cap = report?.partial
+    ? "Scanning..."
+    : report?.cache?.hit
     ? "Cached result"
     : report?.truncated
       ? `Stopped at ${itemWord(Number(report.maxEntries || 0), "item")}`
@@ -7749,6 +7820,8 @@ function sizeAnalysisScanStrip(report) {
   const space = report?.space || null;
   const root = space?.root || report?.path || "";
   const share = space?.available ? sizeAnalysisDriveShareText(totalBytes, space.totalBytes) : "";
+  const unmapped = Number(report?.summary?.unmappedAllocated || 0);
+  const unmappedText = unmapped > 0 ? `${formatSize(unmapped)} ${report?.partial ? "not mapped yet" : "not enumerable"}` : "";
   return `<div class="size-analysis-scan-line">
     <strong>${escapeHtml(cap)}</strong>
     <span>${escapeHtml(
@@ -7760,7 +7833,9 @@ function sizeAnalysisScanStrip(report) {
         .filter(Boolean)
         .join(" / ")
     )}</span>
-    <span title="${escapeHtml(root)}">${escapeHtml([sizeAnalysisSpaceText(space, totalBytes), share].filter(Boolean).join(" / "))}</span>
+    <span title="${escapeHtml(root)}">${escapeHtml(
+      [sizeAnalysisSpaceText(space, totalBytes), share, unmappedText].filter(Boolean).join(" / ")
+    )}</span>
   </div>
   <div class="size-analysis-progress-track" aria-label="Size by extension">
     ${sizeAnalysisBandSegments(report?.extensions || [], totalBytes)}
@@ -7884,11 +7959,20 @@ function sizeAnalysisMapLegendItems(report = app.sizeAnalysis.report) {
       value: sizeAnalysisTreemapValue(item)
     }));
   }
-  return (report.extensions || []).slice(0, 10).map((item) => ({
+  const items = (report.extensions || []).map((item) => ({
     label: sizeAnalysisExtensionLabel(item.extension),
     color: sizeAnalysisExtensionColor(item.extension),
     value: app.sizeAnalysis.sizeMode === "allocated" ? sizeAnalysisAllocatedOf(item) : Number(item.size || 0)
   }));
+  const unmapped = Number(report.summary?.unmappedAllocated || 0);
+  if (app.sizeAnalysis.sizeMode === "allocated" && unmapped > 0) {
+    items.unshift({
+      label: report.partial ? "Not mapped yet" : "Not enumerable",
+      color: sizeAnalysisExtensionColor("(other)"),
+      value: unmapped
+    });
+  }
+  return items.slice(0, 10);
 }
 
 function renderSizeAnalysisViewState() {
@@ -7993,7 +8077,7 @@ function renderSizeAnalysisDialog(message = "") {
   }
   updateSizeAnalysisActionState();
   renderSizeAnalysisViewState();
-  if (app.sizeAnalysis.loading) {
+  if (app.sizeAnalysis.loading && !report?.partial) {
     const requestedPath = document.getElementById("size-analysis-path")?.value || "";
     if (report && samePath(report.path, requestedPath)) {
       summary.textContent = message || "Refreshing...";
@@ -8060,6 +8144,20 @@ function renderSizeAnalysisDialog(message = "") {
       `${Number(report.summary?.categories || 0).toLocaleString()} categories${skipped ? ` / ${skipped} skipped` : ""}`
     )
   ];
+  const unmappedAllocated = Number(report.summary?.unmappedAllocated || 0);
+  if (unmappedAllocated > 0) {
+    metricCards.splice(
+      2,
+      0,
+      sizeAnalysisMetric(
+        report.partial ? "Not mapped yet" : "Not enumerable",
+        formatSize(unmappedAllocated),
+        report.partial
+          ? "The live scan is still discovering the drive"
+          : "Windows-reported use in skipped/inaccessible items or filesystem metadata"
+      )
+    );
+  }
   if (report.space?.available) {
     metricCards.push(
       sizeAnalysisMetric(
@@ -8098,6 +8196,7 @@ function openSizeAnalysisDialog(paneName = app.activePane, viewMode = app.sizeAn
   app.sizeAnalysis.paneName = paneName;
   app.sizeAnalysis.viewMode = viewMode === "map" ? "map" : "overview";
   const defaultPath = sizeAnalysisDefaultPath(paneName);
+  const hasCurrentReport = Boolean(app.sizeAnalysis.report?.path && samePath(app.sizeAnalysis.report.path, defaultPath));
   if (app.sizeAnalysis.report?.path && !samePath(app.sizeAnalysis.report.path, defaultPath)) {
     app.sizeAnalysis.report = null;
     app.sizeAnalysis.treemapRects = [];
@@ -8111,6 +8210,9 @@ function openSizeAnalysisDialog(paneName = app.activePane, viewMode = app.sizeAn
   }
   renderSizeAnalysisDialog();
   document.getElementById("size-analysis-dialog").showModal();
+  if (!hasCurrentReport && !app.sizeAnalysis.loading) {
+    void runSizeAnalysis();
+  }
 }
 
 async function runSizeAnalysis() {
@@ -8125,15 +8227,15 @@ async function runSizeAnalysis() {
   renderSizeAnalysisDialog("Scanning...");
   const body = {
     path: document.getElementById("size-analysis-path")?.value || sizeAnalysisDefaultPath(app.sizeAnalysis.paneName),
-    maxEntries: Number(document.getElementById("size-analysis-max-entries")?.value || 100000),
+    maxEntries: Number(document.getElementById("size-analysis-max-entries")?.value || 0),
     followLinks: document.getElementById("size-analysis-follow-links")?.checked === true
   };
   setStatus(`Analyzing ${body.path}`);
   try {
-    const report = await request("/api/size-analysis", {
-      method: "POST",
-      body: JSON.stringify(body),
-      signal: controller.signal
+    const report = await requestSizeAnalysisStream(body, controller.signal, (progress) => {
+      if (app.sizeAnalysis.requestId !== requestId) return;
+      app.sizeAnalysis.report = progress;
+      renderSizeAnalysisDialog();
     });
     if (app.sizeAnalysis.requestId !== requestId) {
       return;
@@ -8195,7 +8297,7 @@ function sizeAnalysisPathContains(folderPath, itemPath) {
 
 function sizeAnalysisTreemapHierarchy(report) {
   const sourceRoot = report?.tree;
-  if (!sourceRoot || sizeAnalysisTreemapValue(sourceRoot) <= 0) {
+  if (!sourceRoot || sizeAnalysisTreemapTotal(report) <= 0) {
     return null;
   }
   const folderNodes = [];
@@ -8236,6 +8338,23 @@ function sizeAnalysisTreemapHierarchy(report) {
     }
     file.mapSize = sizeAnalysisTreemapValue(file);
     owner.fileChildren.push(file);
+  }
+  const unmappedAllocated = Number(report?.summary?.unmappedAllocated || 0);
+  if (app.sizeAnalysis.sizeMode === "allocated" && unmappedAllocated > 0) {
+    root.fileChildren.push({
+      name: report.partial ? "Not mapped yet" : "Not enumerable",
+      path: "",
+      parent: root.path,
+      extension: "(other)",
+      kind: "Windows-reported drive use",
+      size: 0,
+      allocated: unmappedAllocated,
+      mapSize: unmappedAllocated,
+      modified: null,
+      color: sizeAnalysisExtensionColor("(other)"),
+      virtualRemainder: true,
+      treemapGroup: false
+    });
   }
   const colorFolderBranches = (folder, branchColor = "", rootFolder = false) => {
     folder.folderColor = branchColor || sizeAnalysisStablePaletteColor(folder.path || folder.name);
@@ -8419,10 +8538,7 @@ function sizeAnalysisTreemapLabel(item, report = app.sizeAnalysis.report) {
   if (!item) {
     return "";
   }
-  const totalBytes =
-    app.sizeAnalysis.sizeMode === "allocated"
-      ? Number(report?.summary?.allocated || report?.summary?.bytes || 0)
-      : Number(report?.summary?.bytes || 0);
+  const totalBytes = sizeAnalysisTreemapTotal(report);
   const measuredBytes = Number(item.mapSize ?? sizeAnalysisTreemapValue(item));
   return [
     item.name || "(file)",
@@ -8654,10 +8770,7 @@ function drawSizeTreemap(report) {
   const hierarchy = sizeAnalysisTreemapHierarchy(report);
   const focused = sizeAnalysisTreemapFocusNode(hierarchy);
   renderSizeAnalysisMapNavigation(report, hierarchy);
-  const measuredTotal =
-    app.sizeAnalysis.sizeMode === "allocated"
-      ? Number(report?.summary?.allocated || report?.summary?.bytes || 0)
-      : Number(report?.summary?.bytes || 0);
+  const measuredTotal = sizeAnalysisTreemapTotal(report);
   if (!focused?.children?.length || measuredTotal <= 0) {
     app.sizeAnalysis.treemapRects = [];
     ctx.fillStyle = "#dbe6e1";
@@ -25608,6 +25721,7 @@ function wireEvents() {
       const action = sizeAnalysisButton.dataset.sizeAnalysisAction;
       if (action === "active") {
         setSizeAnalysisPathToActive();
+        queueSizeAnalysisAutoScan(0);
         return;
       }
       if (action === "scan") {
@@ -25812,6 +25926,10 @@ function wireEvents() {
       renderSpeedDialog();
       return;
     }
+    if (event.target.id === "size-analysis-path" || event.target.id === "size-analysis-max-entries") {
+      queueSizeAnalysisAutoScan();
+      return;
+    }
     if (event.target.id === "command-input") {
       app.commandPalette.activeIndex = 0;
       renderCommands(event.target.value);
@@ -25883,6 +26001,14 @@ function wireEvents() {
     }
     if (event.target.id === "size-analysis-color-by") {
       setSizeAnalysisMapEncoding({ colorMode: event.target.value });
+      return;
+    }
+    if (
+      event.target.id === "size-analysis-path" ||
+      event.target.id === "size-analysis-max-entries" ||
+      event.target.id === "size-analysis-follow-links"
+    ) {
+      queueSizeAnalysisAutoScan(0);
       return;
     }
     if (event.target.closest("#copy-names-dialog")) {
@@ -26104,6 +26230,11 @@ function wireEvents() {
     if (event.target.id === "speed-query" && event.key === "Enter") {
       event.preventDefault();
       await searchSpeedIndex();
+      return;
+    }
+    if (event.target.id === "size-analysis-path" && event.key === "Enter") {
+      event.preventDefault();
+      queueSizeAnalysisAutoScan(0);
       return;
     }
     if (handleQuickSearchKey(event)) {
@@ -27276,6 +27407,7 @@ function wireEvents() {
   const sizeAnalysisDialog = document.getElementById("size-analysis-dialog");
   if (sizeAnalysisDialog) {
     const cancelActiveSizeAnalysis = () => {
+      clearSizeAnalysisAutoScan();
       if (app.sizeAnalysis.loading) {
         cancelSizeAnalysis("Scan canceled");
       }

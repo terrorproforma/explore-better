@@ -661,7 +661,7 @@ async function waitForForegroundIdle(signal) {
 
 function requestIsForegroundWork(url, method = "GET") {
   const pathname = String(url?.pathname || "");
-  if (pathname === "/api/list" || pathname === "/api/tree" || pathname === "/api/search" || pathname === "/api/size-analysis") return true;
+  if (pathname === "/api/list" || pathname === "/api/tree" || pathname === "/api/search" || pathname.startsWith("/api/size-analysis")) return true;
   if (pathname.startsWith("/api/operation/") || pathname === "/api/transfer" || pathname === "/api/copy" || pathname === "/api/move") return true;
   return method !== "GET" && ["/api/rename", "/api/delete", "/api/recycle", "/api/trash", "/api/archive/create", "/api/archive/extract"].includes(pathname);
 }
@@ -14398,6 +14398,14 @@ function sizeAnalysisOptionNumber(value, fallback, min, max) {
   return Math.max(min, Math.min(Math.floor(number), max));
 }
 
+function sizeAnalysisEntryLimit(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return 0;
+  }
+  return Math.max(100, Math.min(Math.floor(number), 5_000_000));
+}
+
 function makeSizeNode(itemPath, parent = null, depth = 0) {
   return {
     id: crypto.createHash("sha1").update(pathIdentity(itemPath)).digest("hex").slice(0, 16),
@@ -15151,6 +15159,152 @@ async function nativeAllocationSnapshot(rootPath, maxEntries, signal) {
   };
 }
 
+async function nativeSizeAnalysisSummary(rootPath, maxEntries, signal, onProgress = null) {
+  if (process.platform !== "win32" || String(rootPath).startsWith("\\\\") || !nativeFilesystemHelperPath()) {
+    return null;
+  }
+  return nativeFilesystemHelperRequest(
+    "analyze-tree",
+    { path: rootPath, maxEntries },
+    {
+      signal,
+      timeoutMs: maxEntries > 0 ? 10 * 60_000 : 30 * 60_000,
+      onProgress
+    }
+  );
+}
+
+function sizeAnalysisReportFromNativeSummary(payload = {}, context = {}) {
+  const folderRows = Array.isArray(payload.folderNodes) ? payload.folderNodes : [];
+  const nodes = folderRows.map((row, index) => {
+    const node = makeSizeNode(String(row.path || (index === 0 ? context.rootPath : "")), null, Number(row.depth || 0));
+    node.name = String(row.name || node.name);
+    node.size = Number(row.logicalBytes || 0);
+    node.allocated = Number(row.allocatedBytes || 0);
+    node.files = Number(row.files || 0);
+    node.folders = Number(row.folders || 0);
+    node.modified = Number(row.modifiedMs || 0) || null;
+    return node;
+  });
+  for (let index = 1; index < nodes.length; index += 1) {
+    const parentIndex = Number(folderRows[index]?.parent);
+    const parent = nodes[parentIndex] || nodes[0] || null;
+    nodes[index].parent = parent;
+    parent?.children.push(nodes[index]);
+  }
+  const rootNode = nodes[0] || makeSizeNode(context.rootPath);
+  const topFiles = (Array.isArray(payload.topFiles) ? payload.topFiles : []).map((row) => {
+    const fileName = String(row.name || path.basename(String(row.path || "")));
+    const extension = String(row.extension || extensionBucketFor(fileName));
+    return {
+      name: fileName,
+      path: String(row.path || ""),
+      parent: String(row.parent || path.dirname(String(row.path || ""))),
+      extension,
+      kind: entryKind(fileName, false),
+      category: sizeAnalysisCategoryForExtension(extension),
+      size: Number(row.logicalBytes || 0),
+      allocated: Number(row.allocatedBytes ?? row.logicalBytes ?? 0),
+      modified: Number(row.modifiedMs || 0) || null
+    };
+  });
+  const extensions = (Array.isArray(payload.extensions) ? payload.extensions : [])
+    .map((row) => {
+      const extension = String(row.extension || "(none)");
+      return {
+        extension,
+        kind: entryKind(`file${extension === "(none)" ? "" : extension}`, false),
+        category: sizeAnalysisCategoryForExtension(extension),
+        files: Number(row.files || 0),
+        size: Number(row.logicalBytes || 0),
+        allocated: Number(row.allocatedBytes ?? row.logicalBytes ?? 0)
+      };
+    })
+    .sort((left, right) => right.size - left.size)
+    .slice(0, 200);
+  const categoryStats = new Map();
+  for (const row of extensions) {
+    const current = categoryStats.get(row.category) || { category: row.category, files: 0, size: 0, allocated: 0 };
+    current.files += row.files;
+    current.size += row.size;
+    current.allocated += row.allocated;
+    categoryStats.set(row.category, current);
+  }
+  const categories = [...categoryStats.values()].sort((left, right) => right.size - left.size).slice(0, 40);
+  const topFolders = nodes
+    .slice(1)
+    .sort((left, right) => right.size - left.size)
+    .slice(0, 200)
+    .map((folder) => ({
+      name: folder.name,
+      path: folder.path,
+      parent: folder.parent?.path || "",
+      parentSize: Number(folder.parent?.size || 0),
+      parentAllocated: Number(folder.parent?.allocated || 0),
+      size: folder.size,
+      allocated: folder.allocated,
+      files: folder.files,
+      folders: folder.folders,
+      modified: folder.modified
+    }));
+  const space = context.space || null;
+  const isVolumeRoot = Boolean(space?.available && sameResolvedPath(context.rootPath, space.root));
+  const unmappedAllocated = isVolumeRoot ? Math.max(0, Number(space.usedBytes || 0) - Number(rootNode.allocated || 0)) : 0;
+  const partial = payload.partial === true;
+  return {
+    generatedAt: new Date().toISOString(),
+    path: context.rootPath,
+    requestedPath: context.requestedPath,
+    redirectedFrom: context.redirectedFrom,
+    followLinks: false,
+    maxEntries: context.maxEntries,
+    scanned: Number(payload.scannedEntries || 0),
+    truncated: payload.truncated === true,
+    partial,
+    skipped: [],
+    space,
+    allocatedSource: payload.volume?.allocatedSource || "win32-get-compressed-file-size",
+    clusterSize: Number(payload.volume?.clusterSize || 0),
+    allocationAccuracy: payload.volume?.allocationAccuracy || "exact",
+    allocationProvider: "native-go-helper",
+    scanProvider: partial ? "native-go-helper-summary-stream" : "native-go-helper-summary-single-pass",
+    native: {
+      requestMs: Number(context.requestMs || 0),
+      helperPid: context.helperPid || null,
+      clientReused: context.clientReused === true,
+      scannedEntries: Number(payload.scannedEntries || 0),
+      files: Number(payload.files || 0),
+      folders: Number(payload.folders || 0),
+      wireFormat: payload.wireFormat || "summary-v1",
+      timing: payload.timing || null,
+      singlePass: true,
+      summaryOnly: true
+    },
+    summary: {
+      bytes: Number(rootNode.size || 0),
+      allocated: Number(rootNode.allocated || 0),
+      unmappedAllocated,
+      files: Number(payload.files || rootNode.files || 0),
+      folders: Number(payload.folders || rootNode.folders || 0),
+      extensions: extensions.length,
+      categories: categories.length,
+      skipped: Number(payload.skipped || 0),
+      elapsedMs: Number(context.elapsedMs || 0)
+    },
+    tree: compactSizeTree(rootNode, { maxDepth: context.maxDepth, maxChildren: context.maxChildren }),
+    topFolders,
+    topFiles,
+    extensions,
+    categories,
+    cache: {
+      hit: false,
+      source: partial ? "filesystem-progress" : "filesystem",
+      ttlMs: sizeAnalysisCacheTtlMs,
+      cacheKey: context.cacheKey
+    }
+  };
+}
+
 function allocatedBytesForPath(itemPath, bytes, allocationSnapshot) {
   const key = pathIdentity(itemPath);
   if (allocationSnapshot?.entries?.has(key)) {
@@ -15484,11 +15638,12 @@ async function coalescedSizeAnalysisReport(context, loader, startedAt) {
 
 async function sizeAnalysisReport(body = {}, options = {}) {
   const signal = options.signal || null;
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
   const requested = resolveUserPath(body.path || os.homedir());
   const redirected = await windowsLegacyFolderRedirectForPath(requested);
   const rootPath = redirected || requested;
   const followLinks = body.followLinks === true;
-  const maxEntries = sizeAnalysisOptionNumber(body.maxEntries, 100_000, 100, 500_000);
+  const maxEntries = sizeAnalysisEntryLimit(body.maxEntries);
   const maxDepth = sizeAnalysisOptionNumber(body.maxDepth, 5, 1, 12);
   const maxChildren = sizeAnalysisOptionNumber(body.maxChildren, 36, 4, 120);
   const startedAt = monotonicMs();
@@ -15565,7 +15720,43 @@ async function sizeAnalysisReport(body = {}, options = {}) {
   return coalescedSizeAnalysisReport(cacheContext, async () => {
     const space = await sizeAnalysisSpaceForPath(rootPath);
     throwIfAborted(signal);
-    const allocationSnapshot = await nativeAllocationSnapshot(rootPath, maxEntries, signal).catch((error) => {
+    if (rootStats.isDirectory() && !followLinks) {
+      const summaryContext = {
+        rootPath,
+        requestedPath: requested,
+        redirectedFrom: redirected ? requested : null,
+        maxEntries,
+        maxDepth,
+        maxChildren,
+        cacheKey: cacheContext.cacheKey,
+        space
+      };
+      const nativeSummary = await nativeSizeAnalysisSummary(rootPath, maxEntries, signal, (progress) => {
+        const report = sizeAnalysisReportFromNativeSummary(progress, {
+          ...summaryContext,
+          elapsedMs: elapsedMs(startedAt)
+        });
+        onProgress?.(report);
+      }).catch((error) => {
+        if (isAbortError(error)) throw error;
+        return null;
+      });
+      if (nativeSummary) {
+        const report = sizeAnalysisReportFromNativeSummary(nativeSummary.data, {
+          ...summaryContext,
+          requestMs: nativeSummary.requestMs,
+          helperPid: nativeSummary.helperPid,
+          clientReused: nativeSummary.clientReused,
+          elapsedMs: elapsedMs(startedAt)
+        });
+        const cacheStore = rememberSizeAnalysisCache(report, cacheContext);
+        report.cache.stored = cacheStore?.stored === true;
+        if (cacheStore?.reason) report.cache.storeReason = cacheStore.reason;
+        return report;
+      }
+    }
+    const fallbackMaxEntries = maxEntries || Number.MAX_SAFE_INTEGER;
+    const allocationSnapshot = await nativeAllocationSnapshot(rootPath, fallbackMaxEntries, signal).catch((error) => {
       if (isAbortError(error)) throw error;
       return null;
     });
@@ -15594,7 +15785,7 @@ async function sizeAnalysisReport(body = {}, options = {}) {
     folders.push(rootNode);
     if (allocationSnapshot?.completeEntries && !followLinks) {
       const nodesByPath = new Map([[pathIdentity(rootPath), rootNode]]);
-      const nativeRows = allocationSnapshot.rows.slice(0, maxEntries);
+      const nativeRows = allocationSnapshot.rows.slice(0, fallbackMaxEntries);
       for (const row of nativeRows.filter((item) => item.directory === true)) {
         throwIfAborted(signal);
         const fullPath = String(row.path || "");
@@ -15640,12 +15831,12 @@ async function sizeAnalysisReport(body = {}, options = {}) {
         scanned += 1;
       }
       scanned = Math.max(scanned, allocationSnapshot.helperScannedEntries);
-      truncated = allocationSnapshot.truncated || scanned >= maxEntries;
+      truncated = allocationSnapshot.truncated || scanned >= fallbackMaxEntries;
     } else {
       const stack = [rootNode];
       while (stack.length) {
         throwIfAborted(signal);
-        if (scanned >= maxEntries) {
+        if (scanned >= fallbackMaxEntries) {
           truncated = true;
           break;
         }
@@ -15660,7 +15851,7 @@ async function sizeAnalysisReport(body = {}, options = {}) {
         }
         for (const dirent of dirents) {
           throwIfAborted(signal);
-          if (scanned >= maxEntries) {
+          if (scanned >= fallbackMaxEntries) {
             truncated = true;
             break;
           }
@@ -15751,7 +15942,7 @@ async function sizeAnalysisReport(body = {}, options = {}) {
     followLinks,
     maxEntries,
     scanned,
-    truncated: truncated || scanned >= maxEntries,
+    truncated: truncated || scanned >= fallbackMaxEntries,
     skipped: skipped.slice(0, 500),
     space,
     allocatedSource,
@@ -20294,6 +20485,33 @@ async function handleApi(req, res, url) {
     const signal = requestAbortSignal(req, res);
     const body = await readJson(req);
     return sendJson(res, 200, await sizeAnalysisReport(body, { signal }));
+  }
+
+  if (route === "POST /api/size-analysis/stream") {
+    const signal = requestAbortSignal(req, res);
+    const body = await readJson(req);
+    res.writeHead(200, {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    });
+    const writeEvent = (type, payload) => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(`${JSON.stringify({ type, ...payload })}\n`);
+      }
+    };
+    try {
+      const report = await sizeAnalysisReport(body, {
+        signal,
+        onProgress: (progress) => writeEvent("progress", { report: progress })
+      });
+      writeEvent("result", { report });
+    } catch (error) {
+      writeEvent("error", { error: error.message || "Size analysis failed." });
+    } finally {
+      if (!res.writableEnded && !res.destroyed) res.end();
+    }
+    return;
   }
 
   if (route === "POST /api/checksums") {
