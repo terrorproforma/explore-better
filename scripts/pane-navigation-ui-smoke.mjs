@@ -179,7 +179,7 @@ async function main() {
     check(
       checks,
       "sort-direction-is-visible-and-reversible",
-      /Z-A/.test(evidence.sortDescending.sortText) && /A-Z/.test(evidence.sortAscending.sortText),
+      /↓/.test(evidence.sortDescending.sortText) && /↑/.test(evidence.sortAscending.sortText),
       `${evidence.sortDescending.sortText} -> ${evidence.sortAscending.sortText}`
     );
 

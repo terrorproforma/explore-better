@@ -78,11 +78,12 @@
             <div class="nav-section-title nav-section-title-row" id="folder-tree-title">
               <span>Folder Tree</span>
               <span class="nav-title-actions">
+                <button class="tree-disclosure" data-nav-action="toggle-tree" title="Show folder tree" aria-label="Show folder tree" aria-controls="folder-tree" aria-expanded="false"><span class="lucide-icon icon-chevron-down" aria-hidden="true"></span></button>
                 <button data-nav-action="reveal-tree" title="Reveal active pane folder">Reveal</button>
                 <button data-nav-action="refresh-tree" title="Refresh folder tree">Refresh</button>
               </span>
             </div>
-            <div class="folder-tree" id="folder-tree"></div>
+            <div class="folder-tree" id="folder-tree" hidden></div>
           </section>
           <section class="nav-section devices-section" id="nav-devices-section" aria-labelledby="nav-devices-title" hidden>
             <div class="nav-section-title nav-section-title-row" id="nav-devices-title">
@@ -134,7 +135,7 @@
             <div class="breadcrumb-strip" data-breadcrumbs="left" aria-label="Left breadcrumbs"></div>
           </div>
           <div class="toolbar">
-            <input class="filter-input" data-filter="left" placeholder="Filter" aria-label="Filter left pane" />
+            <input class="filter-input" data-filter="left" placeholder="Filter files…" aria-label="Filter left pane" title="Filter the current view. Press Escape to clear filters." />
             <div class="view-toggle" aria-label="Left view mode">
               <button data-view-mode="details" data-pane="left" title="Details view" aria-label="Details view"><span class="view-glyph view-glyph-details" aria-hidden="true"></span></button>
               <button data-view-mode="compact" data-pane="left" title="Compact view" aria-label="Compact view"><span class="view-glyph view-glyph-compact" aria-hidden="true"></span></button>
@@ -225,7 +226,7 @@
             <div class="breadcrumb-strip" data-breadcrumbs="right" aria-label="Right breadcrumbs"></div>
           </div>
           <div class="toolbar">
-            <input class="filter-input" data-filter="right" placeholder="Filter" aria-label="Filter right pane" />
+            <input class="filter-input" data-filter="right" placeholder="Filter files…" aria-label="Filter right pane" title="Filter the current view. Press Escape to clear filters." />
             <div class="view-toggle" aria-label="Right view mode">
               <button data-view-mode="details" data-pane="right" title="Details view" aria-label="Details view"><span class="view-glyph view-glyph-details" aria-hidden="true"></span></button>
               <button data-view-mode="compact" data-pane="right" title="Compact view" aria-label="Compact view"><span class="view-glyph view-glyph-compact" aria-hidden="true"></span></button>

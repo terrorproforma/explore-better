@@ -30,6 +30,36 @@ For the running Electron build, `npm run inspect:mcp-live` performs a real nativ
 
 ## Latest Regression Evidence
 
+### Interaction and visual review — 2026-09-08
+
+Reviewed file browsing, filtering, sorting, selection, refresh, navigation, pane resizing, overflow menus, previews, terminals, and disk analysis. The changes keep the file list visually primary, make the folder tree collapsible, remove duplicate top-bar shortcuts while the navigator is visible, and put common file actions first. Existing custom toolbar order is preserved. Overflow actions are searchable with keyboard navigation; filters and unreadable folders now offer recovery actions.
+
+The renderer now shares its date formatter, avoids rebuilding unchanged navigation controls, virtualizes lists above 250 items, and preserves overlapping rows during scrolling. Refresh keeps the complete existing listing until the replacement arrives, preserving scroll position and selections outside the first 48 entries. Menus retain their search/focus through status and layout updates.
+
+Measured with Edge 152 at 1440 × 960, using 1,800 real text files and the same server, stylesheet and fixture for both renderer versions. Nine filter samples followed two warmups; refresh used five samples. These are local fixture measurements, not guarantees for every disk or folder.
+
+| Measurement (median unless stated) | Before (`178931f`) | After |
+| --- | ---: | ---: |
+| Filter input handler | 46.1 ms | 2.2 ms |
+| Filter through settled paint | 216.3 ms | 33.3 ms |
+| Refresh through settled paint | 450.9 ms | 50.0 ms |
+| File rows in DOM after load | 1,800 | 48 |
+
+Reproduce with `npm run build:renderer` followed by `npm run perf:renderer -- --baseline=178931f3e6373e1384635618fe875414fc3bc5d5 --count=1800`. Detailed samples are written to `artifacts/renderer-interaction-latest.json`.
+
+Current validation:
+
+- New interaction suite: 32 checks passed, covering stable focus/DOM, offscreen selection and scroll preservation on refresh, changed metadata, all three virtualized views, filter recovery, menu search, resizing, status updates, and unclipped source/target badges. Added to Windows CI and the acceptance runner.
+- Navigation, folder tree, keyboard workflows, preferences, listing cache, rapid navigation, dual-pane safety, workspace panels, pane activity, and resize suites passed.
+- Layout passed at six widths (390–1920 px); accessibility passed on desktop and mobile; adaptive pane chrome passed 26 checks and pane scrollbar checks passed 15.
+- Preview/editor/properties passed 26 checks; thumbnails passed 13; terminal UI passed 30 using its mocked terminal bridge; disk analysis UI passed 42; ZIP browsing passed. MCP context passed.
+- The 100,000-file UI run passed: three-run median first paint 126.6 ms, hydration 550 ms, with 47 rendered rows. Startup passed 12 checks and the performance guard passed 20.
+- Privacy and brand checks passed; dependency audit reported zero vulnerabilities.
+
+The backend performance trend separately flagged the 500-file content-index build at 182.1 ms against an earlier 86.7 ms median; it remains within the 8,000 ms guard. This change does not alter backend indexing. The previously identified native Windows PowerShell 5 ConPTY issue remains outside this renderer change; the terminal UI result above does not establish native-shell compatibility.
+
+### Earlier comprehensive acceptance
+
 | Check | Result |
 | --- | --- |
 | Full acceptance | Passed: 130 suites, 0 failures in `artifacts/acceptance/2026-07-16T16-38-34-386Z`; action inventory covers 358 visible, registered, and keyboard interactions |

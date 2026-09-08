@@ -137,6 +137,7 @@ async function main() {
     await page.goto(`${baseUrl}/?left=${encodeURIComponent(fixture)}&right=${encodeURIComponent(fixture)}`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => Boolean(window.__exploreBetterStartup?.completedAt));
     await page.evaluate(() => document.querySelector('#default-explorer-dialog[open] [data-default-explorer-choice="keep"]')?.click());
+    await page.locator('[data-nav-action="toggle-tree"]').click();
     await page.waitForSelector('#folder-tree .tree-name:text-is("Tree Fixture")');
 
     const header = await page.locator("#folder-tree-title").innerText();

@@ -39,6 +39,7 @@ const coreSuites = [
   ["model-preview-ui", "scripts/model-preview-ui-smoke.mjs", 180000],
   ["preferences-ui", "scripts/preferences-ui-smoke.mjs", 180000],
   ["interaction-resize", "scripts/interaction-resize-smoke.mjs", 180000],
+  ["interaction-quality", "scripts/interaction-quality-smoke.mjs", 120000],
   ["default-explorer-ui", "scripts/default-explorer-ui-smoke.mjs", 120000],
   ["packaged-integration-launch", "scripts/packaged-integration-launch-smoke.mjs", 120000],
   ["folder-tree-ui", "scripts/folder-tree-ui-smoke.mjs", 120000],
