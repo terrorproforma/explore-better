@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { clickTopbarAction } from "./ui-helpers.mjs";
 
 const workspace = process.cwd();
 const artifacts = path.join(workspace, "artifacts");
@@ -141,11 +142,11 @@ async function main() {
 
     await page.locator('[data-layout-mode="horizontal"]').click();
     await page.waitForFunction(() => document.querySelector(".workbench")?.classList.contains("layout-horizontal"));
-    await page.locator('[data-topbar-action="focus"]').click();
+    await clickTopbarAction(page, "focus");
     await page.waitForFunction(() => document.querySelector(".app-shell")?.classList.contains("focus-files"));
     const focused = await snapshot(page);
     check(checks, "focus-disables-panel-controls", focused.panelButtons.every((item) => item.disabled), JSON.stringify(focused.panelButtons));
-    await page.locator('[data-topbar-action="focus"]').click();
+    await clickTopbarAction(page, "focus");
     await page.waitForFunction(() => !document.querySelector(".app-shell")?.classList.contains("focus-files"));
     const focusRestored = await snapshot(page);
     check(checks, "focus-preserves-individual-panel-state", focusRestored.navigator.display === "none" && focusRestored.preview.display === "none", focusRestored.shell);

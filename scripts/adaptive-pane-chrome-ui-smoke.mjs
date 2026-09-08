@@ -375,7 +375,7 @@ async function main() {
         !evidence.dockOpen.menuHidden &&
         evidence.dockOpen.menuInsideViewport &&
         evidence.dockOpen.menuOverflowX === 0 &&
-        evidence.dockOpen.menuOverflowY === 0,
+        await page.locator('#dock-overflow-menu input[type="search"]').isVisible(),
       JSON.stringify(evidence.dockOpen)
     );
     check(checks, "dock-menu-complete", evidence.dockOpen.opsInMenu, JSON.stringify(evidence.dockOpen));

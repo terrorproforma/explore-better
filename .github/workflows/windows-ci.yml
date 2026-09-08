@@ -41,3 +41,4 @@ jobs:
       - run: npm run verify:mcpb
       - run: npm run verify:seo-discovery
       - run: npm run verify:layout
+      - run: npm run verify:interaction-quality

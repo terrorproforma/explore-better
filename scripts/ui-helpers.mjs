@@ -1,3 +1,13 @@
+export async function clickTopbarAction(page, actionId) {
+  const direct = page.locator(`.topbar-actions [data-topbar-action="${actionId}"]`);
+  if (await direct.isVisible()) {
+    await direct.click();
+    return;
+  }
+  await page.locator("#topbar-more-toggle").click();
+  await page.locator(`#topbar-more-menu [data-topbar-action="${actionId}"]`).click();
+}
+
 export async function clickDockAction(page, actionId, options = {}) {
   const selector = `.command-dock [data-global-action="${actionId}"]`;
   const direct = page.locator(selector);

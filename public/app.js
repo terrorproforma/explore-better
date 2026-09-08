@@ -271,7 +271,7 @@ const layoutSizeDefaults = {
   leftTerminalHeight: 220,
   rightTerminalHeight: 220
 };
-const virtualRenderThreshold = 1800;
+const virtualRenderThreshold = 250;
 const virtualOverscanRows = 14;
 const virtualTileMinWidth = 128;
 const virtualTileHeight = 184;
@@ -2784,7 +2784,9 @@ function scheduleStateSave() {
 }
 
 function setStatus(message) {
-  document.getElementById("status-pill").textContent = message;
+  const status = document.getElementById("status-pill");
+  status.textContent = String(message ?? "").replace(/\s*\/ load \d+ms$/, "");
+  status.title = message;
   scheduleMcpContextPublish();
 }
 
@@ -3005,16 +3007,16 @@ function imageDimensionsTitle(entry) {
   return pixels > 0 ? `${text} / ${pixels.toLocaleString()} pixels` : text;
 }
 
+const entryDateFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit"
+});
+
 function formatDate(value) {
   if (!value) {
     return "";
   }
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(new Date(value));
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? entryDateFormatter.format(date) : "";
 }
 
 function formatDuration(milliseconds) {
@@ -3738,6 +3740,15 @@ function applyZipPaneListing(paneName, tab, data, context = {}) {
   return { entries };
 }
 
+// Preserve focus, disclosure state and observers when only file content changed.
+const stableMarkup = new WeakMap();
+function setStableMarkup(element, markup) {
+  if (!element || stableMarkup.get(element) === markup) return false;
+  element.innerHTML = markup;
+  stableMarkup.set(element, markup);
+  return true;
+}
+
 function renderRoots() {
   const rootStrip = document.getElementById("root-strip");
   const favorites = app.state?.favorites || [];
@@ -3747,38 +3758,38 @@ function renderRoots() {
     name: `* ${favorite.name}`
   }));
   const items = [...favoriteItems, ...app.roots.shortcuts, ...app.roots.drives];
-  rootStrip.innerHTML = items
+  setStableMarkup(rootStrip, items
     .map(
       (item) =>
         `<button class="${rootButtonClass(item)}" data-root-path="${escapeHtml(item.path)}" title="${escapeHtml(
           rootTitle(item)
         )}">${escapeHtml(item.name)}</button>`
     )
-    .join("");
+    .join(""));
   document.getElementById("session-root").textContent = app.roots.cwd;
 
   const aliases = pathAliases().map((alias) => ({ ...alias, kind: "alias", name: `${alias.name}:`, typeLabel: "Alias" }));
   const pinned = [...favorites.map((favorite) => ({ ...favorite, kind: "favorite", typeLabel: "Favorite" })), ...aliases];
   const pinnedSection = document.getElementById("nav-pinned-section");
   pinnedSection.hidden = pinned.length === 0;
-  document.getElementById("nav-pinned").innerHTML = renderNavRows(pinned, {
+  setStableMarkup(document.getElementById("nav-pinned"), renderNavRows(pinned, {
     empty: "No pinned locations",
     removable: (item) => item.kind === "favorite"
-  });
-  document.getElementById("nav-shortcuts").innerHTML = renderNavRows(app.roots.shortcuts, {
+  }));
+  setStableMarkup(document.getElementById("nav-shortcuts"), renderNavRows(app.roots.shortcuts, {
     empty: "No shortcuts"
-  });
-  document.getElementById("nav-drives").innerHTML = renderNavRows(app.roots.drives, {
+  }));
+  setStableMarkup(document.getElementById("nav-drives"), renderNavRows(app.roots.drives, {
     empty: "No drives"
-  });
+  }));
   const recents = app.state?.recentLocations || [];
   const recentSection = document.querySelector(".recent-section");
   recentSection.hidden = recents.length === 0;
   const shownRecents = app.recentsExpanded ? recents : recents.slice(0, 8);
-  document.getElementById("nav-recents").innerHTML = renderNavRows(shownRecents, {
+  setStableMarkup(document.getElementById("nav-recents"), renderNavRows(shownRecents, {
     empty: "No recent folders",
     recent: true
-  });
+  }));
   const recentsToggle = document.getElementById("nav-recents-toggle");
   recentsToggle.hidden = recents.length <= 8;
   recentsToggle.textContent = app.recentsExpanded ? "Show fewer" : `Show all (${recents.length})`;
@@ -3789,6 +3800,7 @@ function renderRoots() {
 
 function rootButtonClass(item) {
   return [
+    item.kind !== "favorite" && item.kind !== "drive" ? "shortcut-root" : "",
     item.kind === "favorite" ? "favorite-root" : "",
     item.kind === "favorite" ? favoriteColorClass(item.color) : "",
     item.kind === "drive" ? "drive-root" : "",
@@ -5665,10 +5677,10 @@ function renderFolderTree() {
   }
   const roots = folderTreeRoots();
   if (!roots.length) {
-    tree.innerHTML = `<div class="nav-empty">No folders</div>`;
+    setStableMarkup(tree, `<div class="nav-empty">No folders</div>`);
     return;
   }
-  tree.innerHTML = roots.map((item) => renderFolderTreeNode(item, 0)).join("");
+  setStableMarkup(tree, roots.map((item) => renderFolderTreeNode(item, 0)).join(""));
 }
 
 function renderFolderTreeNode(item, depth) {
@@ -5799,7 +5811,21 @@ async function refreshFolderTree() {
   showToast("Folder tree refreshed");
 }
 
+function setFolderTreeVisible(visible, persist = true) {
+  const tree = document.getElementById("folder-tree");
+  const toggle = document.querySelector('[data-nav-action="toggle-tree"]');
+  if (!tree || !toggle) return;
+  tree.hidden = !visible;
+  toggle.setAttribute("aria-expanded", String(visible));
+  toggle.title = visible ? "Hide folder tree" : "Show folder tree";
+  toggle.setAttribute("aria-label", toggle.title);
+  if (persist) {
+    try { localStorage.setItem("explore-better:folder-tree-visible", String(visible)); } catch {}
+  }
+}
+
 async function revealPathInFolderTree(itemPath) {
+  setFolderTreeVisible(true);
   const roots = folderTreeRoots();
   const match = roots.find((root) => pathInsideFolder(itemPath, root.path));
   if (!match) {
@@ -6092,20 +6118,21 @@ function applyColumnGrid(paneName, tab = tabOf(paneName)) {
 function renderFileHead(paneName, tab) {
   const head = document.querySelector(`.pane[data-pane="${paneName}"] .file-head`);
   applyColumnGrid(paneName, tab);
-  head.innerHTML = columnsForTab(tab)
+  setStableMarkup(head, columnsForTab(tab)
     .map((column) => {
       const active = tab.sortKey === column.sortKey ? " active" : "";
-      const direction = active ? (tab.sortDir === "asc" ? " A-Z" : " Z-A") : "";
+      const direction = active ? (tab.sortDir === "asc" ? " ↑" : " ↓") : "";
+      const sortLabel = active ? `${column.title}, ${tab.sortDir === "asc" ? "ascending" : "descending"}. Reverse sort order` : `Sort by ${column.title}`;
       return `<button class="${active}" data-sort="${escapeHtml(column.sortKey)}" data-column-id="${escapeHtml(
         column.id
-      )}" data-pane="${paneName}" title="${escapeHtml(column.title)}">
+      )}" data-pane="${paneName}" title="${escapeHtml(sortLabel)}" aria-label="${escapeHtml(sortLabel)}">
         <span class="column-title">${escapeHtml(column.title)}${direction}</span>
         <span class="column-resize-grip" data-column-resize="${escapeHtml(column.id)}" data-pane="${paneName}" title="Resize ${escapeHtml(
           column.title
         )}"></span>
       </button>`;
     })
-    .join("");
+    .join(""));
 }
 
 function columnHeaderButton(paneName, columnId) {
@@ -6495,14 +6522,31 @@ function renderVirtualFileWindow(paneName, force = false) {
   list.querySelector(".virtual-spacer")?.style.setProperty("height", `${metrics.totalHeight}px`);
   windowElement.style.transform = `translateY(${metrics.topPadding + startRow * metrics.rowHeight}px)`;
   windowElement.style.setProperty("--virtual-columns", String(metrics.columns));
-  if (state.tab.viewMode === "tiles") {
-    unobserveLazyThumbnailImages(paneName, windowElement);
+  // Keep overlapping rows in place: scrolling should not recreate focused rows
+  // or restart image loading. A new listing/view gets its own render state.
+  for (const [index, node] of state.nodes) {
+    if (force || index < start || index >= end) {
+      if (state.tab.viewMode === "tiles") unobserveLazyThumbnailImages(paneName, node);
+      node.remove();
+      state.nodes.delete(index);
+    }
   }
-  windowElement.innerHTML = renderEntriesMarkup(state.entries, paneName, state.tab, state.renderer, start, end);
+  const template = document.createElement("template");
+  const newImages = [];
+  let cursor = windowElement.firstElementChild;
+  for (let index = start; index < end; index += 1) {
+    let node = state.nodes.get(index);
+    if (!node) {
+      template.innerHTML = state.renderer(state.entries[index], paneName, state.tab);
+      node = template.content.firstElementChild;
+      state.nodes.set(index, node);
+      if (state.tab.viewMode === "tiles") newImages.push(...node.querySelectorAll(".tile-thumb-image[data-thumb-src]"));
+    }
+    if (node !== cursor) windowElement.insertBefore(node, cursor);
+    cursor = node.nextElementSibling;
+  }
   if (state.tab.viewMode === "tiles") {
-    hydrateLazyThumbnailImages(paneName, list, [
-      ...windowElement.querySelectorAll(".tile-thumb-image[data-thumb-src]")
-    ]);
+    hydrateLazyThumbnailImages(paneName, list, newImages);
   }
 }
 
@@ -6518,6 +6562,7 @@ function renderVirtualFileList(paneName, tab, entries, renderer, renderToken, li
     columns: metrics.columns,
     totalHeight: metrics.totalHeight,
     token: renderToken,
+    nodes: new Map(),
     start: -1,
     end: -1
   };
@@ -6686,6 +6731,7 @@ function updatePaneTabOverflow(paneName) {
   const toggle = tabbar?.querySelector(`[data-tab-overflow-toggle="${paneName}"]`);
   const menu = tabbar?.querySelector(`[data-tab-overflow-menu="${paneName}"]`);
   if (!tabbar || !strip || !toggle || !menu) return;
+  const toggleFocused = document.activeElement === toggle;
 
   const tabs = [...strip.querySelectorAll(".tab")];
   tabs.forEach((tab) => tab.classList.remove("tab-responsive-hidden"));
@@ -6722,6 +6768,7 @@ function updatePaneTabOverflow(paneName) {
   const tabCount = panes[paneName]?.tabs?.length || 0;
   toggle.title = `Show all ${tabCount} tabs (${hiddenCount} hidden)`;
   toggle.setAttribute("aria-label", toggle.title);
+  if (toggleFocused && !toggle.hidden) toggle.focus({ preventScroll: true });
   toggle.querySelector(".tab-overflow-count").textContent = String(hiddenCount);
   if (!menu.hidden) positionPaneTabOverflow(paneName);
 }
@@ -6757,6 +6804,7 @@ function paneTabOverflowMenuMarkup(paneName, pane) {
 }
 
 const panePathInputRenderState = new WeakMap();
+const paneTabsRenderState = new WeakMap();
 
 function renderPane(paneName) {
   scheduleMcpContextPublish();
@@ -6788,7 +6836,8 @@ function renderPane(paneName) {
         </div>`;
       })
       .join("");
-  tabsElement.innerHTML =
+  if (paneTabsRenderState.get(tabsElement) !== tabsMarkup) {
+    tabsElement.innerHTML =
     `<div class="tab-strip" data-tab-strip="${paneName}" role="tablist" aria-label="${paneName} pane tabs">${tabsMarkup}</div>
      <button class="new-tab" data-new-tab="${paneName}" title="New tab" aria-label="New tab">+</button>
      <button class="tab-overflow-toggle" data-tab-overflow-toggle="${paneName}" type="button" aria-haspopup="menu" aria-expanded="false" hidden>
@@ -6796,7 +6845,9 @@ function renderPane(paneName) {
      </button>
      <div class="tab-overflow-menu" data-tab-overflow-menu="${paneName}" role="menu" aria-label="All ${paneName} pane tabs" hidden>${paneTabOverflowMenuMarkup(paneName, pane)}</div>
      ${paneActivityMarkup(paneName)}`;
-  observePaneTabOverflow(paneName);
+    paneTabsRenderState.set(tabsElement, tabsMarkup);
+    observePaneTabOverflow(paneName);
+  }
   schedulePaneTabOverflow(paneName);
 
   const pathInput = document.querySelector(`[data-path-input="${paneName}"]`);
@@ -6807,8 +6858,7 @@ function renderPane(paneName) {
   panePathInputRenderState.set(pathInput, { tabId: tab.id, path: tab.path });
   const breadcrumbs = document.querySelector(`[data-breadcrumbs="${paneName}"]`);
   if (breadcrumbs) {
-    breadcrumbs.innerHTML = renderBreadcrumbs(paneName, tab.path);
-    requestAnimationFrame(() => {
+    if (setStableMarkup(breadcrumbs, renderBreadcrumbs(paneName, tab.path))) requestAnimationFrame(() => {
       if (breadcrumbs.isConnected) {
         breadcrumbs.scrollLeft = breadcrumbs.scrollWidth;
       }
@@ -6817,11 +6867,11 @@ function renderPane(paneName) {
   document.querySelector(`[data-filter="${paneName}"]`).value = tab.filter;
   const kindFilter = document.querySelector(`[data-kind-filter="${paneName}"]`);
   if (kindFilter) {
-    kindFilter.innerHTML = renderKindFilterOptions(tab.kindFilter || "all");
+    setStableMarkup(kindFilter, renderKindFilterOptions(tab.kindFilter || "all"));
   }
   const labelFilter = document.querySelector(`[data-label-filter="${paneName}"]`);
   if (labelFilter) {
-    labelFilter.innerHTML = renderLabelFilterOptions(tab.labelFilter || "all");
+    setStableMarkup(labelFilter, renderLabelFilterOptions(tab.labelFilter || "all"));
   }
   document.querySelectorAll(`[data-view-mode][data-pane="${paneName}"]`).forEach((button) => {
     button.classList.toggle("active", button.dataset.viewMode === tab.viewMode);
@@ -6850,13 +6900,24 @@ function renderPane(paneName) {
   const entries = visibleData.entries;
   if (!entries.length) {
     const access = tab.accessError;
+    const filtered = Boolean(tab.filter || (tab.kindFilter && tab.kindFilter !== "all") || (tab.labelFilter && tab.labelFilter !== "all"));
     list.innerHTML = access
       ? `<div class="empty-state access-state">
           <strong>${escapeHtml(access.code || "Access denied")}</strong>
           <span>${escapeHtml(access.message || "Folder cannot be read.")}</span>
           <small>${escapeHtml(access.path || tab.path)}</small>
+          <span class="empty-state-actions"><button type="button" data-action="refresh" data-pane="${paneName}">Try again</button><button type="button" data-action="up" data-pane="${paneName}" ${tab.parent ? "" : "disabled"}>Go up</button></span>
         </div>`
-      : `<div class="empty-state">No items</div>`;
+      : `<div class="empty-state file-empty-state">
+          <span class="lucide-icon ${filtered ? "icon-search" : "icon-folder-plus"}" aria-hidden="true"></span>
+          <strong>${filtered ? "No matching files" : tab.searchMode ? "No files to show" : "This folder is empty"}</strong>
+          <span>${filtered ? "Try another name, or clear your filters to see everything." : tab.searchMode ? "This view doesn't contain any files yet." : "Add files here or create a folder to get started."}</span>
+          ${filtered
+            ? `<button type="button" data-clear-pane-filters="${paneName}">Clear filters</button>`
+            : !tab.virtualMode && !tab.searchMode
+              ? `<button type="button" data-action="new-folder" data-pane="${paneName}"><span class="lucide-icon icon-folder-plus" aria-hidden="true"></span>New folder</button>`
+              : ""}
+        </div>`;
     if (paneName === app.activePane) {
       updateSelectionReadout();
     }
@@ -7255,8 +7316,14 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
   cancelListingPrefetch(plan.cacheKey);
   let appliedPath = null;
   try {
-    const windowQuery = windowedListingQuery(plan.query);
-    const data = await request(`/api/list?${windowQuery}`, { signal: load.controller.signal });
+    // Refresh an already visible folder in one step. Applying the first 48
+    // items here collapses the scroll range and drops offscreen selections
+    // before hydration can restore them.
+    const keepCurrentListing = options.preserveSelection === true && samePath(tab.path, resolvedTargetPath) &&
+      tab.entries.length > 0 && !tab.listingWindow?.hasMore && !tab.searchMode && !tab.virtualMode;
+    const listingQuery = keepCurrentListing ? new URLSearchParams(plan.query) : windowedListingQuery(plan.query);
+    if (keepCurrentListing) listingQuery.set("format", "compact-v2");
+    const data = await request(`/api/list?${listingQuery}`, { signal: load.controller.signal });
     if (!isCurrentPaneLoad(paneName, load)) {
       return false;
     }
@@ -7374,11 +7441,12 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
 }
 
 async function refreshPane(paneName, options = {}) {
-  return loadPane(paneName, tabOf(paneName).path, false, { ...options, forceReload: options.forceReload !== false });
+  return loadPane(paneName, tabOf(paneName).path, false, { preserveSelection: true, ...options, forceReload: options.forceReload !== false });
 }
 
 function selectedEntries(paneName) {
   const tab = tabOf(paneName);
+  if (!tab.selected.size) return [];
   return tab.entries.filter((entry) => tab.selected.has(entry.path));
 }
 
@@ -10063,7 +10131,8 @@ function scrollVirtualEntryIntoView(paneName, entryPath) {
   } else if (rowBottom > viewportBottom) {
     list.scrollTop = Math.max(0, rowBottom - list.clientHeight);
   }
-  renderVirtualFileWindow(paneName, true);
+  renderVirtualFileWindow(paneName);
+  updatePaneSelectionDom(paneName);
   entryElementForPath(paneName, entryPath)?.scrollIntoView({
     block: "nearest",
     inline: "nearest"
@@ -11223,14 +11292,15 @@ function itemWord(count, singular, plural = `${singular}s`) {
 }
 
 function summarizeEntrySet(entries) {
-  const files = entries.filter((entry) => entry.isFile).length;
-  const folders = entries.filter((entry) => entry.isDirectory).length;
-  const other = Math.max(0, entries.length - files - folders);
-  const bytes = entries.reduce(
-    (total, entry) => total + (entry.isFile && Number.isFinite(entry.size) ? Number(entry.size) : 0),
-    0
-  );
-  return { files, folders, other, bytes };
+  let files = 0, folders = 0, bytes = 0;
+  for (const entry of entries) {
+    if (entry.isFile) {
+      files += 1;
+      if (Number.isFinite(entry.size)) bytes += Number(entry.size);
+    }
+    if (entry.isDirectory) folders += 1;
+  }
+  return { files, folders, other: Math.max(0, entries.length - files - folders), bytes };
 }
 
 function selectionStatusForPane(paneName) {
@@ -11284,10 +11354,10 @@ function updateSelectionReadout() {
     "aria-label",
     `${paneLabel} pane, ${status.scopeText}. ${status.detail}. Activate to focus the active file list.`
   );
-  readout.innerHTML = `<img class="dock-status-icon" src="/icons/list-checks.svg" alt="" aria-hidden="true" />
+  setStableMarkup(readout, `<img class="dock-status-icon" src="/icons/list-checks.svg" alt="" aria-hidden="true" />
     <span class="dock-status-main"><strong>${escapeHtml(paneLabel)}</strong><span class="dock-status-value">${escapeHtml(
       status.scopeText
-    )}</span></span>`;
+    )}</span></span>`);
 }
 
 function clipboardModeLabel(mode = app.fileClipboard.mode) {
@@ -11631,7 +11701,8 @@ function toolbarVisibleActionSet(actions = currentSettings().toolbarActions) {
 
 function toolbarOrderList(order = currentSettings().toolbarOrder) {
   const saved = normalizeToolbarOrder(order);
-  return [...saved, ...toolbarActionIds.filter((action) => !saved.includes(action))];
+  const primary = saved.length ? saved : ["clipCut", "clipCopy", "clipPaste", "newFile", "properties", "ops", "palette"];
+  return [...primary, ...toolbarActionIds.filter((action) => !primary.includes(action))];
 }
 
 function toolbarOrderIndex(actionId, order = toolbarOrderList()) {
@@ -11671,12 +11742,12 @@ function applyToolbarVisibility() {
     const actionId = button.dataset.globalAction;
     button.hidden = !visible.has(actionId);
     button.draggable = true;
-    button.style.order = String(toolbarOrderIndex(actionId, order));
+    button.style.order = String(toolbarOrderIndex(actionId, order) * 10);
   });
   const pasteMode = document.getElementById("paste-conflict-mode");
   if (pasteMode) {
     pasteMode.hidden = !visible.has("clipPaste");
-    pasteMode.style.order = String(toolbarOrderIndex("clipPaste", order) + 0.2);
+    pasteMode.style.order = String(toolbarOrderIndex("clipPaste", order) * 10 + 1);
   }
   scheduleDockOverflowUpdate();
 }
@@ -11690,11 +11761,14 @@ function dockOverflowCandidates(strip = document.querySelector(".dock-action-str
     ...strip.querySelectorAll("#saved-command-strip > button, :scope > [data-global-action]")
   ]
     .filter((button) => !button.hidden)
-    .sort((left, right) => {
-      const orderDelta = Number.parseFloat(getComputedStyle(left).order || "0") - Number.parseFloat(getComputedStyle(right).order || "0");
+    .map((button) => ({ button, order: Number.parseFloat(getComputedStyle(button).order || "0") }))
+    .sort((leftItem, rightItem) => {
+      const { button: left } = leftItem;
+      const { button: right } = rightItem;
+      const orderDelta = leftItem.order - rightItem.order;
       if (orderDelta) return orderDelta;
       return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
-    });
+    }).map(({ button }) => button);
 }
 
 function dockActionCatalogItem(actionId) {
@@ -11746,7 +11820,22 @@ function openDockOverflowMenu() {
   menu.hidden = false;
   toggle.setAttribute("aria-expanded", "true");
   positionDockOverflowMenu();
-  menu.querySelector("button")?.focus();
+  const search = menu.querySelector("input");
+  if (search) search.value = "";
+  filterDockOverflowMenu();
+  search?.focus();
+}
+
+function filterDockOverflowMenu() {
+  const menu = document.getElementById("dock-overflow-menu");
+  const query = (menu?.querySelector("input")?.value || "").trim().toLocaleLowerCase();
+  let matches = 0;
+  menu?.querySelectorAll("[data-dock-overflow-item]").forEach((button) => {
+    button.hidden = Boolean(query) && !button.textContent.toLocaleLowerCase().includes(query);
+    if (!button.hidden) matches += 1;
+  });
+  const empty = menu?.querySelector("[data-dock-overflow-empty]");
+  if (empty) empty.hidden = matches > 0;
 }
 
 function updateDockOverflow() {
@@ -11756,22 +11845,40 @@ function updateDockOverflow() {
   const count = document.getElementById("dock-overflow-count");
   const menu = document.getElementById("dock-overflow-menu");
   if (!strip || !toggle || !count || !menu) return;
-  closeDockOverflowMenu();
+  const toggleFocused = document.activeElement === toggle;
+  const wasOpen = !menu.hidden;
+  const previousSearch = menu.querySelector("input");
+  const query = previousSearch?.value || "";
+  const searchFocused = document.activeElement === previousSearch;
   const candidates = dockOverflowCandidates(strip);
   candidates.forEach((button) => button.classList.remove("dock-responsive-hidden"));
+  const pasteMode = document.getElementById("paste-conflict-mode");
+  const pasteButton = candidates.find(button => button.dataset.globalAction === "clipPaste");
+  pasteMode?.classList.remove("dock-responsive-hidden");
   toggle.hidden = true;
-  menu.innerHTML = "";
   strip.scrollLeft = 0;
   strip.scrollTop = 0;
   const overflows = () => strip.scrollWidth > strip.clientWidth + 1 || strip.scrollHeight > strip.clientHeight + 1;
-  if (!overflows()) return;
-  toggle.hidden = false;
-  const overflowed = [];
-  for (let index = candidates.length - 1; index >= 0 && overflows(); index -= 1) {
-    const button = candidates[index];
-    button.classList.add("dock-responsive-hidden");
-    overflowed.unshift(button);
+  if (!overflows()) {
+    closeDockOverflowMenu();
+    return;
   }
+  toggle.hidden = false;
+  // Find how many actions fit with logarithmic layout reads, rather than
+  // forcing layout once for every hidden action on each resize.
+  const showPrefix = (length) => {
+    candidates.forEach((button, index) => button.classList.toggle("dock-responsive-hidden", index >= length));
+    pasteMode?.classList.toggle("dock-responsive-hidden", !pasteButton || pasteButton.classList.contains("dock-responsive-hidden"));
+  };
+  let low = 0, high = candidates.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    showPrefix(middle);
+    if (overflows()) high = middle - 1;
+    else low = middle;
+  }
+  showPrefix(low);
+  const overflowed = candidates.slice(low);
   if (!overflowed.length) {
     toggle.hidden = true;
     return;
@@ -11779,7 +11886,17 @@ function updateDockOverflow() {
   count.textContent = String(overflowed.length);
   toggle.title = `${overflowed.length} more shelf action${overflowed.length === 1 ? "" : "s"}`;
   toggle.setAttribute("aria-label", toggle.title);
-  menu.innerHTML = overflowed.map(dockOverflowItemMarkup).join("");
+  const menuChanged = setStableMarkup(menu, `<div class="dock-overflow-search"><input type="search" placeholder="Find an action…" aria-label="Find a shelf action" autocomplete="off" /></div>
+    ${overflowed.map(dockOverflowItemMarkup).join("")}
+    <p data-dock-overflow-empty role="status" hidden>No matching actions. Try a different name.</p>`);
+  if (menuChanged && wasOpen) {
+    const search = menu.querySelector("input");
+    search.value = query;
+    if (searchFocused) search.focus({ preventScroll: true });
+  }
+  filterDockOverflowMenu();
+  if (wasOpen) positionDockOverflowMenu();
+  if (toggleFocused && !toggle.hidden) toggle.focus({ preventScroll: true });
 }
 
 function scheduleDockOverflowUpdate() {
@@ -11803,10 +11920,7 @@ function setupDockOverflow() {
     const globalButton = event.target.closest("[data-overflow-global-action]");
     const toolButton = event.target.closest("[data-overflow-run-tool]");
     const scriptButton = event.target.closest("[data-overflow-run-script]");
-    if (!globalButton && !toolButton && !scriptButton) {
-      closeDockOverflowMenu();
-      return;
-    }
+    if (!globalButton && !toolButton && !scriptButton) return;
     event.preventDefault();
     event.stopPropagation();
     closeDockOverflowMenu();
@@ -11819,6 +11933,21 @@ function setupDockOverflow() {
       if (scriptButton) await runSavedScript(scriptButton.dataset.overflowRunScript);
     } catch (error) {
       showToast(error.message);
+    }
+  });
+  menu.addEventListener("input", filterDockOverflowMenu);
+  menu.addEventListener("keydown", (event) => {
+    const items = [...menu.querySelectorAll("[data-dock-overflow-item]:not([hidden])")];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopPropagation();
+      const next = event.key === "ArrowDown" ? index + 1 : index - 1;
+      if (next < 0) menu.querySelector("input")?.focus();
+      else items[Math.min(next, items.length - 1)]?.focus();
+    } else if (event.key === "Enter" && event.target.matches("input")) {
+      event.preventDefault();
+      items[0]?.click();
     }
   });
   document.addEventListener("click", (event) => {
@@ -11893,25 +12022,26 @@ function updateTopbarOverflow() {
   const toggle = document.getElementById("topbar-more-toggle");
   const menu = document.getElementById("topbar-more-menu");
   if (!topbar || !rootStrip || !status || !toggle || !menu) return;
-  closeTopbarMoreMenu();
+  const toggleFocused = document.activeElement === toggle;
+  const wasOpen = !menu.hidden;
+  const focusedAction = menu.contains(document.activeElement) ? document.activeElement.dataset.topbarAction : "";
   const buttons = [...topbar.querySelectorAll(".topbar-actions [data-topbar-action]")];
   buttons.forEach((button) => button.classList.remove("topbar-responsive-hidden", "topbar-label-collapsed"));
   rootStrip.hidden = false;
   status.hidden = false;
   topbar.classList.remove("topbar-root-hidden", "topbar-status-hidden");
   toggle.hidden = true;
-  menu.innerHTML = "";
   const fits = () => {
     const headerFits = topbar.scrollWidth <= topbar.clientWidth + 1;
     const rootFits = rootStrip.hidden || rootStrip.clientWidth >= 80 || rootStrip.scrollWidth <= rootStrip.clientWidth + 1;
-    const statusFits = status.hidden || status.clientWidth >= 64;
+    const statusFits = status.hidden || status.clientWidth >= 64 || status.scrollWidth <= status.clientWidth + 1;
     return headerFits && rootFits && statusFits;
   };
-  if (fits()) return;
+  if (fits()) { closeTopbarMoreMenu(); return; }
 
   for (const actionId of ["focus", "ops", "sizeAnalysis", "search", "palette"]) {
     topbar.querySelector(`[data-topbar-action="${actionId}"]`)?.classList.add("topbar-label-collapsed");
-    if (fits()) return;
+    if (fits()) { closeTopbarMoreMenu(); return; }
   }
 
   toggle.hidden = false;
@@ -11945,10 +12075,15 @@ function updateTopbarOverflow() {
   if (status.hidden) {
     context.push(`<div class="topbar-overflow-context" role="status"><span>Status</span><strong>${escapeHtml(status.textContent || "Ready")}</strong></div>`);
   }
-  menu.innerHTML = `${overflowed.map(topbarOverflowActionMarkup).join("")}${context.join("")}`;
+  const changed = setStableMarkup(menu, `${overflowed.map(topbarOverflowActionMarkup).join("")}${context.join("")}`);
   toggle.hidden = !menu.children.length;
   toggle.title = `${overflowed.length} more command${overflowed.length === 1 ? "" : "s"}${context.length ? " and current status" : ""}`;
   toggle.setAttribute("aria-label", toggle.title);
+  if (wasOpen) {
+    positionTopbarMoreMenu();
+    if (changed && focusedAction) menu.querySelector(`[data-topbar-action="${CSS.escape(focusedAction)}"]`)?.focus({ preventScroll: true });
+  }
+  if (toggleFocused && !toggle.hidden) toggle.focus({ preventScroll: true });
 }
 
 function scheduleTopbarOverflowUpdate() {
@@ -25298,6 +25433,12 @@ function wireEvents() {
       updateActivePaneChrome();
     }
 
+    const clearFilters = event.target.closest("[data-clear-pane-filters]");
+    if (clearFilters) {
+      clearPaneFilters(clearFilters.dataset.clearPaneFilters);
+      document.querySelector(`[data-filter="${clearFilters.dataset.clearPaneFilters}"]`)?.focus();
+      return;
+    }
     const compactBreadcrumbButton = event.target.closest("[data-compact-breadcrumbs]");
     if (compactBreadcrumbButton) {
       const paneName = compactBreadcrumbButton.dataset.compactBreadcrumbs;
@@ -25460,6 +25601,7 @@ function wireEvents() {
       if (action === "favorite-active") await addFavorite(app.activePane);
       if (action === "manage-favorites") await openFavoritesDialog();
       if (action === "clear-recents") await clearRecentLocations();
+      if (action === "toggle-tree") setFolderTreeVisible(document.getElementById("folder-tree").hidden);
       if (action === "refresh-tree") await refreshFolderTree();
       if (action === "reveal-tree") await revealPathInFolderTree(tabOf(app.activePane).path);
       if (action === "toggle-recents") {
@@ -26170,6 +26312,12 @@ function wireEvents() {
   });
 
   document.body.addEventListener("keydown", async (event) => {
+    const paneFilter = event.target.closest?.("[data-filter]");
+    if (paneFilter && event.key === "Escape") {
+      event.preventDefault();
+      clearPaneFilters(paneFilter.dataset.filter);
+      return;
+    }
     const tabOverflowMenu = event.target.closest?.("[data-tab-overflow-menu]");
     if (tabOverflowMenu) {
       const paneName = tabOverflowMenu.dataset.tabOverflowMenu;
@@ -28027,6 +28175,9 @@ async function init() {
     }
   });
   setupDockOverflow();
+  try {
+    setFolderTreeVisible(localStorage.getItem("explore-better:folder-tree-visible") === "true", false);
+  } catch { setFolderTreeVisible(false, false); }
   setupTopbarOverflow();
   setupForegroundActivityCoordinator();
   const urlParams = new URL(window.location.href).searchParams;
