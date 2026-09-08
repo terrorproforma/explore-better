@@ -569,6 +569,7 @@ button.primary-command:focus-visible {
 
 .root-strip button.drive-root {
   position: relative;
+  min-width: 38px;
 }
 
 .root-strip button.drive-warn {
