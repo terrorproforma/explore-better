@@ -172,7 +172,7 @@ const terminalService = terminalBrokerMode
         executablePath: process.execPath,
         appPath: app.getAppPath(),
         userDataPath: app.getPath("userData"),
-        debug: false
+        debug: process.env.EXPLORE_BETTER_TERMINAL_DEBUG === "1"
       }
     });
 const mcpClientConfigurator = terminalBrokerMode
@@ -526,7 +526,11 @@ async function backendStatus() {
 }
 
 function rendererIsTrusted(event) {
-  return Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents);
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return false;
+  try {
+    const url = new URL(event.senderFrame.url);
+    return url.origin === new URL(baseUrl).origin && ["/", "/index.html"].includes(url.pathname);
+  } catch { return false; }
 }
 
 function normalizeMcpUiText(value, maxLength = 500) {
@@ -977,11 +981,13 @@ ipcMain.handle("explore-better:install-update", async (event) => {
   return { ...updateStatus(), accepted };
 });
 
-ipcMain.handle("explore-better:backend-status", () => {
+ipcMain.handle("explore-better:backend-status", (event) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted backend status request.");
   return backendStatus();
 });
 
-ipcMain.handle("explore-better:app-info", () => {
+ipcMain.handle("explore-better:app-info", (event) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted app information request.");
   return {
     packaged: app.isPackaged,
     smoke: smokeMode,
@@ -989,11 +995,13 @@ ipcMain.handle("explore-better:app-info", () => {
   };
 });
 
-ipcMain.handle("explore-better:restart-backend", () => {
+ipcMain.handle("explore-better:restart-backend", (event) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted backend restart request.");
   return recoverBackend("desktop-ipc");
 });
 
-ipcMain.handle("explore-better:terminal-capabilities", () => {
+ipcMain.handle("explore-better:terminal-capabilities", (event) => {
+  if (!rendererIsTrusted(event)) throw new Error("Untrusted terminal capabilities request.");
   return terminalService?.capabilities() || { available: false, profiles: [], elevationAvailable: false };
 });
 
@@ -1286,6 +1294,10 @@ async function stopServer() {
 
 async function exitSmoke(code) {
   stopBackendMonitor();
+  terminalService?.disposeAll();
+  const terminalsStopped = await terminalService?.waitForIdle();
+  if (terminalsStopped === false) code = 1;
+  await mcpBridgeService?.stop();
   await stopServer();
   app.exit(code);
 }
@@ -1346,13 +1358,17 @@ async function showLister(targetPath = null, shellMode = null) {
   });
   mainWindow.webContents.on("will-navigate", (event, url) => {
     try {
-      if (new URL(url).origin === new URL(baseUrl).origin) {
+      const destination = new URL(url);
+      if (destination.origin === new URL(baseUrl).origin && ["/", "/index.html"].includes(destination.pathname)) {
         return;
       }
     } catch {
       // Invalid navigation targets are denied below.
     }
     event.preventDefault();
+  });
+  mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) terminalService?.disposeWebContents(rendererWebContentsId);
   });
   mainWindow.webContents.session.setPermissionCheckHandler(() => false);
   mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
@@ -1506,8 +1522,8 @@ async function runTerminalSmoke() {
   const firstSyncPath = process.env.EXPLORE_BETTER_TERMINAL_SMOKE_FIRST_CWD || path.join(__dirname, "src");
   const latestSyncPath = process.env.EXPLORE_BETTER_TERMINAL_SMOKE_LATEST_CWD || path.join(__dirname, "public");
   terminalService.writeForSmoke(queuedCommand);
-  const firstQueued = terminalService.syncForSmoke(firstSyncPath);
-  const latestQueued = terminalService.syncForSmoke(latestSyncPath);
+  const firstQueued = await terminalService.syncForSmoke(firstSyncPath);
+  const latestQueued = await terminalService.syncForSmoke(latestSyncPath);
   const folderFollow = await waitForRendererValue(
     "true",
     () => terminalService.outputForSmoke().includes("EB_TERMINAL_BUSY_DONE") && path.normalize(terminalService.cwdForSmoke()) === path.normalize(latestSyncPath),
@@ -1529,7 +1545,8 @@ async function runTerminalSmoke() {
     return false;
   }
   await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-terminal-action="close"][data-pane="left"]')?.click(); document.querySelector('[data-terminal-action="close"][data-pane="right"]')?.click()`);
-  const cleaned = await waitForRendererValue("true", () => terminalService.sessionCount() === 0, 6000);
+  const sessionsClosed = await waitForRendererValue("true", () => terminalService.sessionCount() === 0, 6000);
+  const cleaned = sessionsClosed && await terminalService.waitForIdle(6000);
   console.log(`Explore Better terminal smoke: profile=${smokeProfile?.id || "unknown"} firstPromptMs=${firstPromptMs} output=${Boolean(commandOutput)} folderFollow=${Boolean(folderFollow)} dual=${Boolean(dualReady)} cleaned=${Boolean(cleaned)}`);
   return Boolean(commandOutput && folderFollow && dualReady && cleaned);
 }
@@ -1740,7 +1757,13 @@ if (terminalBrokerMode) {
       scheduleMcpHeadlessExit();
     }
   });
-  app.on("will-quit", () => {
+  let shutdownComplete = false;
+  let shutdownPending = false;
+  app.on("will-quit", (event) => {
+    if (shutdownComplete) return;
+    event.preventDefault();
+    if (shutdownPending) return;
+    shutdownPending = true;
     clearTimeout(mcpHeadlessExitTimer);
     for (const pending of mcpUiRequests.values()) {
       clearTimeout(pending.timeout);
@@ -1749,9 +1772,12 @@ if (terminalBrokerMode) {
     mcpUiRequests.clear();
     mcpTray?.destroy();
     mcpTray = null;
-    mcpBridgeService?.stop().catch((error) => console.error(error));
     terminalService?.disposeAll();
     stopBackendMonitor();
-    stopServer().catch((error) => console.error(error));
+    Promise.allSettled([mcpBridgeService?.stop(), terminalService?.waitForIdle(), stopServer()])
+      .finally(() => {
+        shutdownComplete = true;
+        app.quit();
+      });
   });
 }

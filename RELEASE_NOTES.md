@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### File Safety And Recovery
+
+- Save text through a staged replacement while preserving UTF-8, UTF-16LE, UTF-16BE and their byte-order marks. Undo restores the original bytes; unsupported encodings are rejected before writing.
+- Build ZIP archives before replacing their destination, reject source/destination overlap, and retain recoverable backups in App Trash.
+- Verify persisted source and destination snapshots before finishing an interrupted cross-volume move. Changed files remain intact and produce a recovery conflict.
+- Journal bulk-rename mappings before each rename so recovery remains possible after restart. Same-volume moves use the fast rename path without walking the source tree first.
+
+### Interaction Reliability
+
+- Preserve newer drafts when a save finishes, protect dirty dialogs through every close route, and keep focus stable during delayed row and terminal updates.
+- Prefer the current Windows clipboard when pasting and clear completed cuts only while the app still owns that clipboard version.
+- Bound filter-history memory and retain accessible position and focus information for virtualized file lists.
+- Parse STL models in a worker and bound edge generation, keeping browsing responsive during model preparation.
+- Cancel terminal creation when its owner closes, clean up sessions on reload, and wait for native exit during shutdown. Preserve percent signs in folder markers and quote administrator launch arguments correctly.
+- Resolve each PowerShell profile's own modules first, preventing inherited module paths from stalling Windows PowerShell startup.
+
+### AI Bridge Reliability
+
+- Recheck current permissions when applying previews, controlling operations, reading retained results, and dispatching actions against implicit UI targets. Permission changes invalidate old previews; collection mutations check existing contents too.
+- Keep explicit empty client roots restrictive and fail requests when supported root discovery fails. Serialize configuration updates so concurrent changes preserve revocations.
+- Preserve Unicode across pipe chunks, validate protocol frames, propagate cancellation, and count analysis workers until they actually stop.
+- Bound retained analysis data and responses, stop pagination when scan budgets are exhausted, and decode text pages using the file's encoding.
+- Preserve unrelated client configuration formatting and detect concurrent edits before replacement. Registry publication now uses verified, immutable assets from an explicit published release.
+
 ### Live Disk Analysis
 
 - Starts scanning when Disk Map or Analyzer opens and when its target changes, with no entry limit by default.

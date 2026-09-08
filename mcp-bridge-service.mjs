@@ -34,7 +34,10 @@ function writeFrame(socket, message) {
   if (socket.destroyed || !socket.writable) return false;
   const frame = `${JSON.stringify(message)}\n`;
   if (Buffer.byteLength(frame) > maxFrameBytes) {
-    socket.destroy(new Error("Outgoing AI Bridge frame exceeded the size limit."));
+    return socket.write(`${JSON.stringify({ version: protocolVersion, id: message.id || null, type: "error", error: safeError({ code: "LIMIT_EXCEEDED", message: "The result exceeds the AI Bridge response limit. Request a smaller page or narrow the analysis scope." }) })}\n`, "utf8");
+  }
+  if (socket.writableLength > maxFrameBytes * 2) {
+    socket.destroy(new Error("The AI Bridge client is not reading responses."));
     return false;
   }
   return socket.write(frame, "utf8");
@@ -83,6 +86,10 @@ export function createMcpBridgeService(options) {
       });
       return;
     }
+    if (connection.inFlight.has(id) || connection.inFlight.size >= 64) {
+      writeFrame(connection.socket, { version: protocolVersion, id, type: "error", error: safeError({ code: "LIMIT_EXCEEDED", message: "Use a unique request ID and wait for pending requests to complete." }) });
+      return;
+    }
     const controller = new AbortController();
     connection.inFlight.set(id, controller);
     try {
@@ -92,6 +99,7 @@ export function createMcpBridgeService(options) {
           profileId: connection.profileId,
           sessionId: connection.sessionId,
           clientRoots: frame.clientRoots || connection.clientRoots,
+          clientRootsProvided: frame.clientRootsProvided ?? connection.clientRootsProvided,
           context: options.getContext(),
           requestId: id,
           tool: frame.tool,
@@ -103,6 +111,7 @@ export function createMcpBridgeService(options) {
           profileId: connection.profileId,
           sessionId: connection.sessionId,
           clientRoots: frame.clientRoots || connection.clientRoots,
+          clientRootsProvided: frame.clientRootsProvided ?? connection.clientRootsProvided,
           context: options.getContext(),
           requestId: id,
           uri: frame.uri,
@@ -137,6 +146,7 @@ export function createMcpBridgeService(options) {
 
   function accept(socket) {
     socket.setNoDelay(true);
+    socket.setEncoding("utf8");
     let buffer = "";
     let connection = null;
     let handshakeTimer = setTimeout(() => socket.destroy(new Error("AI Bridge handshake timed out.")), 5000);
@@ -152,7 +162,7 @@ export function createMcpBridgeService(options) {
     socket.on("close", close);
     socket.on("error", () => {});
     socket.on("data", (chunk) => {
-      buffer += chunk.toString("utf8");
+      buffer += chunk;
       if (Buffer.byteLength(buffer) > maxFrameBytes) {
         socket.destroy(new Error("AI Bridge frame exceeded the size limit."));
         return;
@@ -167,6 +177,11 @@ export function createMcpBridgeService(options) {
           frame = JSON.parse(line);
         } catch {
           writeFrame(socket, { version: protocolVersion, type: "error", error: safeError({ code: "MALFORMED_JSON", message: "The AI Bridge frame was not valid JSON." }) });
+          socket.destroy();
+          return;
+        }
+        if (!frame || typeof frame !== "object" || Array.isArray(frame) || typeof frame.op !== "string") {
+          writeFrame(socket, { version: protocolVersion, type: "error", error: safeError({ code: "INVALID_REQUEST", message: "An AI Bridge frame must be an object with an operation name." }) });
           socket.destroy();
           return;
         }
@@ -185,6 +200,7 @@ export function createMcpBridgeService(options) {
             sessionId: String(frame.sessionId || crypto.randomUUID()).slice(0, 120),
             clientInfo: frame.clientInfo && typeof frame.clientInfo === "object" ? frame.clientInfo : {},
             clientRoots: Array.isArray(frame.clientRoots) ? frame.clientRoots.slice(0, 100) : [],
+            clientRootsProvided: frame.clientRootsProvided === true,
             inFlight: new Map(),
             subscriptions: new Set(),
             lastHeartbeat: Date.now()

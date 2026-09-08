@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
+import { replaceTomlServer, serializeClientEdit, writeClientConfigIfUnchanged } from "./mcp/config-file.mjs";
 
 const require = createRequire(import.meta.url);
 const TOML = require("@iarna/toml");
@@ -76,7 +77,7 @@ export function createMcpClientConfigurator(runtime) {
     if (!existing) return null;
     const dir = path.join(backupRoot, client);
     await fs.mkdir(dir, { recursive: true });
-    const target = path.join(dir, `${timestamp()}-${path.basename(file)}.bak`);
+    const target = path.join(dir, `${timestamp()}-${crypto.randomBytes(4).toString("hex")}-${path.basename(file)}.bak`);
     await fs.writeFile(target, existing, { mode: 0o600 });
     return { path: target, sha256: sha256(existing), bytes: existing.length };
   }
@@ -125,6 +126,7 @@ export function createMcpClientConfigurator(runtime) {
   async function editJsonc(client, profileId, remove = false) {
     const file = paths[client];
     const existing = await readOptional(file);
+    if (remove && !existing) return { client, file, installed: false, backup: null, changed: false };
     const text = existing?.toString("utf8") || "{}\n";
     parseJsonc(text, client);
     const container = ["claude", "cursor"].includes(client) ? "mcpServers" : "servers";
@@ -133,41 +135,39 @@ export function createMcpClientConfigurator(runtime) {
       formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" }
     });
     const updated = applyEdits(text, edits);
+    if (updated === text) return { client, file, installed: !remove, backup: null, changed: false };
     const backupRecord = await backup(client, file, existing);
-    await atomicWrite(file, Buffer.from(updated, "utf8"));
+    await writeClientConfigIfUnchanged(file, Buffer.from(updated, "utf8"), existing);
     return { client, file, installed: !remove, backup: backupRecord };
   }
 
   async function editCodex(profileId, remove = false) {
     const file = paths.codex;
     const existing = await readOptional(file);
-    let document = {};
-    if (existing?.length) {
-      try {
-        document = TOML.parse(existing.toString("utf8"));
-      } catch (error) {
-        throw new Error(`Codex configuration is invalid TOML: ${error.message}`);
-      }
-    }
-    document.mcp_servers = document.mcp_servers && typeof document.mcp_servers === "object" ? document.mcp_servers : {};
-    if (remove) delete document.mcp_servers[serverName];
-    else document.mcp_servers[serverName] = stdioDefinition("codex", profileId);
+    if (remove && !existing) return { client: "codex", file, installed: false, backup: null, changed: false };
+    const text = existing?.toString("utf8") || "";
+    const updated = replaceTomlServer(text, serverName, remove ? undefined : stdioDefinition("codex", profileId));
+    if (updated === text) return { client: "codex", file, installed: !remove, backup: null, changed: false };
     const backupRecord = await backup("codex", file, existing);
-    await atomicWrite(file, Buffer.from(TOML.stringify(document), "utf8"));
+    await writeClientConfigIfUnchanged(file, Buffer.from(updated, "utf8"), existing);
     return { client: "codex", file, installed: !remove, backup: backupRecord };
   }
 
   async function install(client, profileId) {
     if (!["codex", "claude", "cursor", "vscode"].includes(client)) throw new Error("Unknown MCP client adapter.");
     if (!profileId) throw new Error("Select an AI Bridge profile first.");
-    const deployment = await deploy();
-    const configuration = client === "codex" ? await editCodex(profileId) : await editJsonc(client, profileId);
-    return { deployment, configuration, restartRequired: true };
+    // Register in invocation order before deployment performs any asynchronous
+    // reads. Otherwise a slower install can overtake a newer install or removal.
+    return serializeClientEdit(paths[client], async () => {
+      const deployment = await deploy();
+      const configuration = await (client === "codex" ? editCodex(profileId) : editJsonc(client, profileId));
+      return { deployment, configuration, restartRequired: true };
+    });
   }
 
   async function remove(client) {
     if (!["codex", "claude", "cursor", "vscode"].includes(client)) throw new Error("Unknown MCP client adapter.");
-    return client === "codex" ? editCodex("", true) : editJsonc(client, "", true);
+    return serializeClientEdit(paths[client], () => client === "codex" ? editCodex("", true) : editJsonc(client, "", true));
   }
 
   async function installedStatus(client) {

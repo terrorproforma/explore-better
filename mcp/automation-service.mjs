@@ -3,12 +3,18 @@ import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { readTextPage } from "./text-pages.mjs";
 
 const schemaVersion = "1";
 const maxPageSize = 500;
 const maxTextBytes = 256 * 1024;
 const planTtlMs = 120_000;
 const jobRetentionMs = 24 * 60 * 60 * 1000;
+const maxRetainedJobs = 100;
+const maxStoredJobBytes = 16 * 1024 * 1024;
+const maxRetainedJobBytes = 128 * 1024 * 1024;
+const maxResponseBytes = 3 * 1024 * 1024;
+const maxActiveJobs = 12;
 const contractPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "contracts-v1.json");
 
 export class McpAutomationError extends Error {
@@ -339,12 +345,15 @@ export async function createMcpAutomationService(deps) {
   const jobsRoot = path.join(automationRoot, "jobs");
   const cursorKey = crypto.randomBytes(32);
   const jobs = new Map();
+  const activeWorkers = new Map();
   const plans = new Map();
   let uiDispatcher = null;
   let configWriteChain = Promise.resolve();
   let configCache = null;
   let auditWriteChain = Promise.resolve();
   let lastAuditPruneAt = 0;
+  let pruneJobsChain = Promise.resolve();
+  let lastJobPruneAt = 0;
 
   const resolvePath = (value) => deps.resolveUserPath(value);
   const canonicalRootCache = new Map();
@@ -383,7 +392,6 @@ export async function createMcpAutomationService(deps) {
   }
 
   async function writeConfig(config) {
-    const run = async () => {
       await fs.mkdir(automationRoot, { recursive: true });
       const clean = {
         version: 1,
@@ -398,9 +406,21 @@ export async function createMcpAutomationService(deps) {
       configCache = clean;
       canonicalRootCache.clear();
       return clone(clean);
-    };
-    configWriteChain = configWriteChain.then(run, run);
-    return configWriteChain;
+  }
+
+  function withConfigLock(run) {
+    const result = configWriteChain.then(run, run);
+    configWriteChain = result.catch(() => {});
+    return result;
+  }
+
+  function mutateConfig(mutate) {
+    return withConfigLock(async () => {
+      const config = await readConfig();
+      const result = mutate(config);
+      const saved = await writeConfig(config);
+      return result === undefined ? saved : result;
+    });
   }
 
   async function getConfiguration() {
@@ -418,29 +438,29 @@ export async function createMcpAutomationService(deps) {
   }
 
   async function configure(patch = {}) {
-    const config = await readConfig();
-    if (patch.enabled !== undefined) config.enabled = patch.enabled === true;
-    if (patch.auditRetentionDays !== undefined) config.auditRetentionDays = patch.auditRetentionDays;
-    return writeConfig(config);
+    return mutateConfig((config) => {
+      if (patch.enabled !== undefined) config.enabled = patch.enabled === true;
+      if (patch.auditRetentionDays !== undefined) config.auditRetentionDays = patch.auditRetentionDays;
+    });
   }
 
   async function upsertProfile(input = {}) {
-    const config = await readConfig();
+    return mutateConfig((config) => {
     const existing = config.profiles.find((profile) => profile.id === input.id);
     const profile = sanitizeProfile({ ...existing, ...input, createdAt: existing?.createdAt }, contract, resolvePath);
     config.profiles = [profile, ...config.profiles.filter((item) => item.id !== profile.id)];
-    await writeConfig(config);
     return profile;
+    });
   }
 
   async function revokeProfile(profileId) {
-    const config = await readConfig();
+    return mutateConfig((config) => {
     const profile = config.profiles.find((item) => item.id === profileId);
     if (!profile) bridgeError("UNKNOWN_PROFILE", "The AI Bridge profile does not exist.");
     profile.enabled = false;
     profile.updatedAt = new Date().toISOString();
-    await writeConfig(config);
     return profile;
+    });
   }
 
   function makeCursor(kind, key, offset) {
@@ -477,10 +497,11 @@ export async function createMcpAutomationService(deps) {
     return Object.freeze({
       profile: Object.freeze(profile),
       profileId: profile.id,
+      toolName: tool.name,
       sessionId: boundedString(request.sessionId, 120) || "unknown",
       profileRoots: Object.freeze(profileRoots),
       clientRoots: Object.freeze(clientRoots),
-      clientRootsProvided: rawClientRoots.length > 0,
+      clientRootsProvided: request.clientRootsProvided === true || rawClientRoots.length > 0,
       context: cleanContext(request.context, null),
       limits: Object.freeze({ pageSize: maxPageSize, textBytes: maxTextBytes, concurrentJobs: 3 })
     });
@@ -501,6 +522,28 @@ export async function createMcpAutomationService(deps) {
   async function authorizePaths(principal, paths, options = {}) {
     const values = Array.isArray(paths) ? paths : [];
     return Promise.all(values.map((item) => authorizePath(principal, item, options)));
+  }
+
+  function policySignature(principal) {
+    return digest({ profileId: principal.profileId, access: principal.profile.access,
+      tools: [...principal.profile.tools].sort(), permanentDelete: principal.profile.allowPermanentDelete,
+      roots: [...principal.profileRoots].sort(), clientRoots: [...principal.clientRoots].sort(),
+      clientRootsProvided: principal.clientRootsProvided });
+  }
+
+  async function currentPrincipal(principal) {
+    return principalFor({ profileId: principal.profileId, sessionId: principal.sessionId,
+      clientRoots: principal.clientRoots, clientRootsProvided: principal.clientRootsProvided,
+      context: principal.context }, toolMap.get(principal.toolName));
+  }
+
+  async function authorizedCollection(principal, id) {
+    if (!id) return null;
+    const state = await deps.readState();
+    const collection = (state.collections || []).find((item) => item.id === id);
+    if (!collection) bridgeError("NOT_FOUND", "The collection does not exist.");
+    await authorizePaths(principal, (collection.items || []).map((item) => typeof item === "string" ? item : item.path));
+    return collection;
   }
 
   async function audit(principal, tool, outcome, startedAt, details = {}) {
@@ -553,38 +596,47 @@ export async function createMcpAutomationService(deps) {
   }
 
   async function writeJob(job) {
-    const record = {
-      version: 1,
-      id: job.id,
-      profileId: job.profileId,
-      sessionId: job.sessionId,
-      type: job.type,
-      status: job.status,
-      progress: job.progress,
-      createdAt: job.createdAt,
-      updatedAt: job.updatedAt,
-      updatedMs: job.updatedMs,
-      result: job.result,
-      error: job.error,
-      summary: job.summary
+    const write = async () => {
+      const record = {
+        version: 1, id: job.id, profileId: job.profileId, sessionId: job.sessionId,
+        type: job.type, status: job.status, progress: job.progress,
+        createdAt: job.createdAt, updatedAt: job.updatedAt, updatedMs: job.updatedMs,
+        result: job.result, error: job.error, summary: job.summary
+      };
+      const bytes = `${JSON.stringify(record)}\n`;
+      if (Buffer.byteLength(bytes) > maxStoredJobBytes) bridgeError("LIMIT_EXCEEDED", "The analysis result exceeds the retained job size limit. Narrow the analysis scope.");
+      await fs.mkdir(jobsRoot, { recursive: true });
+      const file = path.join(jobsRoot, `${job.id}.json`);
+      const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+      try {
+        await fs.writeFile(temp, bytes, { encoding: "utf8", mode: 0o600 });
+        await fs.rename(temp, file);
+        job.storedBytes = Buffer.byteLength(bytes);
+      } finally {
+        await fs.rm(temp, { force: true }).catch(() => {});
+      }
     };
-    await fs.mkdir(jobsRoot, { recursive: true });
-    const file = path.join(jobsRoot, `${job.id}.json`);
-    const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-    await fs.writeFile(temp, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-    await fs.rename(temp, file);
+    job.writeChain = (job.writeChain || Promise.resolve()).then(write, write);
+    return job.writeChain;
   }
 
   async function loadJob(jobId) {
-    if (jobs.has(jobId)) return jobs.get(jobId);
+    if (jobs.has(jobId)) {
+      const job = jobs.get(jobId);
+      await job.writeChain?.catch(() => {});
+      return job;
+    }
     if (!/^[0-9a-f-]{36}$/i.test(String(jobId || ""))) return null;
     try {
-      const record = JSON.parse(await fs.readFile(path.join(jobsRoot, `${jobId}.json`), "utf8"));
+      const file = path.join(jobsRoot, `${jobId}.json`);
+      const stored = await fs.stat(file);
+      if (stored.size > maxStoredJobBytes) return null;
+      const record = JSON.parse(await fs.readFile(file, "utf8"));
       if (Date.now() - Number(record.updatedMs || 0) > jobRetentionMs) {
         await fs.rm(path.join(jobsRoot, `${jobId}.json`), { force: true });
         return null;
       }
-      const job = { ...record, controller: null };
+      const job = { ...record, controller: null, storedBytes: stored.size };
       if (["queued", "running"].includes(job.status)) {
         job.status = "error";
         job.error = { code: "BRIDGE_RESTARTING", message: "The AI host restarted before this read job completed. Start the analysis again." };
@@ -599,18 +651,49 @@ export async function createMcpAutomationService(deps) {
     }
   }
 
-  function pruneJobs() {
+  function pruneJobs(force = false) {
     const cutoff = Date.now() - jobRetentionMs;
-    for (const [id, job] of jobs) {
-      if (job.updatedMs < cutoff) {
+    let retainedBytes = [...jobs.values()].reduce((total, job) => total + (job.storedBytes || 0), 0);
+    for (const [id, job] of [...jobs].sort((a, b) => a[1].updatedMs - b[1].updatedMs)) {
+      if (!activeWorkers.has(id) && (job.updatedMs < cutoff || jobs.size > maxRetainedJobs || retainedBytes > maxRetainedJobBytes)) {
         jobs.delete(id);
-        fs.rm(path.join(jobsRoot, `${id}.json`), { force: true }).catch(() => {});
+        retainedBytes -= job.storedBytes || 0;
+        Promise.resolve(job.writeChain).then(() => {
+          if (!activeWorkers.has(id)) return fs.rm(path.join(jobsRoot, `${id}.json`), { force: true });
+        }).catch(() => {});
       }
     }
+    if (!force && Date.now() - lastJobPruneAt < 60_000) return pruneJobsChain;
+    lastJobPruneAt = Date.now();
+    const sweep = async () => {
+      const names = await fs.readdir(jobsRoot).catch(() => []);
+      const records = [];
+      for (const name of names) {
+        if (!/^[0-9a-f-]{36}\.json$/i.test(name)) continue;
+        const id = name.slice(0, -5);
+        if (activeWorkers.has(id)) continue;
+        const file = path.join(jobsRoot, name);
+        const stat = await fs.stat(file).catch(() => null);
+        if (stat) records.push({ id, file, size: stat.size, modified: stat.mtimeMs });
+      }
+      records.sort((a, b) => b.modified - a.modified);
+      let bytes = 0;
+      for (let index = 0; index < records.length; index += 1) {
+        const record = records[index];
+        bytes += record.size;
+        if (!activeWorkers.has(record.id) && (record.modified < cutoff || record.size > maxStoredJobBytes || index >= maxRetainedJobs || bytes > maxRetainedJobBytes)) {
+          jobs.delete(record.id);
+          await fs.rm(record.file, { force: true }).catch(() => {});
+        }
+      }
+    };
+    pruneJobsChain = pruneJobsChain.then(sweep, sweep);
+    return pruneJobsChain;
   }
 
   function publicJob(job, principal) {
     if (!job || job.profileId !== principal.profileId) bridgeError("NOT_FOUND", "The requested job does not exist.");
+    if (job.policySignature !== policySignature(principal)) bridgeError("PLAN_CHANGED", "Permissions changed since this analysis started. Run it again within the current scope.");
     return {
       id: job.id,
       type: job.type,
@@ -624,32 +707,36 @@ export async function createMcpAutomationService(deps) {
   }
 
   function startJob(principal, type, runner) {
-    pruneJobs();
-    const active = [...jobs.values()].filter((job) => job.profileId === principal.profileId && ["queued", "running"].includes(job.status));
+    pruneJobs().catch(() => {});
+    const active = [...activeWorkers.values()].filter((profileId) => profileId === principal.profileId);
     if (active.length >= principal.limits.concurrentJobs) bridgeError("LIMIT_EXCEEDED", "This profile already has the maximum number of active jobs.");
+    if (activeWorkers.size >= maxActiveJobs) bridgeError("LIMIT_EXCEEDED", "The AI Bridge is busy finishing other analyses. Retry after an active job stops.", null, true);
     const controller = new AbortController();
     const now = new Date().toISOString();
     const job = {
-      id: crypto.randomUUID(), profileId: principal.profileId, sessionId: principal.sessionId, type,
+      id: crypto.randomUUID(), profileId: principal.profileId, sessionId: principal.sessionId, policySignature: policySignature(principal), type,
       status: "queued", progress: { completed: 0, total: null, message: "Queued" }, createdAt: now, updatedAt: now,
       updatedMs: Date.now(), result: null, error: null, summary: null, controller
     };
     jobs.set(job.id, job);
+    activeWorkers.set(job.id, principal.profileId);
     writeJob(job).catch(() => {});
     Promise.resolve().then(async () => {
-      if (controller.signal.aborted) return;
-      job.status = "running";
-      job.progress.message = "Running";
-      job.updatedAt = new Date().toISOString();
-      job.updatedMs = Date.now();
-      await writeJob(job).catch(() => {});
       try {
+        if (controller.signal.aborted) return;
+        job.status = "running";
+        job.progress.message = "Running";
+        job.updatedAt = new Date().toISOString();
+        job.updatedMs = Date.now();
+        await writeJob(job).catch(() => {});
+        if (controller.signal.aborted) return;
         const result = await runner(controller.signal, (progress) => {
           job.progress = { ...job.progress, ...progress };
           job.updatedAt = new Date().toISOString();
           job.updatedMs = Date.now();
         });
         if (controller.signal.aborted) return;
+        if (Buffer.byteLength(JSON.stringify(result ?? null)) > maxStoredJobBytes - 65_536) bridgeError("LIMIT_EXCEEDED", "The analysis result is too large to retain. Narrow the analysis scope.");
         job.result = result;
         job.summary = result?.summary || result?.counts || null;
         job.status = "complete";
@@ -663,9 +750,11 @@ export async function createMcpAutomationService(deps) {
           job.error = { code: error.code || "INTERNAL_ERROR", message: error.message || String(error) };
         }
       } finally {
+        activeWorkers.delete(job.id);
         job.updatedAt = new Date().toISOString();
         job.updatedMs = Date.now();
         await writeJob(job).catch(() => {});
+        pruneJobs().catch(() => {});
       }
     });
     return publicJob(job, principal);
@@ -675,20 +764,33 @@ export async function createMcpAutomationService(deps) {
     const record = publicJob(job, principal);
     if (job.status !== "complete") return { ...record, result: null };
     const arrays = ["entries", "items", "groups", "topFiles", "topFolders"];
-    const arrayKey = arrays.find((key) => Array.isArray(job.result?.[key]));
-    if (!arrayKey) return { ...record, result: job.result };
+    const arrayKeys = arrays.filter((key) => Array.isArray(job.result?.[key]));
+    if (!arrayKeys.length) {
+      if (Buffer.byteLength(JSON.stringify(job.result)) > maxResponseBytes) bridgeError("LIMIT_EXCEEDED", "The analysis result is too large to return. Narrow the analysis scope.");
+      return { ...record, result: job.result };
+    }
     const limit = Math.min(maxPageSize, Math.max(1, Number(args.limit || 200)));
-    const key = digest({ jobId: job.id, arrayKey });
+    const key = digest({ jobId: job.id, arrayKeys });
     const offset = readCursor(args.cursor, "job", key);
-    const page = job.result[arrayKey].slice(offset, offset + limit);
-    const cursor = offset + page.length < job.result[arrayKey].length ? makeCursor("job", key, offset + page.length) : null;
-    return { ...record, result: { ...job.result, [arrayKey]: page }, nextCursor: cursor, totalResults: job.result[arrayKey].length };
+    const totals = Object.fromEntries(arrayKeys.map((key) => [key, job.result[key].length]));
+    const total = Math.max(...Object.values(totals));
+    let count = Math.min(limit, Math.max(0, total - offset));
+    let result;
+    while (true) {
+      result = { ...job.result, ...Object.fromEntries(arrayKeys.map((key) => [key, job.result[key].slice(offset, offset + count)])) };
+      if (Buffer.byteLength(JSON.stringify(result)) <= maxResponseBytes) break;
+      if (count <= 1) bridgeError("LIMIT_EXCEEDED", "An analysis item exceeds the response size limit. Narrow the analysis scope or lower its entry limit.");
+      count = Math.max(1, Math.floor(count / 2));
+    }
+    const cursor = count > 0 && offset + count < total ? makeCursor("job", key, offset + count) : null;
+    return { ...record, result, nextCursor: cursor, totalResults: total, resultSections: totals };
   }
 
   async function makePlan(principal, type, args, action, paths, summary) {
     const signatures = [];
     for (const itemPath of paths) signatures.push(await pathSignature(itemPath));
-    const plan = { id: crypto.randomUUID(), type, args: clone(args), action, signatures, summary, createdAt: new Date().toISOString() };
+    const plan = { id: crypto.randomUUID(), type, args: clone(args), action, signatures, summary,
+      policySignature: policySignature(principal), planningTool: principal.toolName, createdAt: new Date().toISOString() };
     const planDigest = digest(plan);
     const applyToken = crypto.randomBytes(32).toString("base64url");
     const expiresAt = Date.now() + planTtlMs;
@@ -778,7 +880,8 @@ export async function createMcpAutomationService(deps) {
 
   async function planCollection(principal, args) {
     const paths = await authorizePaths(principal, args.paths || []);
-    return makePlan(principal, "collection-update", args, { kind: "state", type: "collection", body: { ...args, paths } }, paths, { action: args.action, id: args.id || null, count: paths.length });
+    const collection = await authorizedCollection(principal, args.id);
+    return makePlan(principal, "collection-update", args, { kind: "state", type: "collection", collectionSignature: collection ? digest(collection) : null, body: { ...args, paths } }, paths, { action: args.action, id: args.id || null, count: paths.length });
   }
 
   async function planLabel(principal, args) {
@@ -787,21 +890,36 @@ export async function createMcpAutomationService(deps) {
   }
 
   async function applyPlan(principal, args) {
+    return withConfigLock(async () => {
+      principal = await currentPrincipal(principal);
+      return applyAuthorizedPlan(principal, args);
+    });
+  }
+
+  async function applyAuthorizedPlan(principal, args) {
     const record = plans.get(args.applyToken);
     plans.delete(args.applyToken);
     if (!record || record.used || record.expiresAt < Date.now()) bridgeError("PREVIEW_EXPIRED", "The operation preview token is missing, used, or expired.");
     if (record.profileId !== principal.profileId || record.sessionId !== principal.sessionId) bridgeError("PLAN_CHANGED", "The operation preview belongs to another profile or session.");
+    if (record.policySignature !== policySignature(principal) || !principal.profile.tools.includes(record.planningTool)) bridgeError("PLAN_CHANGED", "Permissions changed after this preview. Create a new preview.");
     record.used = true;
     const currentSignatures = [];
-    for (const signature of record.signatures) currentSignatures.push(await pathSignature(signature.path));
+    for (const signature of record.signatures) {
+      await authorizePath(principal, signature.path, { allowMissing: true });
+      currentSignatures.push(await pathSignature(signature.path));
+    }
     if (digest(currentSignatures) !== digest(record.signatures)) bridgeError("PLAN_CHANGED", "A source or destination changed after the preview was created.", { planId: record.id });
     const { action } = record;
+    if (action.type === "delete" && !principal.profile.allowPermanentDelete) bridgeError("TOOL_NOT_ALLOWED", "Permanent deletion is disabled for this profile.");
     if (action.kind === "operation") {
-      const operation = await deps.startOperation(action.type, action.body, principal);
+      const operation = await deps.startOperation(action.type, action.body, { ...principal,
+        operationPolicy: { signature: record.policySignature, planningTool: record.planningTool, paths: record.signatures.map((item) => item.path) } });
       return { planId: record.id, operationId: operation.id, operation };
     }
     let data;
     if (action.type === "collection") {
+      const collection = await authorizedCollection(principal, action.body.id);
+      if ((collection ? digest(collection) : null) !== action.collectionSignature) bridgeError("PLAN_CHANGED", "The collection changed after this preview.");
       if (action.body.action === "delete") data = await deps.deleteCollection(action.body.id);
       else if (action.body.action === "add") data = await deps.addToCollection({ collectionId: action.body.id, name: action.body.name, paths: action.body.paths });
       else if (action.body.action === "remove") data = await deps.removeFromCollection({ collectionId: action.body.id, paths: action.body.paths });
@@ -812,6 +930,55 @@ export async function createMcpAutomationService(deps) {
         : await deps.applyPathLabels({ paths: action.body.paths, name: action.body.label, color: action.body.color });
     }
     return { planId: record.id, result: data };
+  }
+
+  async function authorizeOperation(principal, operation) {
+    if (!operation || operation.mcpProfileId !== principal.profileId) bridgeError("NOT_FOUND", "The operation does not exist.");
+    const policy = operation.mcpPolicy;
+    if (!policy || policy.signature !== policySignature(principal) || !principal.profile.tools.includes(policy.planningTool)) {
+      bridgeError("PLAN_CHANGED", "The operation's permissions have changed or predate permission tracking. Manage it in Explore Better or create a new preview.");
+    }
+    await authorizePaths(principal, policy.paths, { allowMissing: true });
+    return { ...principal, operationPolicy: policy };
+  }
+
+  async function redactResultPaths(principal, value) {
+    const cache = new Map();
+    const visit = async (item, key = "") => {
+      if (typeof item === "string" && item && /^(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))/.test(item)) {
+        if (!cache.has(item)) cache.set(item, authorizePath(principal, item, { allowMissing: true }).then(() => item, () => ""));
+        return cache.get(item);
+      }
+      if (Array.isArray(item)) return Promise.all(item.map((entry) => visit(entry, key)));
+      if (item && typeof item === "object") {
+        const pairs = await Promise.all(Object.entries(item).filter(([name]) => name !== "cacheRoot").map(async ([name, child]) => [name, await visit(child, name)]));
+        return Object.fromEntries(pairs);
+      }
+      return item;
+    };
+    return visit(value);
+  }
+
+  async function dispatchAuthorizedUi(principal, action) {
+    return withConfigLock(async () => {
+      const fresh = await currentPrincipal(principal);
+      const explicitRevision = Number.isInteger(action.expectedContextRevision);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const descriptor = await uiDispatcher({ type: "describe", request: action });
+        if (!Array.isArray(descriptor?.paths) || !Number.isInteger(descriptor.contextRevision) || typeof descriptor.descriptionToken !== "string") bridgeError("UI_UNAVAILABLE", "The renderer could not describe the action's target folders.");
+        if (explicitRevision && action.expectedContextRevision !== descriptor.contextRevision) bridgeError("STALE_CONTEXT", "The Explore Better context changed. Read context and retry.", null, true);
+        await authorizePaths(fresh, descriptor.paths, { allowMissing: true });
+        try {
+          const result = await uiDispatcher({ ...action, expectedContextRevision: descriptor.contextRevision, expectedDescriptionToken: descriptor.descriptionToken });
+          return redactResultPaths(fresh, { ...result, startingContextRevision: result?.startingContextRevision ?? descriptor.contextRevision });
+        } catch (error) {
+          // STALE_CONTEXT is raised before the renderer runs the action. An implicit action
+          // may describe and authorize its current target again; caller fences
+          // remain strict and are never retried with a different revision.
+          if (explicitRevision || error.code !== "STALE_CONTEXT" || attempt === 2) throw error;
+        }
+      }
+    });
   }
 
   async function contextForPrincipal(principal, source) {
@@ -908,8 +1075,8 @@ export async function createMcpAutomationService(deps) {
     if (name === "show_in_explore_better") {
       const itemPath = await authorizePath(principal, args.path);
       if (!uiDispatcher) bridgeError("UI_UNAVAILABLE", "No Explore Better renderer is currently available.", null, true);
-      const action = { type: "show", path: itemPath, pane: args.pane || "active", mode: args.mode || "replace", select: args.select || null, expectedContextRevision: revision };
-      const data = await uiDispatcher(action);
+      const action = { type: "show", path: itemPath, pane: args.pane || "active", mode: args.mode || "replace", select: args.select || null };
+      const data = await dispatchAuthorizedUi(principal, action);
       return resultEnvelope(data, { contextRevision: data?.contextRevision ?? revision });
     }
     if (name === "set_ui_view") {
@@ -918,20 +1085,18 @@ export async function createMcpAutomationService(deps) {
         type: "view",
         view: args.view,
         visible: args.visible !== false,
-        pane: args.pane || "active",
-        expectedContextRevision: revision
+        pane: args.pane || "active"
       };
-      const data = await uiDispatcher(action);
+      const data = await dispatchAuthorizedUi(principal, action);
       return resultEnvelope(data, { contextRevision: data?.contextRevision ?? revision });
     }
     if (name === "list_ui_actions") {
       if (!uiDispatcher) bridgeError("UI_UNAVAILABLE", "No Explore Better renderer is currently available.", null, true);
-      const data = await uiDispatcher({
+      const data = await dispatchAuthorizedUi(principal, {
         type: "listActions",
         pane: args.pane || "active",
         view: boundedString(args.view, 100),
         includeDisabled: args.includeDisabled !== false,
-        expectedContextRevision: revision,
         signal: request.signal
       });
       return resultEnvelope(data, { contextRevision: data?.contextRevision ?? revision });
@@ -944,14 +1109,8 @@ export async function createMcpAutomationService(deps) {
       const correlationId = crypto.randomUUID();
       const expectedContextRevision = Number.isInteger(args.expectedContextRevision)
         ? args.expectedContextRevision
-        : revision;
-      if (Number.isInteger(args.expectedContextRevision) && args.expectedContextRevision !== revision) {
-        bridgeError("STALE_CONTEXT", "The Explore Better context changed. Read context and retry the semantic action.", {
-          expectedContextRevision: args.expectedContextRevision,
-          currentContextRevision: revision
-        }, true);
-      }
-      const data = await uiDispatcher({
+        : undefined;
+      const data = await dispatchAuthorizedUi(principal, {
         type: "semantic",
         actionId: args.actionId,
         pane: args.pane || "active",
@@ -963,8 +1122,7 @@ export async function createMcpAutomationService(deps) {
       return resultEnvelope({
         actionId: args.actionId,
         correlationId,
-        ...data,
-        startingContextRevision: expectedContextRevision
+        ...data
       }, { contextRevision: data?.finalContextRevision ?? data?.contextRevision ?? revision });
     }
     if (name === "wait_for_ui") {
@@ -977,7 +1135,10 @@ export async function createMcpAutomationService(deps) {
       delete condition.operationStatus;
       if (request.signal?.aborted) bridgeError("REQUEST_CANCELED", "The AI Bridge wait was canceled.", null, true);
       let operation = operationId ? await deps.getOperation(operationId) : null;
-      const operationAuthorized = !operation || operation.mcpProfileId === principal.profileId;
+      let operationAuthorized = !operation;
+      if (operation) {
+        try { await authorizeOperation(principal, operation); operationAuthorized = true; } catch {}
+      }
       if (!operationAuthorized) operation = null;
       const hasUiCondition = Object.keys(condition).length > 0 || !operationId;
       const uiWait = hasUiCondition
@@ -1012,7 +1173,10 @@ export async function createMcpAutomationService(deps) {
                 else request.signal?.addEventListener?.("abort", onAbort, { once: true });
               });
       const [data, waitedOperation] = await Promise.all([uiWait, operationWait]);
-      if (waitedOperation) operation = waitedOperation.mcpProfileId === principal.profileId ? waitedOperation : null;
+      if (waitedOperation) {
+        try { await authorizeOperation(await currentPrincipal(principal), waitedOperation); operation = waitedOperation; }
+        catch { operation = null; }
+      }
       const latest = await uiDispatcher({ type: "wait", afterRevision: 0, timeoutMs: 100, condition: {}, signal: request.signal });
       const operationMatched = !operationId || Boolean(operation && (!operationStatus || operation.status === operationStatus));
       const matched = data?.matched === true && operationMatched;
@@ -1058,11 +1222,12 @@ export async function createMcpAutomationService(deps) {
       const limit = Math.min(maxPageSize, Math.max(1, Number(args.limit || 200)));
       const key = digest({ ...args, cursor: undefined, path: itemPath });
       const offset = readCursor(args.cursor, "search", key);
-      const report = await deps.advancedSearch({ ...args, path: itemPath, limit: offset + limit, maxScanned: Math.min(50_000, args.maxScanned || 8000) });
+      const report = await deps.advancedSearch({ ...args, path: itemPath, limit: offset + limit + 1, maxScanned: Math.min(50_000, args.maxScanned || 8000), signal: request.signal });
       const all = report.entries || [];
       const entries = all.slice(offset, offset + limit);
-      const cursor = report.truncated || offset + entries.length < all.length ? makeCursor("search", key, offset + entries.length) : null;
-      return resultEnvelope({ ...report, entries, offset, limit }, { cursor, contextRevision: revision });
+      const cursor = entries.length > 0 && offset + entries.length < all.length ? makeCursor("search", key, offset + entries.length) : null;
+      const incomplete = report.truncated && !cursor;
+      return resultEnvelope({ ...report, entries, offset, limit }, { cursor, contextRevision: revision, status: incomplete ? "partial" : "ok", warnings: incomplete ? ["The search reached its scan limit. Narrow the query or increase maxScanned to inspect more files."] : [] });
     }
     if (name === "inspect_paths") {
       const paths = await authorizePaths(principal, args.paths);
@@ -1070,31 +1235,15 @@ export async function createMcpAutomationService(deps) {
     }
     if (name === "read_text") {
       const itemPath = await authorizePath(principal, args.path);
-      const stat = await fs.stat(itemPath);
-      if (!stat.isFile()) bridgeError("BINARY_FILE", "Only regular text files can be read.");
-      const offset = Math.max(0, Number(args.offset || 0));
-      const length = Math.min(maxTextBytes, Math.max(1, Number(args.maxBytes || 65_536)), Math.max(0, stat.size - offset));
-      const handle = await fs.open(itemPath, "r");
-      const buffer = Buffer.alloc(length);
-      const { bytesRead } = await handle.read(buffer, 0, length, offset).finally(() => handle.close());
-      const bytes = buffer.subarray(0, bytesRead);
-      const nulCount = bytes.reduce((count, byte) => count + (byte === 0 ? 1 : 0), 0);
-      let encoding = args.encoding || "auto";
-      if (encoding === "auto") {
-        if (bytes[0] === 0xff && bytes[1] === 0xfe) encoding = "utf16le";
-        else if (nulCount > Math.max(2, bytesRead / 20)) bridgeError("BINARY_FILE", "Binary files are not returned by read_text.");
-        else encoding = "utf8";
-      }
-      const nodeEncoding = encoding === "latin1" ? "latin1" : encoding;
-      return resultEnvelope({ path: itemPath, offset, bytesRead, nextOffset: offset + bytesRead, eof: offset + bytesRead >= stat.size, encoding, modified: stat.mtimeMs, untrusted: true, text: bytes.toString(nodeEncoding) }, { contextRevision: revision });
+      return resultEnvelope(await readTextPage(itemPath, args), { contextRevision: revision });
     }
     if (name === "compute_checksums") {
       const paths = await authorizePaths(principal, args.paths);
-      return resultEnvelope({ job: startJob(principal, name, () => deps.checksumReport({ ...args, paths })) }, { status: "accepted", contextRevision: revision });
+      return resultEnvelope({ job: startJob(principal, name, (signal) => deps.checksumReport({ ...args, paths }, { signal })) }, { status: "accepted", contextRevision: revision });
     }
     if (name === "get_index_status") {
       const itemPath = args.path ? await authorizePath(principal, args.path) : null;
-      return resultEnvelope(await deps.indexStatus(itemPath), { contextRevision: revision });
+      return resultEnvelope(await redactResultPaths(principal, await deps.indexStatus(itemPath)), { contextRevision: revision });
     }
     if (name === "analyze_disk_usage") {
       const itemPath = await authorizePath(principal, args.path);
@@ -1102,12 +1251,12 @@ export async function createMcpAutomationService(deps) {
     }
     if (name === "find_duplicates") {
       const itemPath = await authorizePath(principal, args.path);
-      return resultEnvelope({ job: startJob(principal, name, () => deps.duplicateFiles({ ...args, path: itemPath })) }, { status: "accepted", contextRevision: revision });
+      return resultEnvelope({ job: startJob(principal, name, (signal) => deps.duplicateFiles({ ...args, path: itemPath }, { signal })) }, { status: "accepted", contextRevision: revision });
     }
     if (name === "compare_folders") {
       const leftPath = await authorizePath(principal, args.leftPath);
       const rightPath = await authorizePath(principal, args.rightPath);
-      return resultEnvelope({ job: startJob(principal, name, () => deps.compareDirectories({ ...args, leftPath, rightPath })) }, { status: "accepted", contextRevision: revision });
+      return resultEnvelope({ job: startJob(principal, name, (signal) => deps.compareDirectories({ ...args, leftPath, rightPath }, { signal })) }, { status: "accepted", contextRevision: revision });
     }
     if (name === "get_job") {
       const job = await loadJob(args.jobId);
@@ -1157,18 +1306,24 @@ export async function createMcpAutomationService(deps) {
     if (name === "apply_operation") return resultEnvelope(await applyPlan(principal, args), { status: "accepted", contextRevision: revision });
     if (name === "get_operation") {
       const operation = await deps.getOperation(args.operationId);
-      if (!operation || operation.mcpProfileId !== principal.profileId) bridgeError("NOT_FOUND", "The operation does not exist.");
+      await authorizeOperation(principal, operation);
       return resultEnvelope({ operation }, { status: operation.status, contextRevision: revision });
     }
     if (name === "control_operation") {
-      const existing = await deps.getOperation(args.operationId);
-      if (!existing || existing.mcpProfileId !== principal.profileId) bridgeError("NOT_FOUND", "The operation does not exist.");
-      return resultEnvelope({ operation: await deps.controlOperation(args.operationId, args.action, principal) }, { contextRevision: revision });
+      return withConfigLock(async () => {
+        const fresh = await currentPrincipal(principal);
+        const existing = await deps.getOperation(args.operationId);
+        const authorized = await authorizeOperation(fresh, existing);
+        return resultEnvelope({ operation: await deps.controlOperation(args.operationId, args.action, authorized) }, { contextRevision: revision });
+      });
     }
     if (name === "undo_operation") {
-      const existing = await deps.getOperation(args.operationId);
-      if (!existing || existing.mcpProfileId !== principal.profileId) bridgeError("NOT_FOUND", "The operation does not exist.");
-      return resultEnvelope({ operation: await deps.undoOperation(args.operationId, principal) }, { status: "accepted", contextRevision: revision });
+      return withConfigLock(async () => {
+        const fresh = await currentPrincipal(principal);
+        const existing = await deps.getOperation(args.operationId);
+        const authorized = await authorizeOperation(fresh, existing);
+        return resultEnvelope({ operation: await deps.undoOperation(args.operationId, authorized) }, { status: "accepted", contextRevision: revision });
+      });
     }
     bridgeError("UNKNOWN_TOOL", `Unknown MCP tool: ${name}`);
   }
@@ -1220,6 +1375,7 @@ export async function createMcpAutomationService(deps) {
     bridgeError("NOT_FOUND", "The requested MCP resource does not exist.");
   }
 
+  await pruneJobs(true);
   return {
     contract,
     invoke,

@@ -13,6 +13,10 @@ try {
     const response = await callTool("get_context");
     return toolData(response)?.live ? response : null;
   }, 30_000, 150);
+  for (const pane of ["right", "left"]) {
+    const scoped = await callTool("show_in_explore_better", { path: harness.fixture, pane, mode: "replace" });
+    assert(!toolFailed(scoped), `Could not establish the authorized ${pane} test pane: ${serialized(scoped)}`);
+  }
   const catalogResponse = await callTool("list_ui_actions", { includeDisabled: true });
   const catalog = toolData(catalogResponse)?.actions || [];
   assert(catalog.length >= 20, `Semantic catalog is unexpectedly small: ${catalog.length}.`);

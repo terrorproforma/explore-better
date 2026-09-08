@@ -30,6 +30,43 @@ For the running Electron build, `npm run inspect:mcp-live` performs a real nativ
 
 ## Latest Regression Evidence
 
+### Codebase review fixes — 2026-09-09
+
+The twenty actionable findings from the September codebase review now have dedicated regression coverage. The implementation also addresses dirty-dialog protection, implicit MCP targets, raw-content response isolation, recursive link containment, restartable bulk rename, virtual-list accessibility, model preparation, terminal lifetime, client configuration preservation, bounded analysis storage, and immutable MCP publication.
+
+| Review finding | Resulting behavior | Regression command |
+| --- | --- | --- |
+| 1. Interrupted cross-volume move | Verify durable source/destination snapshots before deferred deletion; retain changed files | `verify:backend-integrity` |
+| 2. ZIP overwrite failure | Stage and validate the archive, reject overlapping paths, retain the old destination until commit | `verify:backend-integrity` |
+| 3. Text encoding and Undo | Preserve supported encoding/BOM and original bytes through staged saves and Undo | `verify:backend-integrity` |
+| 4. Edits during a pending save | Only the submitted editor instance/snapshot becomes saved; later edits stay dirty | `verify:renderer-state` |
+| 5. Old previews after permission changes | Bind previews and retained operation metadata to current policy; reauthorize apply, retry and Undo | `verify:mcp-policy-regression` |
+| 6. Missing or empty client roots | Distinguish unsupported roots from explicit empty roots and discovery errors | `verify:mcp-client-roots` |
+| 7. Concurrent profile updates | Serialize the complete configuration read/modify/write transaction | `verify:mcp-policy-regression` |
+| 8. Filter history memory | Bound per-listing cached signatures | `verify:renderer-state` |
+| 9. Stale clipboard contents | Read the current OS clipboard; conditionally clear only the owned cut sequence | `verify:renderer-state`, `verify:clipboard-sequence` |
+| 10. Pending terminal ownership | Reserve creation ownership, cancel it on close, and dispose late arrivals | `verify:terminal-service`, `verify:renderer-state` |
+| 11. Percent signs in terminal paths | Parse raw and URL markers separately without throwing | `verify:terminal-service`, `verify:terminal` |
+| 12. Administrator argument boundaries | Build a correctly quoted Windows command line | `verify:terminal-service` |
+| 13. Split Unicode pipe frames | Decode UTF-8 incrementally | `verify:mcp-reliability` |
+| 14. Non-object protocol frames | Validate frame shape and keep other connections usable | `verify:mcp-reliability` |
+| 15. Canceled analysis workers | Pass abort signals through walking/hashing and retain active-worker accounting until settlement | `verify:mcp-reliability`, `verify:backend-integrity` |
+| 16. Collection mutation scope | Authorize existing collection items and validate the planned collection snapshot | `verify:mcp-policy-regression` |
+| 17. Empty search continuations | Expose scan exhaustion without issuing a no-progress cursor | `verify:mcp-reliability` |
+| 18. UTF-16 text paging | Detect encoding from the file header and preserve character boundaries between pages | `verify:mcp-reliability` |
+| 19. Unnecessary content reads | Apply metadata predicates before opening file contents | `verify:backend-integrity` |
+| 20. Same-volume move latency | Try filesystem rename before recursive progress enumeration | `verify:backend-integrity` |
+
+Run commands with `npm run`. New suites are included in Windows CI and `verify:all`, and CI preserves latest JSON/Markdown reports on failure. Release metadata fixtures use local files and never publish. Clipboard sequence tests execute the generated PowerShell against a fake Win32 API and leave the user's clipboard untouched.
+
+The retained-heap regression measured approximately 2.7 MiB growth after 100 matching filters over 10,000 entries; the review's original-source fixture retained 213 MiB. These are local measurements of the same failure mode, not a universal memory budget. The menu focus test deliberately waits past the stale 650 ms row-click timer: it fails on the reviewed master and passes with the focus-owner check.
+
+The final 100,000-entry browser check passed three desktop runs: median first paint was 134.4 ms, complete hydration was 583.4 ms, and only 47 file rows were mounted. The compact warm listing response took 99.9 ms locally. Reproduce with `npm run verify:large-folder-100k-ui`.
+
+Native terminal verification passes with both Command Prompt and Windows PowerShell, using isolated app data and folders with spaces, Unicode and percent signs. Administrator argument quoting is exercised through ordinary non-elevated `Start-Process`; interactive UAC behavior is outside that automated check. Raw active-content protection is covered by harmless response-header assertions; the previously blocked active-content execution reproduction was not repeated.
+
+Cross-volume recovery performs additional hashing to establish that copied data still matches. Interrupted moves from older versions without durable snapshots require manual reconciliation. Text files with unsupported legacy encodings remain read-only in the built-in editor. These are deliberate recovery limits, rather than silently accepting unverifiable data.
+
 ### Interaction and visual review — 2026-09-08
 
 Reviewed file browsing, filtering, sorting, selection, refresh, navigation, pane resizing, overflow menus, previews, terminals, and disk analysis. The changes keep the file list visually primary, make the folder tree collapsible, remove duplicate top-bar shortcuts while the navigator is visible, and put common file actions first. Existing custom toolbar order is preserved. Overflow actions are searchable with keyboard navigation; filters and unreadable folders now offer recovery actions.

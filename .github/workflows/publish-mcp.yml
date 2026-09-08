@@ -2,72 +2,97 @@ name: Publish MCP distribution
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing published release tag, for example v0.1.0
+        required: true
+        type: string
   release:
     types: [published]
 
 permissions:
-  contents: write
+  contents: read
   id-token: write
 
+concurrency:
+  group: publish-mcp-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 20
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
+      - name: Select an existing published release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || { echo "An explicit version tag is required." >&2; exit 1; }
+          gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" > "$RUNNER_TEMP/mcp-release.json"
+          jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .published_at != null' "$RUNNER_TEMP/mcp-release.json"
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Read the selected tag's package metadata
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
+          path: release-source
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: native/mcpserver/go.mod
-          cache-dependency-path: native/mcpserver/go.mod
-      - run: npm ci
-      - run: npm audit --audit-level=high
-      - run: npm run build:mcpb
-      - run: npm run verify:mcpb
+      - name: Install metadata verification dependencies
+        run: npm ci --ignore-scripts
+      - name: Download and verify the published MCP assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./release-source/package.json").version')"
+          [[ "$RELEASE_TAG" == "v${version}" ]] || { echo "Tag and package version differ." >&2; exit 1; }
+          artifact="ExploreBetter-MCP-${version}-windows-x64.mcpb"
+          mkdir -p "$RUNNER_TEMP/mcp-published"
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/mcp-published" \
+            --pattern "$artifact" --pattern manifest.json --pattern SHA256SUMS-mcp.txt
+          node scripts/prepare-mcp-registry.mjs \
+            "--tag=$RELEASE_TAG" "--repository=$GH_REPO" \
+            "--assets=$RUNNER_TEMP/mcp-published" "--release=$RUNNER_TEMP/mcp-release.json" \
+            --package=release-source/package.json \
+            --output=dist/mcp-registry
       - uses: actions/upload-artifact@v7
         with:
-          name: explore-better-mcp-distribution
+          name: verified-mcp-registry-metadata-${{ github.event.release.tag_name || inputs.tag }}
           if-no-files-found: error
-          path: dist/mcp/**
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: explore-better-mcp-distribution
-          path: dist/mcp
-      - name: Upload MCP bundle to the matching GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          version="$(jq -r .version dist/mcp/server.json)"
-          gh release upload "v${version}" --clobber \
-            dist/mcp/ExploreBetter-MCP-*-windows-x64.mcpb \
-            dist/mcp/SHA256SUMS-mcp.txt \
-            dist/mcp/manifest.json
+          path: dist/mcp-registry/**
       - name: Install the official MCP Registry publisher
+        shell: bash
         run: |
+          set -euo pipefail
           curl -L --fail --retry 3 \
             https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz \
             | tar xz mcp-publisher
           chmod +x mcp-publisher
-      - name: Publish to the official MCP Registry with GitHub OIDC
-        working-directory: dist/mcp
+      - name: Publish the verified metadata to the official MCP Registry
+        working-directory: dist/mcp-registry
         run: |
           ../../mcp-publisher validate
           ../../mcp-publisher login github-oidc
           ../../mcp-publisher publish
-      - name: Verify the Registry record
+      - name: Verify the Registry record matches the published bundle
+        shell: bash
         run: |
-          version="$(jq -r .version dist/mcp/server.json)"
-          response="$(curl -L --fail --retry 5 --retry-delay 3 \
-            "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.terrorproforma%2Fexplore-better")"
-          echo "$response" | jq -e --arg version "$version" \
-            '.servers[] | select(.server.name == "io.github.terrorproforma/explore-better" and .server.version == $version)'
+          set -euo pipefail
+          version="$(jq -r .version dist/mcp-registry/server.json)"
+          hash="$(jq -r '.packages[0].fileSha256' dist/mcp-registry/server.json)"
+          curl -L --fail --retry 5 --retry-delay 3 \
+            "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.terrorproforma%2Fexplore-better" \
+            --output "$RUNNER_TEMP/mcp-registry-response.json"
+          jq -e --arg version "$version" --arg hash "$hash" \
+            '.servers[] | select(.server.name == "io.github.terrorproforma/explore-better" and .server.version == $version and .server.packages[0].fileSha256 == $hash)' \
+            "$RUNNER_TEMP/mcp-registry-response.json"

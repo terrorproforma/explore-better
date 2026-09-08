@@ -101,8 +101,10 @@ function createView({ host, settings = {}, onInput, onResize, onDropPaths }) {
   terminal.open(host);
 
   let webgl = null;
+  let disposed = false;
   const webglTimer = setTimeout(() => {
     const enableWebgl = () => {
+      if (disposed) return;
       try {
         webgl = window.ExploreBetterWebglAddon?.create?.();
         if (!webgl) return;
@@ -135,7 +137,7 @@ function createView({ host, settings = {}, onInput, onResize, onDropPaths }) {
       return false;
     }
     if (event.code === "KeyV") {
-      navigator.clipboard.readText().then((text) => onInput?.(text)).catch(() => {});
+      navigator.clipboard.readText().then((text) => { if (!disposed) terminal.paste(text); }).catch(() => {});
       event.preventDefault();
       return false;
     }
@@ -200,6 +202,7 @@ function createView({ host, settings = {}, onInput, onResize, onDropPaths }) {
       return { cols: Math.max(2, terminal.cols), rows: Math.max(1, terminal.rows) };
     },
     dispose() {
+      disposed = true;
       clearTimeout(webglTimer);
       if (fitFrame) cancelAnimationFrame(fitFrame);
       observer.disconnect();
