@@ -74,19 +74,31 @@ document.querySelectorAll("[data-copy-target]").forEach((button) => {
     const status = document.querySelector(button.dataset.copyStatusTarget || "");
     const value = source?.textContent?.trim() || "";
     if (!value) return;
+    let copied = false;
     try {
       await navigator.clipboard.writeText(value);
+      copied = true;
     } catch {
+      const previousFocus = document.activeElement;
       const input = document.createElement("textarea");
       input.value = value;
+      input.readOnly = true;
       input.style.position = "fixed";
       input.style.opacity = "0";
-      document.body.append(input);
-      input.select();
-      document.execCommand("copy");
-      input.remove();
+      try {
+        document.body.append(input);
+        input.select();
+        copied = document.execCommand("copy") === true;
+      } catch {
+        copied = false;
+      } finally {
+        input.remove();
+        previousFocus?.focus({ preventScroll: true });
+      }
     }
-    if (status) status.textContent = button.dataset.copySuccess || "Copied";
+    if (status) status.textContent = copied
+      ? button.dataset.copySuccess || "Copied"
+      : "Could not copy. Select and copy the text manually.";
   });
 });
 

@@ -4,6 +4,59 @@ const terminalPorts = new Map();
 const terminalListeners = new Set();
 const mcpActionListeners = new Set();
 const updateListeners = new Set();
+const desktopListeners = new Map();
+const desktopEvents = [];
+let desktopEventsRunning = false;
+let activeDesktopEvent = null;
+
+async function flushDesktopEvents() {
+  if (desktopEventsRunning) return;
+  desktopEventsRunning = true;
+  try {
+    while (desktopEvents.length) {
+      const next = desktopEvents[0];
+      const listeners = [...(desktopListeners.get(next.type) || [])];
+      if (!listeners.length) break;
+      desktopEvents.shift();
+      activeDesktopEvent = next;
+      try {
+        let result;
+        for (const listener of listeners) {
+          if (next.canceled) break;
+          result = await listener(next.payload, { isCanceled: () => next.canceled === true });
+        }
+        ipcRenderer.send("explore-better:desktop-event-result", { requestId: next.requestId, result });
+      } catch (error) {
+        ipcRenderer.send("explore-better:desktop-event-result", { requestId: next.requestId, error: error?.message || String(error) });
+      } finally { activeDesktopEvent = null; }
+    }
+  } finally { desktopEventsRunning = false; }
+}
+
+function onDesktopEvent(type, listener) {
+  if (typeof listener !== "function") return () => {};
+  const listeners = desktopListeners.get(type) || new Set();
+  listeners.add(listener);
+  desktopListeners.set(type, listeners);
+  void flushDesktopEvents();
+  return () => listeners.delete(listener);
+}
+
+ipcRenderer.on("explore-better:desktop-event", (_event, payload) => {
+  if (!["shell-open", "backend-recovered"].includes(payload?.type)) return;
+  if (desktopEvents.length >= 32) {
+    ipcRenderer.send("explore-better:desktop-event-result", { requestId: payload.requestId, error: "Too many desktop actions are waiting." });
+    return;
+  }
+  desktopEvents.push(payload);
+  void flushDesktopEvents();
+});
+ipcRenderer.on("explore-better:desktop-event-cancel", (_event, payload) => {
+  if (activeDesktopEvent?.requestId === payload?.requestId) activeDesktopEvent.canceled = true;
+  const index = desktopEvents.findIndex(item => item.requestId === payload?.requestId);
+  if (index !== -1) desktopEvents.splice(index, 1);
+  void flushDesktopEvents();
+});
 
 ipcRenderer.on("explore-better:terminal-port", (event, payload) => {
   const sessionId = String(payload?.sessionId || "");
@@ -11,6 +64,7 @@ ipcRenderer.on("explore-better:terminal-port", (event, payload) => {
   if (!sessionId || !port) {
     return;
   }
+  terminalPorts.get(sessionId)?.close();
   terminalPorts.set(sessionId, port);
   port.onmessage = (messageEvent) => {
     for (const listener of terminalListeners) {
@@ -19,6 +73,10 @@ ipcRenderer.on("explore-better:terminal-port", (event, payload) => {
       } catch {
         // Renderer listeners are isolated from the terminal transport.
       }
+    }
+    if (messageEvent.data?.type === "exit" && terminalPorts.get(sessionId) === port) {
+      terminalPorts.delete(sessionId);
+      port.close();
     }
   };
   port.start();
@@ -59,6 +117,8 @@ ipcRenderer.on("explore-better:update-event", (_event, payload) => {
 });
 
 contextBridge.exposeInMainWorld("exploreBetterDesktop", {
+  onShellOpen(listener) { return onDesktopEvent("shell-open", listener); },
+  onBackendRecovered(listener) { return onDesktopEvent("backend-recovered", listener); },
   getPathForFile(file) {
     if (!file) {
       return "";
@@ -166,10 +226,12 @@ contextBridge.exposeInMainWorld("exploreBetterDesktop", {
       return result;
     },
     async dispose(sessionId) {
-      const result = await ipcRenderer.invoke("explore-better:terminal-dispose", sessionId);
-      terminalPorts.get(String(sessionId || ""))?.close();
-      terminalPorts.delete(String(sessionId || ""));
-      return result;
+      try {
+        return await ipcRenderer.invoke("explore-better:terminal-dispose", sessionId);
+      } finally {
+        terminalPorts.get(String(sessionId || ""))?.close();
+        terminalPorts.delete(String(sessionId || ""));
+      }
     },
     onEvent(listener) {
       if (typeof listener !== "function") return () => {};

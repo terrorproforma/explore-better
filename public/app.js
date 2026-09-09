@@ -99,6 +99,7 @@ const app = {
     closing: new Map(),
     bySessionId: new Map(),
     earlyEvents: new Map(),
+    retiredSessions: new Set(),
     visible: { left: false, right: false },
     unsubscribe: null
   },
@@ -2008,7 +2009,7 @@ function beginPaneLoad(paneName, options = {}) {
   const controller = new AbortController();
   state.id += 1;
   state.controller = controller;
-  const load = { id: state.id, controller, startedAt: performance.now() };
+  const load = { id: state.id, controller, tab: tabOf(paneName), startedAt: performance.now() };
   setPaneActivity(paneName, load, "loading", {
     detail: options.detail || `${paneName === "left" ? "Left" : "Right"} pane loading`
   });
@@ -2017,11 +2018,25 @@ function beginPaneLoad(paneName, options = {}) {
 
 function isCurrentPaneLoad(paneName, load) {
   const state = app.paneLoads[paneName];
-  return state?.id === load?.id && state.controller === load?.controller;
+  return ownsPaneLoad(paneName, load) && state.controller === load?.controller;
+}
+
+function ownsPaneLoad(paneName, load) {
+  return app.paneLoads[paneName]?.id === load?.id && tabOf(paneName) === load?.tab;
+}
+
+function cancelPaneLoad(paneName) {
+  const state = app.paneLoads[paneName];
+  state.controller?.abort();
+  state.controller = null;
+  state.id += 1;
+  Object.assign(state, { phase: "idle", text: "Ready", detail: "Ready" });
+  renderPaneActivity(paneName);
 }
 
 function finishPaneLoad(paneName, load) {
-  if (isCurrentPaneLoad(paneName, load)) {
+  const state = app.paneLoads[paneName];
+  if (state.id === load?.id && state.controller === load?.controller) {
     app.paneLoads[paneName].controller = null;
     renderPaneActivity(paneName);
   }
@@ -7245,7 +7260,8 @@ async function openLockedNavigationBranch(paneName, targetPath, options = {}, br
   const sourceIndex = pane.activeTab;
   const sourceTab = tabOf(paneName);
   const insertIndex = sourceIndex + 1;
-  pane.tabs.splice(insertIndex, 0, branchTabFromLocked(sourceTab, targetPath, branchState));
+  const newTab = branchTabFromLocked(sourceTab, targetPath, branchState);
+  pane.tabs.splice(insertIndex, 0, newTab);
   pane.activeTab = insertIndex;
   app.activePane = paneName;
   try {
@@ -7259,8 +7275,7 @@ async function openLockedNavigationBranch(paneName, targetPath, options = {}, br
     }
     return result;
   } catch (error) {
-    pane.tabs.splice(insertIndex, 1);
-    pane.activeTab = Math.max(0, Math.min(sourceIndex, pane.tabs.length - 1));
+    removeTabByIdentity(paneName, newTab, sourceTab);
     renderPane(paneName);
     throw error;
   }
@@ -7427,6 +7442,7 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
         scheduleStateSave();
       }
       await syncTerminalAfterNavigation(tab, cached.path);
+      if (!ownsPaneLoad(paneName, load)) return false;
       await maybeFollowLinkedPane(paneName, linkedPreviousPath, cached.path, options);
       return true;
     }
@@ -7557,6 +7573,7 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
     finishPaneLoad(paneName, load);
   }
   await syncTerminalAfterNavigation(tab, appliedPath || tab.path);
+  if (!ownsPaneLoad(paneName, load)) return false;
   await maybeFollowLinkedPane(paneName, linkedPreviousPath, appliedPath, options);
   return true;
 }
@@ -13149,13 +13166,13 @@ function stepModelGeometry(source) {
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(new THREE.BufferAttribute(Uint32Array.from(indices), 1));
   const normals = flattenedModelArray(source?.attributes?.normal?.array);
   if (normals.length === positions.length) {
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
   } else {
     geometry.computeVertexNormals();
   }
-  geometry.setIndex(new THREE.BufferAttribute(Uint32Array.from(indices), 1));
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
   return geometry;
@@ -14031,6 +14048,7 @@ function requestCloseAppDialog(dialog, { prompt = true } = {}) {
   if (!dialog?.open) return true;
   if (dialog.id === "text-editor-dialog") return closeTextEditor({ prompt });
   if (dialog.id === "preferences-dialog") return requestClosePreferencesDialog({ prompt });
+  cancelAsyncDialogTask(dialog.id);
   dialog.close();
   return true;
 }
@@ -14755,11 +14773,42 @@ async function renameSelected(paneName) {
   beginInlineRename(paneName);
 }
 
+const asyncDialogTasks = new Map();
+
+function cancelAsyncDialogTask(dialogId) {
+  asyncDialogTasks.get(dialogId)?.controller.abort();
+  asyncDialogTasks.delete(dialogId);
+}
+
+function beginAsyncDialogTask(dialogId, payload, owner = null, paneName = null) {
+  cancelAsyncDialogTask(dialogId);
+  const task = { dialogId, controller: new AbortController(), payload: JSON.parse(JSON.stringify(payload)), owner,
+    paneName, tab: paneName ? tabOf(paneName) : null, paneRevision: paneName ? app.paneLoads[paneName].id : null };
+  asyncDialogTasks.set(dialogId, task);
+  return task;
+}
+
+function ownsAsyncDialogTask(task) {
+  return asyncDialogTasks.get(task.dialogId) === task && document.getElementById(task.dialogId)?.open &&
+    !task.controller.signal.aborted && (!task.paneName || (tabOf(task.paneName) === task.tab && app.paneLoads[task.paneName].id === task.paneRevision));
+}
+
+async function requestDialogTask(task, url, options) {
+  try {
+    const result = await request(url, { ...options, signal: task.controller.signal });
+    return ownsAsyncDialogTask(task) ? result : null;
+  } catch (error) {
+    if (isAbortError(error) || !ownsAsyncDialogTask(task)) return null;
+    throw error;
+  }
+}
+
 function openBulkRenameDialog(paneName) {
   const paths = selectedPaths(paneName);
   if (!paths.length) {
     return showToast("Select items first");
   }
+  cancelAsyncDialogTask("bulk-dialog");
   app.bulkRename = { paneName, paths, plan: null };
   applyBulkRenameOptionsToForm({});
   document.getElementById("bulk-summary").textContent = `${paths.length} selected`;
@@ -14990,7 +15039,7 @@ function renderBulkRenamePlan(plan) {
   document.getElementById("bulk-summary").textContent = `${itemWord(total, "item")} / ${bulkCountsText(
     plan.counts
   )}`;
-  document.getElementById("bulk-apply").disabled = !plan.canApply;
+  document.getElementById("bulk-apply").disabled = !plan.canApply || app.bulkRename.applying === true;
   const results = document.getElementById("bulk-results");
   results.innerHTML = plan.items.length
     ? plan.items
@@ -15021,29 +15070,42 @@ async function runBulkRenamePreview() {
   }
   document.getElementById("bulk-summary").textContent = "Previewing...";
   document.getElementById("bulk-apply").disabled = true;
-  const plan = await request("/api/bulk-rename/preview", {
+  const owner = app.bulkRename;
+  const task = beginAsyncDialogTask("bulk-dialog", bulkRenamePayload(), owner);
+  const plan = await requestDialogTask(task, "/api/bulk-rename/preview", {
     method: "POST",
-    body: JSON.stringify(bulkRenamePayload())
+    body: JSON.stringify(task.payload)
   });
+  if (!plan || app.bulkRename !== owner || JSON.stringify(bulkRenamePayload()) !== JSON.stringify(task.payload)) return null;
   renderBulkRenamePlan(plan);
+  return { plan, task };
 }
 
 async function applyBulkRename() {
   if (!app.bulkRename?.paths?.length) {
     return showToast("Select items first");
   }
-  await runBulkRenamePreview();
-  if (!app.bulkRename.plan?.canApply) {
-    return showToast("Bulk rename preview has conflicts");
+  const owner = app.bulkRename;
+  if (owner.applying) return { canceled: true };
+  owner.applying = true;
+  try {
+    const preview = await runBulkRenamePreview();
+    if (!preview || app.bulkRename !== owner || !ownsAsyncDialogTask(preview.task)) return { canceled: true };
+    if (!preview.plan.canApply) {
+      return showToast("Bulk rename preview has conflicts");
+    }
+    const result = await request("/api/bulk-rename", {
+      method: "POST",
+      body: JSON.stringify(preview.task.payload)
+    });
+    await refreshPane(owner.paneName);
+    await pollOperationState({ silent: true });
+    if (app.bulkRename === owner && ownsAsyncDialogTask(preview.task)) document.getElementById("bulk-dialog").close();
+    showToast(`Renamed ${itemWord(result.renamed.length, "item")}`);
+  } finally {
+    owner.applying = false;
+    if (app.bulkRename === owner) document.getElementById("bulk-apply").disabled = !owner.plan?.canApply;
   }
-  const result = await request("/api/bulk-rename", {
-    method: "POST",
-    body: JSON.stringify(bulkRenamePayload())
-  });
-  await refreshPane(app.bulkRename.paneName);
-  await syncStateAndChrome();
-  document.getElementById("bulk-dialog").close();
-  showToast(`Renamed ${itemWord(result.renamed.length, "item")}`);
 }
 
 async function operationPreview(type, payload) {
@@ -15121,6 +15183,7 @@ async function moveToOther(paneName) {
 }
 
 function openTransferDialogWithPaths(paneName, paths, options = {}) {
+  cancelAsyncDialogTask("transfer-dialog");
   app.transfer = { paneName, paths, plan: null, itemPolicies: {} };
   document.getElementById("transfer-target").value = options.targetDir || tabOf(otherPane(paneName)).path;
   document.getElementById("transfer-mode").value = options.mode || "copy";
@@ -15202,7 +15265,7 @@ function renderTransferPlan(plan) {
   document.getElementById("transfer-summary").textContent = `${itemWord(plan.items.length, "item")} / ${plan.mode} / ${
     plan.conflictMode
   } / ${transferCountsText(plan.counts, plan.actionCounts)}`;
-  document.getElementById("transfer-apply").disabled = !plan.canApply;
+  document.getElementById("transfer-apply").disabled = !plan.canApply || app.transfer.applying === true;
   const results = document.getElementById("transfer-results");
   results.innerHTML = plan.items.length
     ? plan.items
@@ -15235,32 +15298,45 @@ async function runTransferPreview() {
   }
   document.getElementById("transfer-summary").textContent = "Previewing...";
   document.getElementById("transfer-apply").disabled = true;
-  const plan = await request("/api/transfer/preview", {
+  const owner = app.transfer;
+  const task = beginAsyncDialogTask("transfer-dialog", transferPayload(), owner);
+  const plan = await requestDialogTask(task, "/api/transfer/preview", {
     method: "POST",
-    body: JSON.stringify(transferPayload())
+    body: JSON.stringify(task.payload)
   });
+  if (!plan || app.transfer !== owner || JSON.stringify(transferPayload()) !== JSON.stringify(task.payload)) return null;
   renderTransferPlan(plan);
+  return { plan, task };
 }
 
 async function applyTransfer() {
   if (!app.transfer?.paths?.length) {
     return showToast("Select items first");
   }
-  await runTransferPreview();
-  if (!app.transfer.plan?.canApply) {
-    return showToast("Transfer preview has conflicts");
+  const owner = app.transfer;
+  if (owner.applying) return { canceled: true };
+  owner.applying = true;
+  try {
+    const preview = await runTransferPreview();
+    if (!preview || app.transfer !== owner || !ownsAsyncDialogTask(preview.task)) return { canceled: true };
+    if (!preview.plan.canApply) {
+      return showToast("Transfer preview has conflicts");
+    }
+    const result = await request("/api/transfer", {
+      method: "POST",
+      body: JSON.stringify({ ...preview.task.payload,
+        expectedPlanDigest: preview.plan.planDigest,
+        applyToken: preview.plan.applyToken
+      })
+    });
+    await Promise.all([refreshPane("left"), refreshPane("right")]);
+    await pollOperationState({ silent: true });
+    if (app.transfer === owner && ownsAsyncDialogTask(preview.task)) document.getElementById("transfer-dialog").close();
+    showToast(`${result.mode === "move" ? "Moved" : "Copied"} ${itemWord(result.transferred.length, "item")}`);
+  } finally {
+    owner.applying = false;
+    if (app.transfer === owner) document.getElementById("transfer-apply").disabled = !owner.plan?.canApply;
   }
-  const result = await request("/api/transfer", {
-    method: "POST",
-    body: JSON.stringify(transferPayload({
-      expectedPlanDigest: app.transfer.plan.planDigest,
-      applyToken: app.transfer.plan.applyToken
-    }))
-  });
-  await Promise.all([refreshPane("left"), refreshPane("right")]);
-  await syncStateAndChrome();
-  document.getElementById("transfer-dialog").close();
-  showToast(`${result.mode === "move" ? "Moved" : "Copied"} ${itemWord(result.transferred.length, "item")}`);
 }
 
 function destinationKindLabel(kind) {
@@ -16487,24 +16563,37 @@ function rememberClosedTab(paneName, tab) {
   ].slice(0, 20);
 }
 
-async function openFolderInNewTab(paneName, targetPath) {
+function removeTabByIdentity(paneName, tab, fallbackTab = null) {
+  const pane = panes[paneName];
+  const index = pane.tabs.indexOf(tab);
+  if (index < 0) return false;
+  const activeTab = tabOf(paneName);
+  pane.tabs.splice(index, 1);
+  const retained = pane.tabs.indexOf(activeTab === tab ? fallbackTab : activeTab);
+  pane.activeTab = retained >= 0 ? retained : Math.max(0, Math.min(index, pane.tabs.length - 1));
+  return true;
+}
+
+async function openFolderInNewTab(paneName, targetPath, options = {}) {
   if (!isPaneName(paneName) || !targetPath) {
     return false;
   }
   const pane = panes[paneName];
   const sourceIndex = pane.activeTab;
+  const sourceTab = tabOf(paneName);
   const insertIndex = sourceIndex + 1;
-  pane.tabs.splice(insertIndex, 0, tabShellForPath(tabOf(paneName), targetPath));
+  const newTab = tabShellForPath(sourceTab, targetPath);
+  pane.tabs.splice(insertIndex, 0, newTab);
   pane.activeTab = insertIndex;
   app.activePane = paneName;
   try {
-    await loadPane(paneName, targetPath, false, { allowLockedNavigation: true });
+    const loaded = await loadPane(paneName, targetPath, false, { allowLockedNavigation: true });
+    if (!loaded || tabOf(paneName) !== newTab) return false;
     showToast(`Opened ${labelForPath(targetPath)} in a new tab`);
-    focusPaneList(paneName);
+    if (options.focus !== false && !document.querySelector("dialog[open]")) focusPaneList(paneName);
     return true;
   } catch (error) {
-    pane.tabs.splice(insertIndex, 1);
-    pane.activeTab = Math.max(0, Math.min(sourceIndex, pane.tabs.length - 1));
+    removeTabByIdentity(paneName, newTab, sourceTab);
     renderPane(paneName);
     throw error;
   }
@@ -16516,17 +16605,20 @@ async function activateTab(paneName, tabIndex) {
   }
   const pane = panes[paneName];
   const nextIndex = Math.max(0, Math.min(Number(tabIndex) || 0, pane.tabs.length - 1));
+  cancelPaneLoad(paneName);
   pane.activeTab = nextIndex;
+  const tab = tabOf(paneName);
   app.activePane = paneName;
   if (!tabOf(paneName).entries.length && tabOf(paneName).path) {
     await loadPane(paneName, tabOf(paneName).path, false);
   }
+  if (tabOf(paneName) !== tab) return false;
   renderAll();
   renderRoots();
   renderInspector();
   if (app.terminals.visible[paneName]) await ensureTerminalForPane(paneName);
   scheduleStateSave();
-  focusPaneList(paneName);
+  if (tabOf(paneName) === tab && app.activePane === paneName && !document.querySelector("dialog[open]")) focusPaneList(paneName);
   return true;
 }
 
@@ -16555,20 +16647,19 @@ async function closeTab(paneName, tabIndex = panes[paneName]?.activeTab || 0) {
   const closeIndex = Math.max(0, Math.min(Number(tabIndex) || 0, pane.tabs.length - 1));
   const targetTab = pane.tabs[closeIndex];
   if (!(await disposeTerminalForTab(targetTab))) return false;
-  const [closedTab] = pane.tabs.splice(closeIndex, 1);
+  if (pane.tabs.length < 2 || !pane.tabs.includes(targetTab)) return false;
+  if (tabOf(paneName) === targetTab) cancelPaneLoad(paneName);
+  const closedTab = targetTab;
+  removeTabByIdentity(paneName, targetTab);
   rememberClosedTab(paneName, closedTab);
-  if (pane.activeTab > closeIndex) {
-    pane.activeTab -= 1;
-  } else if (pane.activeTab >= pane.tabs.length) {
-    pane.activeTab = pane.tabs.length - 1;
-  }
+  const activeTab = tabOf(paneName);
   app.activePane = paneName;
   renderPane(paneName);
   renderRoots();
   renderInspector();
   if (app.terminals.visible[paneName]) await ensureTerminalForPane(paneName);
   scheduleStateSave();
-  focusPaneList(paneName);
+  if (tabOf(paneName) === activeTab && app.activePane === paneName && !document.querySelector("dialog[open]")) focusPaneList(paneName);
   showToast(`Closed ${closedTab.title || labelForPath(closedTab.path)}`);
   return true;
 }
@@ -16872,6 +16963,7 @@ function cycleViewMode(paneName) {
 }
 
 function openSearchDialog() {
+  cancelAsyncDialogTask("search-dialog");
   document.getElementById("search-root").value = tabOf(app.activePane).path;
   document.getElementById("search-name").value = "";
   document.getElementById("search-content").value = "";
@@ -17226,7 +17318,7 @@ function backgroundSearchResultFromResponse(response, options) {
   };
 }
 
-function applySearchResultToPane(paneName, result, label) {
+function applySearchResultToPane(paneName, result, label, options = {}) {
   const pane = panes[paneName];
   const current = tabOf(paneName);
   if (current.locked) {
@@ -17237,6 +17329,7 @@ function applySearchResultToPane(paneName, result, label) {
     showToast("Search results opened in a new tab");
   }
   const tab = tabOf(paneName);
+  tab.path = result.root || tab.path;
   tab.entries = result.entries;
   tab.selected = new Set();
   tab.focusedPath = null;
@@ -17244,15 +17337,17 @@ function applySearchResultToPane(paneName, result, label) {
   tab.searchMode = true;
   tab.virtualMode = result.virtualMode || "";
   tab.virtual = null;
-  tab.title = `Search: ${label}`;
+  tab.title = options.flat ? `Flat: ${labelForPath(tab.path)}` : `Search: ${label}`;
   tab.parent = null;
   renderPane(paneName);
   renderInspector();
-  renderSearchResults(result);
+  if (options.flat) renderFlatResults(result);
+  else renderSearchResults(result);
 }
 
-async function runBackgroundSearch(options, label, paneName) {
-  const response = await request(`/api/background-indexes/search?${backgroundSearchParams(options).toString()}`);
+async function runBackgroundSearch(options, label, paneName, task) {
+  const response = await requestDialogTask(task, `/api/background-indexes/search?${backgroundSearchParams(options).toString()}`);
+  if (!response || JSON.stringify(searchOptionsFromForm()) !== JSON.stringify(task.payload)) return { canceled: true };
   const result = backgroundSearchResultFromResponse(response, options);
   applySearchResultToPane(paneName, result, label);
   if (!result.indexed) {
@@ -17280,15 +17375,17 @@ async function runAdvancedSearch() {
     return;
   }
   const label = searchCriteriaLabel(options);
+  cancelPaneLoad(paneName);
+  const task = beginAsyncDialogTask("search-dialog", options, null, paneName);
   setStatus(`Searching ${label}`);
   if (options.backgroundCache) {
-    await runBackgroundSearch(options, label, paneName);
-    return;
+    return runBackgroundSearch(options, label, paneName, task);
   }
-  const result = await request("/api/search", {
+  const result = await requestDialogTask(task, "/api/search", {
     method: "POST",
     body: JSON.stringify(options)
   });
+  if (!result || JSON.stringify(searchOptionsFromForm()) !== JSON.stringify(task.payload)) return { canceled: true };
   applySearchResultToPane(paneName, result, label);
   setStatus(`${result.entries.length} matches`);
 }
@@ -17298,6 +17395,7 @@ async function deepSearch() {
 }
 
 function openFlatDialog() {
+  cancelAsyncDialogTask("flat-dialog");
   document.getElementById("flat-root").value = tabOf(app.activePane).path;
   document.getElementById("flat-mode").value = "files";
   document.getElementById("flat-limit").value = "1000";
@@ -17354,31 +17452,22 @@ function renderFlatResults(result) {
 async function runFlatView() {
   const paneName = app.activePane;
   const options = flatOptionsFromForm();
+  cancelPaneLoad(paneName);
+  const task = beginAsyncDialogTask("flat-dialog", options, null, paneName);
   setStatus(`Flattening ${labelForPath(options.path)}`);
   document.getElementById("flat-summary").textContent = "Scanning...";
-  const result = await request("/api/flat", {
+  const result = await requestDialogTask(task, "/api/flat", {
     method: "POST",
     body: JSON.stringify(options)
   });
-  const tab = tabOf(paneName);
-  tab.path = result.root;
-  tab.entries = result.entries;
-  tab.selected = new Set();
-  tab.focusedPath = null;
-  tab.anchorPath = null;
-  tab.searchMode = true;
-  tab.virtualMode = "";
-  tab.virtual = null;
-  tab.title = `Flat: ${labelForPath(result.root)}`;
-  tab.parent = null;
-  renderPane(paneName);
+  if (!result || JSON.stringify(flatOptionsFromForm()) !== JSON.stringify(task.payload)) return { canceled: true };
+  applySearchResultToPane(paneName, result, labelForPath(result.root), { flat: true });
   renderRoots();
-  renderInspector();
-  renderFlatResults(result);
   setStatus(`${result.entries.length} flat items`);
 }
 
 function openDuplicatesDialog() {
+  cancelAsyncDialogTask("duplicates-dialog");
   app.duplicateResult = null;
   document.getElementById("duplicates-root").value = tabOf(app.activePane).path;
   document.getElementById("duplicates-mode").value = "hash";
@@ -17466,6 +17555,11 @@ function renderDuplicateResults(result) {
 }
 
 function openDuplicateResultsInPane(result, paneName = app.activePane) {
+  if (tabOf(paneName).locked) {
+    const pane = panes[paneName];
+    pane.tabs.splice(pane.activeTab + 1, 0, tabShellForPath(tabOf(paneName), result.root));
+    pane.activeTab += 1;
+  }
   const tab = tabOf(paneName);
   tab.path = result.root;
   tab.entries = result.entries;
@@ -17488,12 +17582,15 @@ function openDuplicateResultsInPane(result, paneName = app.activePane) {
 async function runDuplicateScan() {
   const paneName = app.activePane;
   const options = duplicatesOptionsFromForm();
+  cancelPaneLoad(paneName);
+  const task = beginAsyncDialogTask("duplicates-dialog", options, null, paneName);
   setStatus(`Scanning duplicates in ${labelForPath(options.path)}`);
   document.getElementById("duplicates-summary").textContent = "Scanning...";
-  const result = await request("/api/duplicates", {
+  const result = await requestDialogTask(task, "/api/duplicates", {
     method: "POST",
     body: JSON.stringify(options)
   });
+  if (!result || JSON.stringify(duplicatesOptionsFromForm()) !== JSON.stringify(task.payload)) return { canceled: true };
   openDuplicateResultsInPane(result, paneName);
   renderDuplicateResults(result);
   setStatus(`${itemWord(result.groupCount, "duplicate group")}`);
@@ -17560,6 +17657,7 @@ function applySyncProfileOptionsToForm(options = {}) {
 }
 
 function invalidateCompareResult(message = "Ready") {
+  cancelAsyncDialogTask("compare-dialog");
   app.compareResult = null;
   app.compareSyncPreview = null;
   const summary = document.getElementById("compare-summary");
@@ -17769,12 +17867,15 @@ function renderCompareResults(result) {
 
 async function runCompare() {
   setStatus("Comparing panes");
-  const result = await request("/api/compare", {
+  const task = beginAsyncDialogTask("compare-dialog", compareOptionsFromForm());
+  const result = await requestDialogTask(task, "/api/compare", {
     method: "POST",
-    body: JSON.stringify(compareOptionsFromForm())
+    body: JSON.stringify(task.payload)
   });
+  if (!result || JSON.stringify(compareOptionsFromForm()) !== JSON.stringify(task.payload)) return { canceled: true };
   renderCompareResults(result);
   setStatus(`${result.entries.length} compare rows`);
+  return result;
 }
 
 function selectedCompareItems() {
@@ -17836,8 +17937,8 @@ function syncPayload(direction, options = {}) {
   return payload;
 }
 
-function renderSyncPreview(plan, payload) {
-  app.compareSyncPreview = { plan, payload };
+function renderSyncPreview(plan, payload, task) {
+  app.compareSyncPreview = { plan, payload, task };
   const applySync = document.getElementById("compare-sync-apply");
   if (applySync) {
     applySync.disabled = !plan.canApply;
@@ -17877,7 +17978,7 @@ function renderSyncPreview(plan, payload) {
 
 async function previewSyncCompare(direction) {
   if (!app.compareResult) {
-    await runCompare();
+    if ((await runCompare())?.canceled) return { canceled: true };
   }
   const payload = syncPayload(direction);
   if (!payload.items.length) {
@@ -17885,8 +17986,10 @@ async function previewSyncCompare(direction) {
   }
   document.getElementById("compare-summary").textContent = "Planning sync...";
   document.getElementById("compare-sync-apply").disabled = true;
-  const plan = await operationPreview("sync", payload);
-  renderSyncPreview(plan, payload);
+  const task = beginAsyncDialogTask("compare-dialog", payload, app.compareResult);
+  const plan = await requestDialogTask(task, "/api/operation/preview", { method: "POST", body: JSON.stringify({ ...task.payload, type: "sync" }) });
+  if (!plan || app.compareResult !== task.owner || JSON.stringify(syncPayload(direction)) !== JSON.stringify(task.payload)) return { canceled: true };
+  renderSyncPreview(plan, task.payload, task);
   showToast("Sync plan ready");
 }
 
@@ -17895,21 +17998,29 @@ async function applySyncPreview() {
   if (!preview?.plan?.canApply || !preview?.payload?.items?.length) {
     return showToast("Plan sync first");
   }
-  const result = await request("/api/sync", {
-    method: "POST",
-    body: JSON.stringify({
-      ...preview.payload,
-      expectedPlanDigest: preview.plan.planDigest,
-      applyToken: preview.plan.applyToken
-    })
-  });
-  await Promise.all([refreshPane("left"), refreshPane("right")]);
-  await syncStateAndChrome();
-  await runCompare();
-  const deleted = result.deleted?.length || 0;
-  showToast(
-    `Synced ${itemWord(result.copied?.length || 0, "item")}${deleted ? ` / mirrored ${itemWord(deleted, "extra item")}` : ""}`
-  );
+  if (preview.applying || !ownsAsyncDialogTask(preview.task) || JSON.stringify(syncPayload(preview.payload.direction)) !== JSON.stringify(preview.payload)) return { canceled: true };
+  preview.applying = true;
+  document.getElementById("compare-sync-apply").disabled = true;
+  try {
+    const result = await request("/api/sync", {
+      method: "POST",
+      body: JSON.stringify({
+        ...preview.payload,
+        expectedPlanDigest: preview.plan.planDigest,
+        applyToken: preview.plan.applyToken
+      })
+    });
+    await Promise.all([refreshPane("left"), refreshPane("right")]);
+    await pollOperationState({ silent: true });
+    if (app.compareSyncPreview === preview && ownsAsyncDialogTask(preview.task)) await runCompare();
+    const deleted = result.deleted?.length || 0;
+    showToast(
+      `Synced ${itemWord(result.copied?.length || 0, "item")}${deleted ? ` / mirrored ${itemWord(deleted, "extra item")}` : ""}`
+    );
+  } finally {
+    preview.applying = false;
+    if (app.compareSyncPreview === preview) document.getElementById("compare-sync-apply").disabled = !ownsAsyncDialogTask(preview.task) || !preview.plan.canApply;
+  }
 }
 
 async function revealSelected() {
@@ -18749,7 +18860,7 @@ async function syncStateAndChrome() {
   renderTabGroups();
   renderOperations();
   renderIntegration();
-  renderPreferencesDialog();
+  if (!document.getElementById("preferences-dialog")?.open || !preferencesHaveUnsavedChanges()) renderPreferencesDialog();
   updateClipboardReadout();
   renderPasteConflictMode();
   renderAutoRefreshToggle();
@@ -22568,10 +22679,14 @@ function renderOperations() {
   const operations = app.state?.operations || [];
   updateOperationReadout();
   if (!operations.length) {
+    list.renderedOperationMarkup = null;
     list.innerHTML = `<div class="empty-state">No operations</div>`;
     return;
   }
-  list.innerHTML = operations
+  const focused = list.contains(document.activeElement) ? document.activeElement : null;
+  const focusAttributes = focused ? [...focused.attributes].filter((attribute) => attribute.name.startsWith("data-")) : [];
+  const focusedOperation = focused?.closest("[data-operation-id]")?.dataset.operationId;
+  const markup = operations
     .map((operation) => {
       const canUndo =
         operation.status === "completed" &&
@@ -22600,7 +22715,7 @@ function renderOperations() {
       const meta = operationMeta(operation, canUndo);
       const progressMarkup = operationProgressMarkup(operation);
       const recoveryMarkup = operationRecoveryMarkup(operation);
-      return `<div class="operation-row ${escapeHtml(operation.status)}${isActive ? " active" : ""}">
+      return `<div class="operation-row ${escapeHtml(operation.status)}${isActive ? " active" : ""}" data-operation-id="${escapeHtml(operation.id)}" tabindex="-1">
         <div>
           <strong>${escapeHtml(operation.label || operation.type)}</strong>
           <small>${escapeHtml(detail || "")}</small>
@@ -22661,6 +22776,15 @@ function renderOperations() {
       </div>`;
     })
     .join("");
+  if (list.renderedOperationMarkup === markup) return;
+  list.renderedOperationMarkup = markup;
+  list.innerHTML = markup;
+  if (focusedOperation) {
+    const row = list.querySelector(`[data-operation-id="${CSS.escape(focusedOperation)}"]`);
+    const replacement = focusAttributes.length && [...(row?.querySelectorAll("button") || [])].find((button) =>
+      !button.disabled && focusAttributes.every((attribute) => button.getAttribute(attribute.name) === attribute.value));
+    (replacement || row)?.focus({ preventScroll: true });
+  }
 }
 
 async function openOpsDialog() {
@@ -25052,16 +25176,33 @@ function insertDroppedTerminalFiles(session, files) {
 
 function queueEarlyTerminalEvent(message) {
   const sessionId = String(message?.sessionId || "");
-  if (!sessionId) return;
+  if (!sessionId || app.terminals.retiredSessions.has(sessionId) ||
+      ![...app.terminals.sessions.values()].some((session) => session.starting && !session.disposed)) return;
   const queue = app.terminals.earlyEvents.get(sessionId) || [];
-  queue.push(message);
+  queue.push(message.type === "data" ? { ...message, data: String(message.data || "").slice(-262144) } : message);
   while (queue.length > 64) queue.shift();
+  let chars = queue.reduce((sum, item) => sum + (item.data?.length || 0), 0);
+  while (chars > 262144) chars -= queue.shift().data?.length || 0;
   app.terminals.earlyEvents.set(sessionId, queue);
+  while (app.terminals.earlyEvents.size > 16) app.terminals.earlyEvents.delete(app.terminals.earlyEvents.keys().next().value);
+}
+
+function retireTerminalSession(sessionId) {
+  if (!sessionId) return;
+  app.terminals.bySessionId.delete(sessionId);
+  app.terminals.earlyEvents.delete(sessionId);
+  app.terminals.retiredSessions.add(sessionId);
+  while (app.terminals.retiredSessions.size > 256) app.terminals.retiredSessions.delete(app.terminals.retiredSessions.values().next().value);
+}
+
+function pruneEarlyTerminalEvents() {
+  if (![...app.terminals.sessions.values()].some((session) => session.starting && !session.disposed)) app.terminals.earlyEvents.clear();
 }
 
 function handleTerminalEvent(message) {
   const session = app.terminals.bySessionId.get(String(message?.sessionId || ""));
   if (!session) return queueEarlyTerminalEvent(message);
+  if (session.disposed) return;
   if (message.type === "data") session.view?.write(message.data);
   if (message.type === "busy") session.busy = message.busy === true;
   if (message.type === "cwd") session.cwd = String(message.cwd || session.cwd);
@@ -25074,7 +25215,7 @@ function handleTerminalEvent(message) {
     session.exited = true;
     session.busy = false;
     session.view?.write(`\r\n\x1b[90m[Process exited with code ${Number(message.exitCode || 0)}]\x1b[0m\r\n`);
-    app.terminals.bySessionId.delete(session.sessionId);
+    retireTerminalSession(session.sessionId);
     session.sessionId = "";
   }
   const paneName = paneNameForTerminalTab(session.tabId);
@@ -25084,7 +25225,11 @@ function handleTerminalEvent(message) {
 function replayEarlyTerminalEvents(sessionId) {
   const queued = app.terminals.earlyEvents.get(sessionId) || [];
   app.terminals.earlyEvents.delete(sessionId);
-  queued.forEach(handleTerminalEvent);
+  for (const message of queued) {
+    if (!app.terminals.bySessionId.has(sessionId)) break;
+    handleTerminalEvent(message);
+  }
+  pruneEarlyTerminalEvents();
 }
 
 async function initializeTerminalBridge() {
@@ -25132,7 +25277,7 @@ async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides =
     const [loadedRenderer, metadata] = await Promise.all([loadTerminalRenderer(), createPromise]);
     if (!ownsSession()) {
       await bridge.dispose(metadata.sessionId).catch(() => false);
-      app.terminals.earlyEvents.delete(metadata.sessionId);
+      retireTerminalSession(metadata.sessionId);
       return null;
     }
     session.view = loadedRenderer.createView({
@@ -25145,7 +25290,7 @@ async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides =
     Object.assign(session, metadata, { starting: false, exited: false, error: "" });
     app.terminals.bySessionId.set(session.sessionId, session);
     replayEarlyTerminalEvents(session.sessionId);
-    if (session.requestedCwd && session.requestedCwd !== session.cwd && currentSettings().terminalFollowDirectory) {
+    if (session.sessionId && session.requestedCwd && session.requestedCwd !== session.cwd && currentSettings().terminalFollowDirectory) {
       await bridge.syncDirectory(session.sessionId, session.requestedCwd);
     }
     renderPaneTerminal(paneName);
@@ -25154,14 +25299,20 @@ async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides =
     return session;
   } catch (error) {
     const created = await createPromise?.catch(() => null);
-    if (created?.sessionId) await bridge.dispose(created.sessionId).catch(() => false);
+    if (created?.sessionId) {
+      retireTerminalSession(created.sessionId);
+      await bridge.dispose(created.sessionId).catch(() => false);
+    }
     if (!ownsSession()) return null;
+    session.sessionId = "";
     session.starting = false;
     session.exited = true;
     session.error = error.message;
     session.view?.write(`\x1b[31m${error.message}\x1b[0m\r\n`);
     renderPaneTerminal(paneName);
     throw error;
+  } finally {
+    pruneEarlyTerminalEvents();
   }
   })();
   return session.creation;
@@ -25214,24 +25365,27 @@ async function disposeTerminalForTab(tab, { confirmBusy = true } = {}) {
   if (confirmBusy && session.busy && !window.confirm("This terminal is running a command. Close it and its child processes?")) return false;
   session.disposed = true;
   app.terminals.sessions.delete(tab.id);
-  if (session.creation) {
-    const closing = session.creation.catch(() => null).finally(() => {
-      if (app.terminals.closing.get(tab.id) === closing) app.terminals.closing.delete(tab.id);
-    });
-    app.terminals.closing.set(tab.id, closing);
-  }
-  if (session.sessionId) {
-    await desktopTerminalBridge()?.dispose(session.sessionId).catch(() => false);
-    app.terminals.bySessionId.delete(session.sessionId);
-  }
+  const sessionId = session.sessionId;
+  retireTerminalSession(sessionId);
+  session.sessionId = "";
   session.view?.dispose();
   session.element?.remove();
+  pruneEarlyTerminalEvents();
+  const disposal = sessionId ? desktopTerminalBridge()?.dispose(sessionId).catch(() => false) : null;
+  const closing = Promise.allSettled([session.creation, disposal]).finally(() => {
+    if (app.terminals.closing.get(tab.id) === closing) app.terminals.closing.delete(tab.id);
+  });
+  app.terminals.closing.set(tab.id, closing);
+  // Pending creation cleans itself up; the tab can close immediately while a
+  // later opening waits for the entire prior native lifecycle to finish.
+  await disposal;
   return true;
 }
 
 async function closePaneTerminal(paneName = app.activePane, { hideDrawer = true } = {}) {
   const tab = tabOf(paneName);
   if (!(await disposeTerminalForTab(tab))) return false;
+  if (tabOf(paneName) !== tab) return true;
   if (hideDrawer) app.terminals.visible[paneName] = false;
   renderPaneTerminal(paneName);
   focusPaneList(paneName);
@@ -25241,37 +25395,46 @@ async function closePaneTerminal(paneName = app.activePane, { hideDrawer = true 
 async function restartPaneTerminal(paneName = app.activePane, overrides = {}) {
   const tab = tabOf(paneName);
   let session = activeTerminalSession(paneName);
+  if (session?.starting) return session.creation || null;
   if (!session || !session.sessionId) {
     if (session && !(await disposeTerminalForTab(tab))) return null;
     app.terminals.visible[paneName] = true;
     return createTerminalForTab(paneName, tab, overrides);
   }
   const bridge = desktopTerminalBridge();
+  const focusOwner = document.activeElement;
   const oldSessionId = session.sessionId;
   session.view.write("\r\n\x1b[90m[Restarting terminal...]\x1b[0m\r\n");
   session.starting = true;
   renderPaneTerminal(paneName);
-  try {
-    const metadata = await bridge.restart(oldSessionId, terminalCreateRequest(tab, session, overrides));
-    if (session.disposed || app.terminals.sessions.get(tab.id) !== session) {
-      await bridge.dispose(metadata.sessionId).catch(() => false);
-      app.terminals.earlyEvents.delete(metadata.sessionId);
-      return null;
+  session.creation = (async () => {
+    try {
+      const metadata = await bridge.restart(oldSessionId, terminalCreateRequest(tab, session, overrides));
+      if (session.disposed || app.terminals.sessions.get(tab.id) !== session) {
+        await bridge.dispose(metadata.sessionId).catch(() => false);
+        retireTerminalSession(metadata.sessionId);
+        return null;
+      }
+      retireTerminalSession(oldSessionId);
+      Object.assign(session, metadata, { starting: false, exited: false, error: "", busy: false });
+      app.terminals.bySessionId.set(session.sessionId, session);
+      replayEarlyTerminalEvents(session.sessionId);
+      renderPaneTerminal(paneName);
+      if (app.terminals.visible[paneName] && app.activePane === paneName && tabOf(paneName) === tab &&
+          (document.activeElement === focusOwner || session.element.contains(document.activeElement))) session.view.focus();
+      return session;
+    } catch (error) {
+      if (session.disposed || app.terminals.sessions.get(tab.id) !== session) return null;
+      session.starting = false;
+      session.error = error.message;
+      session.view.write(`\x1b[31m${error.message}\x1b[0m\r\n`);
+      renderPaneTerminal(paneName);
+      throw error;
+    } finally {
+      pruneEarlyTerminalEvents();
     }
-    app.terminals.bySessionId.delete(oldSessionId);
-    Object.assign(session, metadata, { starting: false, exited: false, error: "", busy: false });
-    app.terminals.bySessionId.set(session.sessionId, session);
-    replayEarlyTerminalEvents(session.sessionId);
-    renderPaneTerminal(paneName);
-    session.view.focus();
-    return session;
-  } catch (error) {
-    session.starting = false;
-    session.error = error.message;
-    session.view.write(`\x1b[31m${error.message}\x1b[0m\r\n`);
-    renderPaneTerminal(paneName);
-    throw error;
-  }
+  })();
+  return session.creation;
 }
 
 async function syncTerminalAfterNavigation(tab, targetPath) {
@@ -25356,6 +25519,38 @@ async function handleAction(action, paneName) {
 }
 
 function wireEvents() {
+  for (const dialog of document.querySelectorAll("dialog")) {
+    const title = dialog.querySelector(".dialog-head strong, .dialog-head h1, .dialog-head h2");
+    if (title && !dialog.hasAttribute("aria-labelledby") && !dialog.hasAttribute("aria-label")) {
+      title.id ||= `${dialog.id}-title`;
+      dialog.setAttribute("aria-labelledby", title.id);
+    }
+    for (const button of dialog.querySelectorAll("[data-close-dialog]")) {
+      if (!button.hasAttribute("aria-label")) button.setAttribute("aria-label", `Close ${title?.textContent?.trim() || "dialog"}`);
+    }
+  }
+  for (const name of ["search", "flat", "duplicates", "compare", "bulk", "transfer"]) {
+    const dialog = document.getElementById(`${name}-dialog`);
+    dialog.addEventListener("close", () => { if (!dialog.open) cancelAsyncDialogTask(dialog.id); });
+    dialog.addEventListener("cancel", () => cancelAsyncDialogTask(dialog.id));
+    const form = document.getElementById(`${name}-form`);
+    const changed = () => {
+      cancelAsyncDialogTask(dialog.id);
+      const owner = name === "bulk" ? app.bulkRename : name === "transfer" ? app.transfer : null;
+      if (owner) {
+        owner.plan = null;
+        document.getElementById(`${name}-apply`).disabled = true;
+        document.getElementById(`${name}-summary`).textContent = "Settings changed. Preview to review the changes.";
+      }
+    };
+    form.addEventListener("input", changed);
+    form.addEventListener("change", changed);
+  }
+  window.addEventListener("beforeunload", (event) => {
+    if (!textEditorIsDirty() && !(document.getElementById("preferences-dialog")?.open && preferencesHaveUnsavedChanges())) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
   document.querySelectorAll(".pane-more").forEach((details) => {
     details.addEventListener("toggle", () => positionPaneMoreMenu(details));
   });
@@ -27836,6 +28031,7 @@ function wireEvents() {
   const viewerDialog = document.getElementById("viewer-dialog");
   if (viewerDialog) {
     viewerDialog.addEventListener("close", () => {
+      if (viewerDialog.open) return;
       cancelViewerPreviewLoad();
       disposeModelViewport("viewer");
     });
@@ -28424,9 +28620,44 @@ function wireEvents() {
   });
 }
 
+let resolveDesktopRendererReady, rejectDesktopRendererReady;
+const desktopRendererReady = new Promise((resolve, reject) => {
+  resolveDesktopRendererReady = resolve;
+  rejectDesktopRendererReady = reject;
+});
+desktopRendererReady.catch(() => {});
+
+function initializeDesktopEvents() {
+  const desktop = window.exploreBetterDesktop;
+  desktop?.onShellOpen?.(async ({ targetPath, shellMode } = {}, { isCanceled = () => false } = {}) => {
+    await desktopRendererReady;
+    if (isCanceled()) return { canceled: true };
+    if (!targetPath) return;
+    const mode = normalizeShellOpenMode(shellMode || app.state?.settings?.shellOpenMode);
+    const paneName = shellOpenPaneName(mode);
+    if (mode === "activeNewTab") return openFolderInNewTab(paneName, targetPath, { focus: false });
+    app.activePane = paneName;
+    return loadPane(paneName, targetPath, true);
+  });
+  desktop?.onBackendRecovered?.(async (_status, { isCanceled = () => false } = {}) => {
+    await desktopRendererReady;
+    if (isCanceled()) return { canceled: true };
+    clearListingCache();
+    const results = await Promise.allSettled(["left", "right"].map((paneName) => {
+      const tab = tabOf(paneName);
+      if (tab.searchMode || (tab.virtualMode && tab.virtualMode !== "zip")) return;
+      return refreshPane(paneName, { silent: true, linkedFollow: true });
+    }));
+    await pollOperationState({ silent: true });
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+  });
+}
+
 async function init() {
   const startupStartedAt = performance.now();
   wireEvents();
+  initializeDesktopEvents();
   initializeMcpUiObservation();
   desktopAiBridge()?.onAction?.(async (action) => {
     try {
@@ -28541,6 +28772,7 @@ async function init() {
     readyMs: Math.round((performance.now() - startupStartedAt) * 10) / 10,
     completedAt: Date.now()
   };
+  resolveDesktopRendererReady();
   scheduleMcpContextPublish(true);
   scheduleDeviceRefresh();
   setTimeout(() => loadDevicesReport().catch((error) => console.warn(`Could not load devices: ${error.message}`)), 0);
@@ -28562,6 +28794,7 @@ async function init() {
 }
 
 init().catch((error) => {
+  rejectDesktopRendererReady(error);
   setStatus("Startup error");
   showToast(error.message);
 });

@@ -176,6 +176,8 @@ Use `Add Active` in the Speed dialog to keep the active folder as a bounded recu
 
 App-owned create, copy, move, rename, delete, and sync operations actively invalidate warmed folder listings before the next pane refresh, so fast cached navigation does not show stale rows while waiting for Windows watcher events. Warm server listing hits also validate a cheap directory stamp, so a missed watcher event cannot silently reuse stale rows. `npm run verify:operation-listing-cache` and `npm run verify:server-listing-cache` prove those paths.
 
+Content search supports UTF-8 and UTF-16 text within the configured size and file-count limits. Background search skips linked descendants and reports incomplete coverage when an indexing limit is reached. After an app update, an older background index may briefly show stale or indexing status while it rebuilds automatically.
+
 Use `Properties` > `Diagnose` when a local folder, UNC share, VPN path, or mapped drive feels slow or unavailable. Path Health classifies the target, checks reachability with bounded timeouts, samples directory reads, reports watcher and drive-space status where possible, and suggests warm indexing or refresh fallback behavior.
 
 ## File Operations
@@ -558,6 +560,8 @@ Explore Better prioritizes fast browsing:
 If a folder looks stale, press `R` or click Refresh.
 
 ## Recovery And Safety
+
+Opening another folder from Windows or recovering the local backend keeps the current window, editor draft, and terminals alive. Closing the window with unsaved editor or Preferences changes offers `Keep editing` and `Discard changes`. Installing an update follows the same choice and waits for cleanup before starting the installer.
 
 `Trash Bin` has two modes. App Trash keeps app-managed trash under `%LOCALAPPDATA%\ExploreBetter\Trash`, restores selected items into the active pane, and supports permanent deletion after confirmation. Windows Recycle lists current-user Recycle Bin items in-app and can restore selected items through Windows back to their original locations with an `Ops` history row. Permanent Delete cannot be restored by Explore Better.
 

@@ -30,6 +30,35 @@ For the running Electron build, `npm run inspect:mcp-live` performs a real nativ
 
 ## Latest Regression Evidence
 
+### Iterative review follow-up — 2026-09-09
+
+The follow-up reviewed the desktop process and preload, renderer actions and asynchronous state, filesystem operations and persisted indexes, native helpers, MCP services and sidecar, landing page, dependencies, packaging, and CI. Separate reviewers then checked one another's changes. Each additional confirmed issue received a fix and a regression before the final integration pass. The stopping criterion is no further actionable findings in that pass; these checks do not establish that every possible defect has been eliminated.
+
+| Area | Fixed behavior | Evidence |
+| --- | --- | --- |
+| Desktop activation and recovery | Open external folders and recover the backend in the existing document, preserving drafts, modal focus, and native terminals | `verify:desktop-session` |
+| Closing and updates | Ask before discarding unsaved edits; wait for approved closure and native cleanup before installing; cancellation keeps the session usable | `verify:desktop-lifecycle`, `verify:desktop-session` |
+| Desktop event and service lifetime | Bound and acknowledge queued events, cancel expired startup actions, share concurrent initialization, drain startup before quit, and bound incomplete or trickling health responses | `verify:desktop-lifecycle` |
+| Terminal interaction | Bound early events, close exited message ports, avoid repeated paste on keyup, and serialize restart/disposal so reopening cannot collide with a pending terminal | `verify:renderer-async`, `verify:desktop-lifecycle`, `verify:terminal-native-lifecycle` |
+| Asynchronous renderer work | Keep stale searches, flat listings, comparisons, duplicates, previews and tab loads from replacing newer state; bind Apply to the submitted dialog and payload | `verify:renderer-async`, `verify:renderer-state` |
+| Keyboard and model UX | Preserve operation-control focus, label dialogs for assistive technology, and compute indexed STEP normals after installing the index | `verify:renderer-async`, `verify:interaction-quality`, `verify:model-preview-ui` |
+| Filesystem integrity | Recheck the entire snapshot after traversal, and make legacy text Undo preserve later files while refusing directory replacement | `verify:backend-round-two`, `verify:backend-integrity` |
+| Search completeness | Decode bounded UTF-16 content, honor substring matches at token edges, retain fallback candidates for truncated vocabularies, and handle prototype-like names | `verify:backend-round-two`, `verify:folder-index-token-search`, `verify:background-index-token-search` |
+| Background index safety and freshness | Exclude followed links, mark exhausted content budgets incomplete, rebuild old stores, and count hidden entries correctly for freshness | `verify:backend-round-two`, background-index corruption/freshness/watch suites |
+| Native filesystem helper | Preserve FILETIME dates outside the nanosecond range, cancel work on stdin close, and wait for all active or retiring helper processes before shutdown succeeds | `go test ./...` in `native/fshelper`, `verify:desktop-lifecycle` |
+| MCP persisted state and policy | Retain analysis policy bindings, propagate inspection cancellation, reauthorize after UI waits, and resolve retargeted allowed roots per request | `verify:mcp-lifecycle`, `verify:mcp-policy-regression` |
+| MCP transport and configuration | Clean up failed startup and staged files, bound individual frames and subscriptions, order acknowledged subscription changes with reconnect replay, and preserve profiles on configuration I/O failure | `verify:mcp-lifecycle`, `verify:mcp-reliability`, native protocol tests |
+| Landing-page feedback | Report failed clipboard fallback truthfully and restore keyboard focus | `verify:landing-page` (mocked clipboard) |
+| Dependency maintenance | Pin the compatible YAML parser to 4.3.2 for the newly published [GHSA-2883-xcg3-v3hh advisory](https://github.com/advisories/GHSA-2883-xcg3-v3hh) | `npm audit`, release-feed and packaging checks |
+
+Original-source controls reproduced the desktop lifecycle, renderer ordering, legacy Undo, hidden-index freshness, configuration, subscription, updater, clipboard, and terminal restart failures before their fixes. The native EOF regression also failed before cancellation was added. The updater tests exercise the installed updater's lifecycle with installer launch mocked; the real Electron session test exercises native Command Prompt input/output and a canceled close without touching user data.
+
+An independent differential search check tested 2,989 substring queries over 2,652 entries, including saturated postings and incomplete vocabularies: all 736,804 matching candidates were retained. The 100,000-entry browser check passed three desktop runs with median first paint of 136.7 ms, full hydration of 700.1 ms, 47 mounted file rows, and a 116.1 ms compact warm listing response. The final MCP binary measured 1.7 ms warm p95 with 15.6 MB sidecar RSS. These are local fixture measurements, not universal performance guarantees.
+
+The final source review found no further actionable issues. Focused regressions pass: 34 desktop lifecycle checks, 8 real Electron session checks, 15 backend follow-up and 20 integrity checks, 17 renderer async and 25 state checks, and 15 MCP lifecycle checks. Existing interaction (34), model preview (15), landing page (50), SEO (265), native terminal lifecycle (24 actual exits), native filesystem/protocol tests, real MCP context/operation waits, and 19 release metadata fixtures also pass. The dependency audit reports zero known vulnerabilities at verification time.
+
+Version 1 background search stores are withheld until rebuilt under the current link and encoding rules; the UI can temporarily report stale or indexing status. Existing folder token indexes remain readable through conservative full-scan fallback. Native UAC and actual installer execution remain outside the automated tests. Dedicated new suites are registered in Windows CI and `verify:all`.
+
 ### Codebase review fixes — 2026-09-09
 
 The twenty actionable findings from the September codebase review now have dedicated regression coverage. The implementation also addresses dirty-dialog protection, implicit MCP targets, raw-content response isolation, recursive link containment, restartable bulk rename, virtual-list accessibility, model preparation, terminal lifetime, client configuration preservation, bounded analysis storage, and immutable MCP publication.
