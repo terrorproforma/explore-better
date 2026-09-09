@@ -173,6 +173,7 @@
     "verify:mcp-client-roots": "node scripts/mcp-client-roots-smoke.mjs",
     "verify:backend-integrity": "node scripts/backend-integrity-smoke.mjs",
     "verify:backend-round-two": "node scripts/backend-round-two-smoke.mjs",
+    "verify:backend-operation-wait": "node scripts/backend-operation-wait-smoke.mjs",
     "verify:renderer-state": "node scripts/renderer-state-regression-smoke.mjs",
     "verify:renderer-async": "node scripts/renderer-async-regression-smoke.mjs",
     "verify:clipboard-sequence": "node scripts/clipboard-sequence-smoke.mjs",

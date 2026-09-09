@@ -27,7 +27,7 @@ async function main() {
   await fs.mkdir(outputDir, { recursive: true });
   await run("go", ["build", "-buildvcs=false", "-trimpath", "-ldflags", "-s -w", "-o", outputPath, "."], {
     cwd: sourceDir,
-    env: { ...process.env, CGO_ENABLED: "0", GOOS: process.platform === "win32" ? "windows" : process.platform, GOARCH: "amd64" }
+    env: { ...process.env, CGO_ENABLED: "0", GOTOOLCHAIN: "go1.25.12", GOOS: process.platform === "win32" ? "windows" : process.platform, GOARCH: "amd64" }
   });
   const bytes = await fs.readFile(outputPath);
   const report = {
@@ -35,6 +35,7 @@ async function main() {
     path: outputPath,
     bytes: bytes.length,
     sha256: createHash("sha256").update(bytes).digest("hex"),
+    goToolchain: "go1.25.12",
     protocolVersion: 1
   };
   await fs.mkdir(path.join(root, "artifacts"), { recursive: true });

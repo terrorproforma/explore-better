@@ -62,6 +62,7 @@ const coreSuites = [
   ["terminal-native-lifecycle", "scripts/terminal-native-lifecycle-smoke.mjs", 120000],
   ["backend-integrity", "scripts/backend-integrity-smoke.mjs", 120000],
   ["backend-round-two", "scripts/backend-round-two-smoke.mjs", 120000],
+  ["backend-operation-wait", "scripts/backend-operation-wait-smoke.mjs", 60000],
   ["renderer-state", "scripts/renderer-state-regression-smoke.mjs", 120000],
   ["renderer-async", "scripts/renderer-async-regression-smoke.mjs", 120000],
   ["clipboard-sequence", "scripts/clipboard-sequence-smoke.mjs", 60000],

@@ -1184,15 +1184,20 @@ export async function createMcpAutomationService(deps) {
                 else request.signal?.addEventListener?.("abort", onAbort, { once: true });
               });
       const [data, waitedOperation] = await Promise.all([uiWait, operationWait]);
-      if (waitedOperation) operation = waitedOperation;
-      const latest = await uiDispatcher({ type: "wait", afterRevision: 0, timeoutMs: 100, condition: {}, signal: request.signal });
+      const operationMatched = !operationId || Boolean(waitedOperation && (!operationStatus || waitedOperation.status === operationStatus));
+      const [latest, currentOperation] = await Promise.all([
+        uiDispatcher({ type: "wait", afterRevision: 0, timeoutMs: 100, condition: {}, signal: request.signal }),
+        operationId ? deps.getOperation(operationId) : null
+      ]);
+      // Report current progress even after a timeout, while preserving whether
+      // the wait itself observed the requested condition.
+      operation = currentOperation;
       const fresh = await currentPrincipal(principal);
       if (operation) {
         try { await authorizeOperation(fresh, operation); }
         catch { operation = null; }
       }
-      const operationMatched = !operationId || Boolean(operation && (!operationStatus || operation.status === operationStatus));
-      const matched = data?.matched === true && operationMatched;
+      const matched = data?.matched === true && operationMatched && (!operationId || Boolean(operation));
       const authorized = await contextForPrincipal(fresh, latest.context || data.context || principal.context);
       return resultEnvelope({
         matched,

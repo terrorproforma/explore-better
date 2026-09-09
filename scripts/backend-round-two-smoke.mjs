@@ -37,16 +37,38 @@ await test("Snapshot rejects a file changed after its own hash during sibling tr
   assert.equal(await fs.readFile(first, "utf8"), "new bytes that must survive");
 });
 
-await test("Snapshot rejects directory entries added after enumeration", async () => {
+await test("Snapshot rejects directory entries added after enumeration with unchanged metadata", async () => {
   const tree = path.join(files, "snapshot-added"); await fs.mkdir(tree);
   const first = path.join(tree, "a.txt"); await fs.writeFile(first, "original");
+  const directoryBefore = await fs.lstat(tree);
   const original = fs.lstat; let changed = false;
   fs.lstat = async (...args) => {
     if (!changed && args[0] === first) { changed = true; await fs.writeFile(path.join(tree, "late.txt"), "new file"); }
+    // Directory metadata can remain unchanged within a Windows timestamp tick.
+    if (args[0] === tree) return directoryBefore;
     return original(...args);
   };
   try { await assert.rejects(pathSnapshot(tree), /changed while verifying transaction/); }
   finally { fs.lstat = original; }
+  assert.deepEqual((await fs.readdir(tree)).sort(), ["a.txt", "late.txt"]);
+});
+
+await test("Snapshot detects renamed directory members before checking stale child paths", async () => {
+  const tree = path.join(files, "snapshot-renamed"); await fs.mkdir(tree);
+  const first = path.join(tree, "a.txt"), last = path.join(tree, "z.txt"), renamed = path.join(tree, "renamed.txt");
+  await fs.writeFile(first, "preserved bytes"); await fs.writeFile(last, "last file");
+  const directoryBefore = await fs.lstat(tree);
+  const original = fs.lstat; let changed = false;
+  fs.lstat = async (...args) => {
+    if (!changed && args[0] === last) { changed = true; await fs.rename(first, renamed); }
+    if (args[0] === tree) return directoryBefore;
+    return original(...args);
+  };
+  try {
+    await assert.rejects(pathSnapshot(tree), error => error.message === `File changed while verifying transaction: ${tree}`);
+  } finally { fs.lstat = original; }
+  assert.deepEqual((await fs.readdir(tree)).sort(), ["renamed.txt", "z.txt"]);
+  assert.equal(await fs.readFile(renamed, "utf8"), "preserved bytes");
 });
 
 await test("Content reads enforce physical byte limits for encoded text", async () => {

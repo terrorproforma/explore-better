@@ -46,7 +46,25 @@ try {
     condition: { operationId, operationStatus: "completed" }
   });
   const elapsedMs = performance.now() - waitStartedAt;
-  assert(toolData(completed)?.matched === true && toolData(completed)?.operation?.status === "completed", `Operation wait did not match completion: ${serialized(completed)}`);
+  const completionMatched = toolData(completed)?.matched === true && toolData(completed)?.operation?.status === "completed";
+  if (!completionMatched) {
+    let latest;
+    try { latest = await callTool("get_operation", { operationId }); }
+    catch (error) { latest = { diagnosticError: error.message }; }
+    const logs = harness.logs();
+    const latestOperation = toolData(latest)?.operation;
+    console.error(`MCP operation wait diagnostics: ${JSON.stringify({
+      operationId,
+      elapsedMs: Math.round(elapsedMs),
+      latestStatus: latestOperation?.status || null,
+      latestStartedAt: latestOperation?.startedAt || null,
+      latestFinishedAt: latestOperation?.finishedAt || null,
+      latest: serialized(latest).slice(-20_000),
+      electronLog: logs.electronLog.slice(-20_000),
+      sidecarError: logs.sidecarError.slice(-20_000)
+    })}`);
+  }
+  assert(completionMatched, `Operation wait did not match completion: ${serialized(completed)}`);
   const notification = await waitFor(
     () => harness.notifications.find((item) => item.method === "notifications/resources/updated" && item.params?.uri === uri),
     5_000,
