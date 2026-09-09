@@ -10,6 +10,12 @@ export function sameFileIdentity(left, right) {
   return Boolean(left && right && String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino));
 }
 
+function directoryMembershipDigest(names) {
+  const hash = crypto.createHash("sha256");
+  for (const name of names.sort()) hash.update(JSON.stringify(name) + "\n");
+  return hash.digest("hex");
+}
+
 export async function pathSnapshot(target, { signal } = {}) {
   const content = crypto.createHash("sha256");
   const state = crypto.createHash("sha256");
@@ -36,24 +42,30 @@ export async function pathSnapshot(target, { signal } = {}) {
     } else {
       throw new Error(`Unsupported file type in transaction: ${itemPath}`);
     }
-    observations.push({ itemPath, identity, mode: before.mode, size: before.size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs });
+    const observation = { itemPath, identity, mode: before.mode, size: before.size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs };
+    observations.push(observation);
     entries += 1;
     content.update(JSON.stringify([relative, kind, value]) + "\n");
     state.update(JSON.stringify([relative, kind, identity, before.mode, before.size, before.mtimeMs, value]) + "\n");
     if (kind === "directory") {
       const names = await fs.readdir(itemPath);
-      names.sort();
+      observation.directoryDigest = directoryMembershipDigest(names);
       for (const name of names) await visit(path.join(itemPath, name), relative ? `${relative}/${name}` : name);
     }
   }
   await visit(path.resolve(target), "");
   // Recheck after the entire traversal: an earlier file can change while a
   // sibling is hashed, and a directory can gain children after readdir.
+  // Compare membership too: Windows may not advance directory timestamps for
+  // same-tick changes. Keep this transient digest out of persisted v1 snapshots.
   for (const before of observations) {
     throwIfAborted(signal);
     const after = await fs.lstat(before.itemPath);
     if (!sameFileIdentity(before.identity, after) || before.size !== after.size || before.mtimeMs !== after.mtimeMs ||
         before.ctimeMs !== after.ctimeMs || before.mode !== after.mode) {
+      throw new Error(`File changed while verifying transaction: ${before.itemPath}`);
+    }
+    if (before.directoryDigest && before.directoryDigest !== directoryMembershipDigest(await fs.readdir(before.itemPath))) {
       throw new Error(`File changed while verifying transaction: ${before.itemPath}`);
     }
   }

@@ -2899,8 +2899,6 @@ async function saveOperation(operation) {
 }
 
 async function waitForOperationCondition(operationId, status = "", timeoutMs = 10_000, signal = null) {
-  const current = (await readState()).operations.find((operation) => operation.id === operationId) || null;
-  if (current && (!status || current.status === status)) return current;
   return new Promise((resolve, reject) => {
     let settled = false;
     let timeout = null;
@@ -2928,6 +2926,12 @@ async function waitForOperationCondition(operationId, status = "", timeoutMs = 1
     operationChangeWaiters.add(waiter);
     if (signal?.aborted) onAbort();
     else signal?.addEventListener?.("abort", onAbort, { once: true });
+    // Subscribe before reading: a transaction may finish while the async state
+    // read is in flight, leaving its earlier snapshot behind the notification.
+    if (!settled) readState().then((state) => {
+      const current = state.operations.find((operation) => operation.id === operationId) || null;
+      if (current && (!status || current.status === status)) waiter.finish(current);
+    }, (error) => waiter.finish(null, error));
   });
 }
 

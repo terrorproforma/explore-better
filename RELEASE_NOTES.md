@@ -4,7 +4,7 @@
 
 ### File Safety And Recovery
 
-- Revalidate snapshot entries after the complete traversal, and make Undo from older text saves retain later edits while refusing to replace directories.
+- Revalidate snapshot entries and directory membership after the complete traversal, including changes with unchanged timestamps. Undo from older text saves retains later edits while refusing to replace directories.
 - Preserve UTF-16 content in direct and indexed search, return complete substring matches, skip linked descendants, and rebuild outdated background indexes automatically.
 - Avoid repeated background rebuilds when hidden files are excluded, and report exhausted content budgets accurately.
 - Save text through a staged replacement while preserving UTF-8, UTF-16LE, UTF-16BE and their byte-order marks. Undo restores the original bytes; unsupported encodings are rejected before writing.
@@ -30,6 +30,7 @@
 ### AI Bridge Reliability
 
 - Preserve retained analysis policy bindings, cancel recursive inspection promptly, and recheck permissions after UI waits and allowed-root changes.
+- Observe operation completion even when it happens during the initial status read, and show current authorized progress when a wait times out.
 - Bound resource subscriptions and individual transport frames, serialize subscription state, and clean up interrupted bridge startup and staged files.
 - Preserve existing profiles when configuration reads fail, and require successful backup before replacing malformed configuration.
 - Recheck current permissions when applying previews, controlling operations, reading retained results, and dispatching actions against implicit UI targets. Permission changes invalidate old previews; collection mutations check existing contents too.
@@ -49,6 +50,7 @@
 
 - Cancel native filesystem work when its parent closes the transport, and preserve Windows timestamps outside the nanosecond conversion range.
 - Update the compatible YAML parser pin to 4.3.2 and correct landing-page clipboard failure feedback and focus restoration.
+- Make native binaries reproducible across Windows checkouts, preserve prior binaries on failed build publication, and update Pages deployment actions to Node 24.
 - Updated vulnerable dependency patches, including the pinned YAML parser, and excluded local editor state and backup files from version control.
 - Preserves path edits during pane refreshes and keeps drive buttons at a readable minimum width.
 

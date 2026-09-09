@@ -41,6 +41,7 @@ jobs:
       - run: npm run verify:desktop-session
       - run: npm run verify:backend-integrity
       - run: npm run verify:backend-round-two
+      - run: npm run verify:backend-operation-wait
       - run: npm run verify:mcp-reliability
       - run: npm run verify:mcp-lifecycle
       - run: npm run verify:mcp-policy-regression

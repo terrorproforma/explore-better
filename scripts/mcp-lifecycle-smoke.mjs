@@ -220,6 +220,62 @@ test("UI waits enforce profile revocation before returning their final context",
   }), { code: "UNKNOWN_PROFILE" });
 });
 
+async function timedOutOperationFixture(t, { status = "running", onRefresh } = {}) {
+  const f = await fixture(t);
+  let operation, profile, reads = 0;
+  const service = await f.service({
+    startOperation: async (type, _body, principal) => {
+      operation = { id: "fixture-operation", type, label: "Fixture text write", status: "queued",
+        createdAt: "2026-09-09T01:00:00.000Z", startedAt: null, progress: null,
+        mcpProfileId: principal.profileId, mcpSessionId: principal.sessionId, mcpPolicy: principal.operationPolicy };
+      return structuredClone(operation);
+    },
+    getOperation: async () => {
+      if (++reads > 1) await onRefresh?.(service, profile);
+      return structuredClone(operation);
+    },
+    waitForOperation: async () => {
+      operation = { ...operation, status, startedAt: "2026-09-09T01:00:01.000Z", updatedAt: "2026-09-09T01:00:02.000Z",
+        progress: { phase: "Writing", completed: 4, total: 10 } };
+      return null;
+    }
+  });
+  await service.configure({ enabled: true });
+  profile = await service.upsertProfile({ name: "Operation wait fixture", access: "read-write", roots: [f.folder] });
+  service.setUiDispatcher(async () => ({ matched: true, context: { live: true, contextRevision: 2 } }));
+  const request = (tool, args) => service.invoke({ profileId: profile.id, sessionId: "fixture", tool, args });
+  const plan = await request("plan_text_write", { path: f.sample, content: "Fixture planned text" });
+  const applied = await request("apply_operation", { applyToken: plan.data.applyToken });
+  return { wait: () => request("wait_for_ui", { timeoutMs: 100, condition: { operationId: applied.data.operationId, operationStatus: "completed" } }) };
+}
+
+test("timed-out operation waits return current progress instead of their initial queued snapshot", async (t) => {
+  const h = await timedOutOperationFixture(t);
+  const result = await h.wait();
+  assert.equal(result.data.matched, false);
+  assert.equal(result.data.reason, "timeout");
+  assert.equal(result.data.operation.status, "running");
+  assert.equal(result.data.operation.startedAt, "2026-09-09T01:00:01.000Z");
+  assert.deepEqual(result.data.operation.progress, { phase: "Writing", completed: 4, total: 10 });
+});
+
+test("completion seen only in the final refresh does not rewrite a timed-out wait outcome", async (t) => {
+  const h = await timedOutOperationFixture(t, { status: "completed" });
+  const result = await h.wait();
+  assert.equal(result.data.operation.status, "completed");
+  assert.equal(result.data.matched, false);
+  assert.equal(result.data.reason, "timeout");
+});
+
+test("refreshed operation feedback is reauthorized after a permission change during the refresh", async (t) => {
+  const h = await timedOutOperationFixture(t, { onRefresh: async (service, profile) => {
+    await service.upsertProfile({ ...profile, tools: profile.tools.filter(name => name !== "plan_text_write") });
+  } });
+  const result = await h.wait();
+  assert.equal(result.data.matched, false);
+  assert.equal(Object.hasOwn(result.data, "operation"), false);
+});
+
 test("configured junction roots follow their current target on the next request", async (t) => {
   const f = await fixture(t);
   const first = path.join(f.folder, "first");

@@ -30,32 +30,33 @@ const result = spawnSync(
 );
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
-if (result.status !== 0) {
-  await fs.rm(candidateOutput, { force: true }).catch(() => {});
-  process.exit(result.status || 1);
-}
-
-const executable = await fs.readFile(candidateOutput);
-let reused = false;
 try {
-  const existing = await fs.readFile(output);
-  reused = existing.equals(executable);
-} catch (error) {
-  if (error?.code !== "ENOENT") throw error;
-}
-if (reused) {
+  if (result.status !== 0) {
+    if (result.error) console.error(result.error.message);
+    process.exitCode = result.status || 1;
+  } else {
+    const executable = await fs.readFile(candidateOutput);
+    let reused = false;
+    try {
+      const existing = await fs.readFile(output);
+      reused = existing.equals(executable);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    // Replace atomically: if Windows has the running output locked, its
+    // previous executable remains available and the candidate is removed.
+    if (!reused) await fs.rename(candidateOutput, output);
+    console.log(
+      JSON.stringify({
+        output,
+        bytes: executable.length,
+        sha256: crypto.createHash("sha256").update(executable).digest("hex"),
+        contractSha256: crypto.createHash("sha256").update(contract).digest("hex"),
+        goToolchain: "go1.25.12",
+        reused
+      })
+    );
+  }
+} finally {
   await fs.rm(candidateOutput, { force: true });
-} else {
-  await fs.rm(output, { force: true });
-  await fs.rename(candidateOutput, output);
 }
-console.log(
-  JSON.stringify({
-    output,
-    bytes: executable.length,
-    sha256: crypto.createHash("sha256").update(executable).digest("hex"),
-    contractSha256: crypto.createHash("sha256").update(contract).digest("hex"),
-    goToolchain: "go1.25.12",
-    reused
-  })
-);
