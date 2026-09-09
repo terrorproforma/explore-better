@@ -4,6 +4,9 @@
 
 ### File Safety And Recovery
 
+- Revalidate snapshot entries after the complete traversal, and make Undo from older text saves retain later edits while refusing to replace directories.
+- Preserve UTF-16 content in direct and indexed search, return complete substring matches, skip linked descendants, and rebuild outdated background indexes automatically.
+- Avoid repeated background rebuilds when hidden files are excluded, and report exhausted content budgets accurately.
 - Save text through a staged replacement while preserving UTF-8, UTF-16LE, UTF-16BE and their byte-order marks. Undo restores the original bytes; unsupported encodings are rejected before writing.
 - Build ZIP archives before replacing their destination, reject source/destination overlap, and retain recoverable backups in App Trash.
 - Verify persisted source and destination snapshots before finishing an interrupted cross-volume move. Changed files remain intact and produce a recovery conflict.
@@ -11,6 +14,11 @@
 
 ### Interaction Reliability
 
+- Keep drafts, focus, and terminals alive when Windows opens another folder or the backend recovers. Confirm unsaved changes on window close and finish cleanup before installing an update.
+- Bound health checks even when the backend disconnects mid-response, and finish pending startup and native process shutdown before quitting.
+- Prevent delayed searches, listings, comparisons, previews, and dialog Apply actions from overwriting newer work.
+- Serialize terminal restart and close, avoid duplicate keyboard paste, bound early terminal events, and release exited ports.
+- Preserve operation-control focus, label dialogs for screen readers, and correct STEP mesh normals.
 - Preserve newer drafts when a save finishes, protect dirty dialogs through every close route, and keep focus stable during delayed row and terminal updates.
 - Prefer the current Windows clipboard when pasting and clear completed cuts only while the app still owns that clipboard version.
 - Bound filter-history memory and retain accessible position and focus information for virtualized file lists.
@@ -21,6 +29,9 @@
 
 ### AI Bridge Reliability
 
+- Preserve retained analysis policy bindings, cancel recursive inspection promptly, and recheck permissions after UI waits and allowed-root changes.
+- Bound resource subscriptions and individual transport frames, serialize subscription state, and clean up interrupted bridge startup and staged files.
+- Preserve existing profiles when configuration reads fail, and require successful backup before replacing malformed configuration.
 - Recheck current permissions when applying previews, controlling operations, reading retained results, and dispatching actions against implicit UI targets. Permission changes invalidate old previews; collection mutations check existing contents too.
 - Keep explicit empty client roots restrictive and fail requests when supported root discovery fails. Serialize configuration updates so concurrent changes preserve revocations.
 - Preserve Unicode across pipe chunks, validate protocol frames, propagate cancellation, and count analysis workers until they actually stop.
@@ -36,6 +47,8 @@
 
 ### Maintenance
 
+- Cancel native filesystem work when its parent closes the transport, and preserve Windows timestamps outside the nanosecond conversion range.
+- Update the compatible YAML parser pin to 4.3.2 and correct landing-page clipboard failure feedback and focus restoration.
 - Updated vulnerable dependency patches, including the pinned YAML parser, and excluded local editor state and backup files from version control.
 - Preserves path edits during pane refreshes and keeps drive buttons at a readable minimum width.
 

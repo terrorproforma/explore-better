@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, MessageChannelMain, nativeImage, Notification, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, MessageChannelMain, nativeImage, Notification, shell, Tray } from "electron";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -12,6 +12,7 @@ import {
 } from "./terminal-service.mjs";
 import { createMcpBridgeService } from "./mcp-bridge-service.mjs";
 import { createMcpClientConfigurator } from "./mcp-client-config.mjs";
+import { createDesktopEventDispatcher } from "./lib/desktop-events.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const terminalBrokerManifest = terminalBrokerManifestFromArgv();
@@ -65,9 +66,15 @@ let embeddedServer = null;
 let embeddedServerModule = null;
 let autoUpdater = null;
 let autoUpdatesConfigured = false;
+let autoUpdateConfigurationPromise = null;
+let desktopPortPromise = null;
+let desktopServerStartPromise = null;
+let mcpBridgeStartPromise = null;
+let desktopClosing = false;
 let autoUpdateChecking = false;
 let autoUpdateDownloading = false;
 let autoUpdateDownloaded = false;
+let autoUpdateInstallRequested = false;
 let autoUpdateVersion = "";
 const autoUpdateNotifiedVersions = new Set();
 let autoUpdateLastEvent = {
@@ -183,8 +190,15 @@ const mcpClientConfigurator = terminalBrokerMode
       appPath: app.getAppPath(),
       resourcesPath: process.resourcesPath
     });
+const desktopEvents = createDesktopEventDispatcher({ getWindow: () => mainWindow });
 
 async function ensureDesktopPort() {
+  if (desktopPortPromise) return desktopPortPromise;
+  desktopPortPromise = allocateDesktopPort().finally(() => { desktopPortPromise = null; });
+  return desktopPortPromise;
+}
+
+async function allocateDesktopPort() {
   if (port > 0 && baseUrl) return port;
   port = await new Promise((resolve, reject) => {
     const probe = http.createServer();
@@ -388,6 +402,12 @@ function rememberBackendEvent(type, message = "", data = {}) {
 }
 
 async function configureAutoUpdates() {
+  if (autoUpdateConfigurationPromise) return autoUpdateConfigurationPromise;
+  autoUpdateConfigurationPromise = configureAutoUpdatesOnce().finally(() => { autoUpdateConfigurationPromise = null; });
+  return autoUpdateConfigurationPromise;
+}
+
+async function configureAutoUpdatesOnce() {
   if (autoUpdatesConfigured || noUpdatesMode || !updateFeedUrl) {
     return updateStatus();
   }
@@ -484,31 +504,43 @@ function startNativeFileDrag(sender, paths) {
 
 function serverIsReady(timeoutMs = backendHealthTimeoutMs) {
   return new Promise((resolve) => {
-    const request = http.get(`${baseUrl}/api/desktop/health`, {
-      headers: { "x-explore-better-capability": backendApiCapability }
-    }, (response) => {
-      let body = "";
-      response.on("data", (chunk) => {
-        body = `${body}${chunk.toString()}`.slice(0, 8192);
+    let request;
+    let settled = false;
+    const finish = (ready) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (!ready) request?.destroy();
+      resolve(ready);
+    };
+    // Socket inactivity timeouts reset on each chunk. Bound the whole probe so
+    // a dying or slowly responding backend cannot hold startup/shutdown open.
+    const timeout = setTimeout(() => finish(false), timeoutMs);
+    try {
+      request = http.get(`${baseUrl}/api/desktop/health`, {
+        headers: { "x-explore-better-capability": backendApiCapability }
+      }, (response) => {
+        let body = "";
+        response.on("data", (chunk) => {
+          body = `${body}${chunk.toString()}`.slice(0, 8192);
+        });
+        response.on("error", () => finish(false));
+        response.on("aborted", () => finish(false));
+        response.on("close", () => finish(false));
+        response.on("end", () => {
+          if (response.statusCode !== 200) return finish(false);
+          try {
+            const status = JSON.parse(body);
+            finish(status?.ok === true && status?.desktopInstanceToken === desktopInstanceToken);
+          } catch {
+            finish(false);
+          }
+        });
       });
-      response.on("end", () => {
-        if (response.statusCode !== 200) {
-          resolve(false);
-          return;
-        }
-        try {
-          const status = JSON.parse(body);
-          resolve(status?.ok === true && status?.desktopInstanceToken === desktopInstanceToken);
-        } catch {
-          resolve(false);
-        }
-      });
-    });
-    request.on("error", () => resolve(false));
-    request.setTimeout(timeoutMs, () => {
-      request.destroy();
-      resolve(false);
-    });
+      request.on("error", () => finish(false));
+    } catch {
+      finish(false);
+    }
   });
 }
 
@@ -833,8 +865,16 @@ async function ensureMcpBackendModule() {
 }
 
 async function ensureMcpBridge() {
+  if (desktopClosing) throw new Error("Explore Better is closing.");
+  if (mcpBridgeStartPromise) return mcpBridgeStartPromise;
+  mcpBridgeStartPromise = startMcpBridge().finally(() => { mcpBridgeStartPromise = null; });
+  return mcpBridgeStartPromise;
+}
+
+async function startMcpBridge() {
   if (mcpBridgeService?.status().running) return mcpBridgeService.status();
   const backend = await ensureMcpBackendModule();
+  if (desktopClosing) throw new Error("Explore Better is closing.");
   mcpBridgeService = createMcpBridgeService({
     backend,
     appVersion: app.getVersion(),
@@ -846,6 +886,10 @@ async function ensureMcpBridge() {
   });
   backend.setMcpResourceUpdatePublisher?.((uri, revision) => mcpBridgeService?.publishResourceUpdate?.(uri, revision));
   const bridgeStatus = await mcpBridgeService.start();
+  if (desktopClosing) {
+    await mcpBridgeService.stop();
+    throw new Error("Explore Better is closing.");
+  }
   ensureMcpTray();
   scheduleMcpHeadlessExit(bridgeStatus.clients);
   return bridgeStatus;
@@ -856,6 +900,10 @@ ipcMain.on("explore-better:mcp-context", (event, context) => {
   mcpRendererContext = normalizeMcpRendererContext(context);
   settleMcpUiWaiters();
   mcpBridgeService?.publishResourceUpdate?.("explore-better://context/current", mcpRendererContext.contextRevision);
+});
+
+ipcMain.on("explore-better:desktop-event-result", (event, response) => {
+  if (rendererIsTrusted(event)) desktopEvents.settle(event, response);
 });
 
 ipcMain.on("explore-better:mcp-ui-action-result", (event, response) => {
@@ -974,9 +1022,12 @@ ipcMain.handle("explore-better:download-update", async (event) => {
 ipcMain.handle("explore-better:install-update", async (event) => {
   if (!rendererIsTrusted(event)) throw new Error("Untrusted update install request.");
   await configureAutoUpdates();
-  const accepted = Boolean(autoUpdater && autoUpdateDownloaded);
-  if (accepted) {
-    setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  const accepted = Boolean(autoUpdater && autoUpdateDownloaded && !desktopClosing);
+  if (accepted && !autoUpdateInstallRequested) {
+    autoUpdateInstallRequested = true;
+    // quitAndInstall starts the installer immediately. Close normally first so
+    // beforeunload can preserve drafts and will-quit can finish native cleanup.
+    setImmediate(() => app.quit());
   }
   return { ...updateStatus(), accepted };
 });
@@ -1027,6 +1078,7 @@ ipcMain.handle("explore-better:terminal-dispose", (event, sessionId) => {
 
 async function waitForServer() {
   for (let index = 0; index < 30; index += 1) {
+    if (desktopClosing) return false;
     if (await serverIsReady()) {
       return true;
     }
@@ -1036,10 +1088,21 @@ async function waitForServer() {
 }
 
 async function ensureServer() {
+  if (desktopClosing) throw new Error("Explore Better is closing.");
+  if (!desktopServerStartPromise) {
+    desktopServerStartPromise = startDesktopServer().finally(() => { desktopServerStartPromise = null; });
+  }
+  await desktopServerStartPromise;
+  if (desktopClosing) throw new Error("Explore Better is closing.");
+}
+
+async function startDesktopServer() {
   await ensureDesktopPort();
+  if (desktopClosing) throw new Error("Explore Better is closing.");
   if (process.platform === "win32" && !process.defaultApp) {
     try {
       const integrationModule = embeddedServerModule || (await import("./server.mjs"));
+      if (desktopClosing) throw new Error("Explore Better is closing.");
       integrationModule.setDesktopExecutablePath?.(process.execPath);
       embeddedServerModule = integrationModule;
       const repair = await integrationModule.repairCurrentUserShellIntegrationTarget?.();
@@ -1054,9 +1117,11 @@ async function ensureServer() {
     rememberBackendEvent("ready", "Backend already answered health check.", { kind: "existing" });
     return;
   }
+  if (desktopClosing) throw new Error("Explore Better is closing.");
   rememberBackendEvent("starting", "Starting embedded backend server.", { kind: "embedded" });
   try {
     const serverModule = await import("./server.mjs");
+    if (desktopClosing) throw new Error("Explore Better is closing.");
     serverModule.setDesktopExecutablePath?.(process.defaultApp ? null : process.execPath);
     embeddedServerModule = serverModule;
     embeddedServer = await serverModule.startServer();
@@ -1065,12 +1130,14 @@ async function ensureServer() {
       return;
     }
   } catch (error) {
+    if (desktopClosing) throw new Error("Explore Better is closing.");
     console.error(error);
     rememberBackendEvent("error", error?.message || String(error || "Embedded backend failed."), {
       kind: "embedded"
     });
   }
 
+  if (desktopClosing) throw new Error("Explore Better is closing.");
   rememberBackendEvent("starting", "Starting child backend server.", { kind: "child" });
   const child = spawn(process.execPath, [path.join(__dirname, "server.mjs")], {
     cwd: __dirname,
@@ -1080,7 +1147,7 @@ async function ensureServer() {
       PORT: String(port),
       ELECTRON_RUN_AS_NODE: "1"
     },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
     windowsHide: true
   });
   serverProcess = child;
@@ -1109,16 +1176,14 @@ async function ensureServer() {
 }
 
 async function recoverBackend(reason = "watchdog") {
+  if (desktopClosing) throw new Error("Explore Better is closing.");
   if (backendRecoveryPromise) {
     return backendRecoveryPromise;
   }
   backendRecoveryPromise = (async () => {
     backendRestartCount += 1;
     rememberBackendEvent("recovering", `Recovering backend after ${reason}.`, { reason });
-    if (serverProcess && !serverProcess.killed) {
-      serverProcess.kill();
-      serverProcess = null;
-    }
+    await stopChildBackendProcess();
     if (embeddedServer) {
       await closeEmbeddedServer();
     }
@@ -1126,11 +1191,12 @@ async function recoverBackend(reason = "watchdog") {
     if (!(await serverIsReady())) {
       throw new Error(`Backend recovery did not restore ${baseUrl}`);
     }
+    if (desktopClosing) throw new Error("Explore Better is closing.");
     backendConsecutiveHealthMisses = 0;
     rememberBackendEvent("recovered", `Backend recovered after ${reason}.`, { reason });
     if (mainWindow && !mainWindow.isDestroyed()) {
-      const currentUrl = mainWindow.webContents.getURL();
-      await mainWindow.loadURL(currentUrl?.startsWith(baseUrl) ? currentUrl : listerUrl());
+      if (mainWindow.webContents.isCrashed()) await mainWindow.loadURL(listerUrl());
+      else await desktopEvents.send("backend-recovered", await backendStatus());
     }
     return backendStatus();
   })()
@@ -1283,21 +1349,57 @@ function closeEmbeddedServer() {
   });
 }
 
+function stopChildBackendProcess() {
+  const child = serverProcess;
+  if (!child) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      child.removeListener("close", closed);
+      child.removeListener("error", failed);
+      if (serverProcess === child) serverProcess = null;
+      if (error) reject(error);
+      else resolve();
+    };
+    const closed = (code) => finish(code === 0 ? null : new Error("The backend exited before confirming clean shutdown."));
+    const failed = (error) => { if (!settled) { child.kill(); finish(error); } };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish(new Error("The backend did not finish shutdown in time."));
+    }, 7500);
+    child.once("close", closed);
+    child.once("error", failed);
+    if (child.exitCode !== null || child.signalCode !== null) return closed(child.exitCode);
+    try {
+      if (!child.connected) return failed(new Error("The backend shutdown channel is unavailable."));
+      child.send({ type: "explore-better:shutdown" }, (error) => { if (error) failed(error); });
+    } catch (error) { failed(error); }
+  });
+}
+
 async function stopServer() {
   stopBackendMonitor();
-  if (serverProcess && !serverProcess.killed) {
-    serverProcess.kill();
-    serverProcess = null;
-  }
-  await closeEmbeddedServer();
+  await Promise.allSettled([desktopServerStartPromise, backendRecoveryPromise]);
+  const results = await Promise.allSettled([stopChildBackendProcess(), (async () => {
+    await closeEmbeddedServer();
+    await embeddedServerModule?.stopServer?.();
+  })()]);
+  const failure = results.find(result => result.status === "rejected");
+  if (failure) throw failure.reason;
 }
 
 async function exitSmoke(code) {
+  desktopClosing = true;
+  desktopEvents.cancel(null, "Explore Better is closing.");
   stopBackendMonitor();
   terminalService?.disposeAll();
   const terminalsStopped = await terminalService?.waitForIdle();
   if (terminalsStopped === false) code = 1;
   await mcpBridgeService?.stop();
+  await mcpBridgeStartPromise?.catch(() => {});
   await stopServer();
   app.exit(code);
 }
@@ -1312,7 +1414,8 @@ async function showLister(targetPath = null, shellMode = null) {
       mainWindow.restore();
     }
     mainWindow.focus();
-    await mainWindow.loadURL(targetUrl);
+    if (mainWindow.webContents.isCrashed()) await mainWindow.loadURL(targetUrl);
+    else if (targetPath) await desktopEvents.send("shell-open", { targetPath, shellMode });
     return;
   }
 
@@ -1343,7 +1446,8 @@ async function showLister(targetPath = null, shellMode = null) {
       preload: path.join(__dirname, "electron-preload.cjs")
     }
   });
-  const rendererWebContentsId = mainWindow.webContents.id;
+  const rendererWebContents = mainWindow.webContents;
+  const rendererWebContentsId = rendererWebContents.id;
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     try {
@@ -1367,8 +1471,18 @@ async function showLister(targetPath = null, shellMode = null) {
     }
     event.preventDefault();
   });
-  mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace) terminalService?.disposeWebContents(rendererWebContentsId);
+  mainWindow.webContents.on("did-navigate", () => {
+    desktopEvents.cancel(rendererWebContents, "The desktop document navigated.", { deliveredOnly: true });
+    terminalService?.disposeWebContents(rendererWebContentsId);
+  });
+  mainWindow.webContents.on("will-prevent-unload", (event) => {
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: "warning", buttons: ["Keep editing", "Discard changes"], defaultId: 0, cancelId: 0,
+      title: "Unsaved changes", message: "You have unsaved changes.",
+      detail: "Discard them and leave this window?", noLink: true
+    });
+    if (choice === 1) event.preventDefault();
+    else autoUpdateInstallRequested = false;
   });
   mainWindow.webContents.session.setPermissionCheckHandler(() => false);
   mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
@@ -1383,6 +1497,7 @@ async function showLister(targetPath = null, shellMode = null) {
     dispatchDesktopShortcut(mainWindow, action);
   });
   mainWindow.webContents.on("render-process-gone", () => {
+    desktopEvents.cancel(rendererWebContents, "The desktop renderer stopped.");
     terminalService?.disposeWebContents(rendererWebContentsId);
   });
   mainWindow.once("ready-to-show", () => {
@@ -1391,6 +1506,7 @@ async function showLister(targetPath = null, shellMode = null) {
     }
   });
   mainWindow.on("closed", () => {
+    desktopEvents.cancel(rendererWebContents);
     terminalService?.disposeWebContents(rendererWebContentsId);
     mainWindow = null;
     mcpRendererContext = { ...mcpRendererContext, live: false, selection: [], focusedPath: "", ui: normalizeMcpUiContext({}) };
@@ -1764,6 +1880,8 @@ if (terminalBrokerMode) {
     event.preventDefault();
     if (shutdownPending) return;
     shutdownPending = true;
+    desktopClosing = true;
+    desktopEvents.cancel(null, "Explore Better is closing.");
     clearTimeout(mcpHeadlessExitTimer);
     for (const pending of mcpUiRequests.values()) {
       clearTimeout(pending.timeout);
@@ -1774,9 +1892,20 @@ if (terminalBrokerMode) {
     mcpTray = null;
     terminalService?.disposeAll();
     stopBackendMonitor();
-    Promise.allSettled([mcpBridgeService?.stop(), terminalService?.waitForIdle(), stopServer()])
-      .finally(() => {
+    Promise.allSettled([mcpBridgeService?.stop(), mcpBridgeStartPromise, terminalService?.waitForIdle(), stopServer()])
+      .then((results) => {
         shutdownComplete = true;
+        const cleanupFailed = results.some((result) => result.status === "rejected" || result.value === false);
+        if (autoUpdater && cleanupFailed) {
+          autoUpdater.autoInstallOnAppQuit = false;
+          rememberUpdateEvent("error", "Update installation deferred because application cleanup did not finish.", {
+            version: autoUpdateVersion
+          });
+        }
+        if (autoUpdateInstallRequested && !cleanupFailed) {
+          autoUpdateInstallRequested = false;
+          autoUpdater?.quitAndInstall(false, true);
+        }
         app.quit();
       });
   });

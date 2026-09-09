@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -326,9 +327,8 @@ func handle(ctx context.Context, req request, out *writer) (interface{}, error) 
 	}
 }
 
-func main() {
-	out := &writer{encoder: json.NewEncoder(os.Stdout)}
-	scanner := bufio.NewScanner(os.Stdin)
+func serveRequests(input io.Reader, out *writer, handleRequest func(context.Context, request, *writer) (interface{}, error)) error {
+	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var controls sync.Map
 	var workers sync.WaitGroup
@@ -352,7 +352,7 @@ func main() {
 			defer workers.Done()
 			defer cancel()
 			defer controls.Delete(item.ID)
-			data, err := handle(ctx, item, out)
+			data, err := handleRequest(ctx, item, out)
 			if err != nil {
 				out.send(errorResponse(item, err))
 				return
@@ -360,8 +360,19 @@ func main() {
 			out.send(response{Version: protocolVersion, ID: item.ID, Type: "result", OK: true, Data: data})
 		}(req)
 	}
+	// EOF means the owning process closed its transport. Cancel its work before
+	// waiting, so active scans do not outlive a desktop quit or broken pipe.
+	controls.Range(func(_, value interface{}) bool {
+		value.(context.CancelFunc)()
+		return true
+	})
 	workers.Wait()
-	if err := scanner.Err(); err != nil {
+	return scanner.Err()
+}
+
+func main() {
+	out := &writer{encoder: json.NewEncoder(os.Stdout)}
+	if err := serveRequests(os.Stdin, out, handle); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
 	time.Sleep(time.Millisecond)

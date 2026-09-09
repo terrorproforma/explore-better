@@ -36,6 +36,8 @@ var version = "dev"
 const (
 	bridgeProtocolVersion = 2
 	maxBridgeFrameBytes   = 4 * 1024 * 1024
+	maxSubscriptions      = 256
+	maxResourceURIBytes   = 2048
 )
 
 type contract struct {
@@ -121,20 +123,22 @@ func (e *bridgeError) Error() string {
 }
 
 type bridgeClient struct {
-	profileID       string
-	appPath         string
-	appDir          string
-	manifest        string
-	mu              sync.Mutex
-	writeMu         sync.Mutex
-	conn            net.Conn
-	closed          bool
-	pending         map[string]chan bridgeFrame
-	disconnected    chan struct{}
-	sessionID       string
-	clientInfo      any
-	resourceUpdated func(string)
-	subscriptions   map[string]struct{}
+	profileID        string
+	appPath          string
+	appDir           string
+	manifest         string
+	mu               sync.Mutex
+	writeMu          sync.Mutex
+	subscriptionOnce sync.Once
+	subscriptionGate chan struct{}
+	conn             net.Conn
+	closed           bool
+	pending          map[string]chan bridgeFrame
+	disconnected     chan struct{}
+	sessionID        string
+	clientInfo       any
+	resourceUpdated  func(string)
+	subscriptions    map[string]struct{}
 }
 
 func randomID() string {
@@ -225,6 +229,29 @@ func launchHost(appPath, appDir string) error {
 }
 
 func (b *bridgeClient) ensureConnected(ctx context.Context, sessionID string, clientInfo any) error {
+	if err := b.lockSubscriptions(ctx); err != nil {
+		return err
+	}
+	defer b.unlockSubscriptions()
+	return b.ensureConnectedUnderSubscriptionLock(ctx, sessionID, clientInfo)
+}
+
+func (b *bridgeClient) lockSubscriptions(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.subscriptionOnce.Do(func() { b.subscriptionGate = make(chan struct{}, 1) })
+	select {
+	case b.subscriptionGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *bridgeClient) unlockSubscriptions() { <-b.subscriptionGate }
+
+func (b *bridgeClient) ensureConnectedUnderSubscriptionLock(ctx context.Context, sessionID string, clientInfo any) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -468,6 +495,10 @@ func (b *bridgeClient) call(ctx context.Context, sessionID string, clientInfo an
 	if err := b.ensureConnected(ctx, sessionID, clientInfo); err != nil {
 		return nil, err
 	}
+	return b.callConnected(ctx, op, payload)
+}
+
+func (b *bridgeClient) callConnected(ctx context.Context, op string, payload bridgeFrame) (json.RawMessage, error) {
 	payload.Version = bridgeProtocolVersion
 	payload.ID = randomID()
 	payload.Op = op
@@ -505,6 +536,56 @@ func (b *bridgeClient) call(ctx context.Context, sessionID string, clientInfo an
 		b.mu.Unlock()
 		return nil, ctx.Err()
 	}
+}
+
+func (b *bridgeClient) setSubscription(ctx context.Context, sessionID string, clientInfo any, uri string, subscribe bool) error {
+	op := "unsubscribe"
+	if subscribe {
+		op = "subscribe"
+	}
+	return b.changeSubscription(ctx, uri, subscribe, func() error {
+		if err := b.ensureConnectedUnderSubscriptionLock(ctx, sessionID, clientInfo); err != nil {
+			return err
+		}
+		_, err := b.callConnected(ctx, op, bridgeFrame{URI: uri})
+		return err
+	})
+}
+
+func (b *bridgeClient) changeSubscription(ctx context.Context, uri string, subscribe bool, applyRemote func() error) error {
+	if uri == "" {
+		return &bridgeError{Code: "INVALID_REQUEST", Message: "A resource URI is required."}
+	}
+	if len(uri) > maxResourceURIBytes {
+		return &bridgeError{Code: "LIMIT_EXCEEDED", Message: "A resource URI cannot exceed 2048 UTF-8 bytes."}
+	}
+	// Remote acknowledgment, retained state, and reconnect replay share one
+	// cancelable gate. A reconnect must not replay an uncommitted older state.
+	if err := b.lockSubscriptions(ctx); err != nil {
+		return err
+	}
+	defer b.unlockSubscriptions()
+	b.mu.Lock()
+	_, exists := b.subscriptions[uri]
+	full := len(b.subscriptions) >= maxSubscriptions
+	b.mu.Unlock()
+	if subscribe && !exists && full {
+		return &bridgeError{Code: "LIMIT_EXCEEDED", Message: "The resource subscription limit is reached. Unsubscribe from unused resources before adding another."}
+	}
+	if err := applyRemote(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if subscribe {
+		if b.subscriptions == nil {
+			b.subscriptions = make(map[string]struct{})
+		}
+		b.subscriptions[uri] = struct{}{}
+	} else {
+		delete(b.subscriptions, uri)
+	}
+	return nil
 }
 
 func (b *bridgeClient) close() {
@@ -670,26 +751,11 @@ func main() {
 			KeepAlive:    20 * time.Second,
 			SubscribeHandler: func(ctx context.Context, request *mcp.SubscribeRequest) error {
 				sessionID, clientInfo := sessionIdentity(request.Session)
-				_, err := bridge.call(ctx, sessionID, clientInfo, "subscribe", bridgeFrame{URI: request.Params.URI})
-				if err == nil {
-					bridge.mu.Lock()
-					if bridge.subscriptions == nil {
-						bridge.subscriptions = make(map[string]struct{})
-					}
-					bridge.subscriptions[request.Params.URI] = struct{}{}
-					bridge.mu.Unlock()
-				}
-				return err
+				return bridge.setSubscription(ctx, sessionID, clientInfo, request.Params.URI, true)
 			},
 			UnsubscribeHandler: func(ctx context.Context, request *mcp.UnsubscribeRequest) error {
 				sessionID, clientInfo := sessionIdentity(request.Session)
-				_, err := bridge.call(ctx, sessionID, clientInfo, "unsubscribe", bridgeFrame{URI: request.Params.URI})
-				if err == nil {
-					bridge.mu.Lock()
-					delete(bridge.subscriptions, request.Params.URI)
-					bridge.mu.Unlock()
-				}
-				return err
+				return bridge.setSubscription(ctx, sessionID, clientInfo, request.Params.URI, false)
 			},
 		},
 	)

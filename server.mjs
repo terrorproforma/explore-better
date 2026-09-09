@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { pathSnapshot, validSnapshot, decodeEditableText, encodeEditableText, assertSafeDestination, physicalPath, insidePath, durableWrite, replaceFileTransaction, sameFileIdentity } from "./filesystem-integrity.mjs";
+import { pathSnapshot, validSnapshot, decodeEditableText, encodeEditableText, readEditableTextFile, assertSafeDestination, physicalPath, insidePath, durableWrite, replaceFileTransaction, sameFileIdentity } from "./filesystem-integrity.mjs";
 
 const require = createRequire(import.meta.url);
 const yauzl = require("yauzl");
@@ -6466,6 +6466,7 @@ function compactIndexEntry(entry) {
     system: entry.system === true,
     readonly: entry.readonly === true,
     archive: entry.archive === true,
+    isSymlink: entry.isSymlink === true,
     reparse: entry.reparse === true,
     compressed: entry.compressed === true,
     encrypted: entry.encrypted === true,
@@ -6863,7 +6864,7 @@ async function searchFolderIndex({ targetPath, query, limit = 120 } = {}) {
       searchMs: elapsedMs(searchStart),
       scanned,
       candidateEntries: candidates.length,
-      tokenIndexed: index.tokenIndex?.version === 1,
+      tokenIndexed: index.tokenIndex?.version === 2,
       tokenNarrowed: candidatePlan.narrowed === true,
       tokenStrategy: candidatePlan.strategy || "scan",
       tokenReason: candidatePlan.reason || "",
@@ -7464,6 +7465,9 @@ function backgroundIndexReadSummary(manifestRead, searchRead) {
 }
 
 function backgroundIndexReadFreshness(root, manifest, searchRead) {
+  if (searchRead?.data && searchRead.data.version !== 2) {
+    return freshnessStatus("stale", { reason: "search-store-outdated", searchFile: backgroundIndexSearchFile(root.id) });
+  }
   if (searchRead?.corrupt) {
     return freshnessStatus("stale", {
       reason: "search-store-corrupt",
@@ -7521,7 +7525,7 @@ function folderFreshnessStamps(manifest, store) {
     .filter((folder) => folder?.path)
     .map((folder) => ({
       path: folder.path,
-      count: Number(folder.count),
+      count: Number(folder.freshnessCount ?? folder.count),
       modified: folder.modified ?? folder.mtimeMs ?? null
     }));
 }
@@ -7714,34 +7718,40 @@ function backgroundIndexStoreSummary(store = {}) {
     : null;
 }
 
-function backgroundSearchTokens(text) {
+function backgroundSearchTokenDetails(text) {
   const normalized = String(text || "").toLowerCase();
   const matches = normalized.match(/[a-z0-9]+/g) || [];
   const tokens = [];
   const seen = new Set();
+  let complete = true;
   for (const match of matches) {
     if (match.length < 2) {
       continue;
     }
+    if (match.length > backgroundSearchTokenLengthLimit) complete = false;
     const token = match.slice(0, backgroundSearchTokenLengthLimit);
     if (seen.has(token)) {
       continue;
     }
-    seen.add(token);
-    tokens.push(token);
     if (tokens.length >= backgroundSearchTokenPerEntryLimit) {
+      complete = false;
       break;
     }
+    seen.add(token);
+    tokens.push(token);
   }
-  return tokens;
+  return { tokens, complete };
 }
 
 function buildBackgroundSearchTokenIndex(entries = []) {
-  const postings = {};
+  const postings = Object.create(null);
   const saturated = new Set();
+  const fallbackEntries = [];
   let postingCount = 0;
   entries.forEach((entry, index) => {
-    for (const token of backgroundSearchTokens(entry?.searchText || entry?.name || "")) {
+    const detail = backgroundSearchTokenDetails(entry?.searchText || entry?.name || "");
+    if (!detail.complete) fallbackEntries.push(index);
+    for (const token of detail.tokens) {
       if (saturated.has(token)) {
         continue;
       }
@@ -7758,14 +7768,15 @@ function buildBackgroundSearchTokenIndex(entries = []) {
     }
   });
   return {
-    version: 1,
+    version: 2,
     postingLimit: backgroundSearchTokenPostingLimit,
     perEntryLimit: backgroundSearchTokenPerEntryLimit,
     tokenLengthLimit: backgroundSearchTokenLengthLimit,
     uniqueTokenCount: Object.keys(postings).length,
     saturatedCount: saturated.size,
     postingCount,
-    saturated: [...saturated].slice(0, 10000),
+    saturated: [...saturated],
+    fallbackEntries,
     postings
   };
 }
@@ -7775,16 +7786,33 @@ function backgroundSearchCandidatePlan(store, query) {
   if (!q) {
     return { strategy: "all", tokens: [], indexes: null, narrowed: false, reason: "empty-query" };
   }
-  const tokens = backgroundSearchTokens(q);
+  const detail = backgroundSearchTokenDetails(q);
+  const { tokens } = detail;
   const index = store?.tokenIndex;
   const postings = index?.postings && typeof index.postings === "object" ? index.postings : null;
-  if (tokens.length < 2 || !postings) {
-    return { strategy: "scan", tokens, indexes: null, narrowed: false, reason: tokens.length < 2 ? "single-token-query" : "missing-token-index" };
+  if (tokens.length < 2 || !postings || index.version !== 2 || !detail.complete || !Array.isArray(index.fallbackEntries)) {
+    return { strategy: "scan", tokens, indexes: null, narrowed: false, reason: tokens.length < 2 ? "single-token-query" : "incomplete-token-index" };
   }
   const saturated = new Set(Array.isArray(index.saturated) ? index.saturated : []);
   const lists = [];
+  const matches = [...q.matchAll(/[a-z0-9]+/g)].filter(match => match[0].length >= 2);
+  const first = matches[0];
+  const last = matches[matches.length - 1];
+  let vocabulary = null;
   for (const token of tokens) {
-    const list = postings[token];
+    const suffix = first?.index === 0 && first[0] === token;
+    const prefix = last && last.index + last[0].length === q.length && last[0] === token;
+    let list;
+    if (suffix || prefix) {
+      // includes() permits partial words at either query edge. Exact postings
+      // alone would lose those matches whenever a decoy exact token exists.
+      const accepts = word => (suffix && word.endsWith(token)) || (prefix && word.startsWith(token));
+      if ([...saturated].some(accepts)) continue;
+      vocabulary ||= Object.keys(postings);
+      list = [...new Set(vocabulary.filter(accepts).flatMap(word => postings[word]))];
+    } else {
+      list = postings[token];
+    }
     if (Array.isArray(list)) {
       lists.push({ token, list });
     } else if (!saturated.has(token)) {
@@ -7803,6 +7831,9 @@ function backgroundSearchCandidatePlan(store, query) {
       break;
     }
   }
+  // Long/token-dense files are only partially represented by the postings.
+  // Scan them as well so a later content match cannot disappear.
+  indexes = [...new Set([...indexes, ...index.fallbackEntries])].sort((left, right) => left - right);
   return {
     strategy: "token-index",
     tokens,
@@ -7816,7 +7847,7 @@ function backgroundSearchCandidatePlan(store, query) {
 async function writeBackgroundIndexStore(root, manifest, entries) {
   const tokenIndex = buildBackgroundSearchTokenIndex(entries);
   const searchStore = {
-    version: 1,
+    version: 2,
     rootId: root.id,
     path: root.path,
     builtAt: manifest.builtAt,
@@ -7830,7 +7861,7 @@ async function writeBackgroundIndexStore(root, manifest, entries) {
     maxContentFiles: root.maxContentFiles,
     folderStamps: manifest.folders.map((folder) => ({
       path: folder.path,
-      count: Number(folder.count || 0),
+      count: Number(folder.freshnessCount ?? folder.count ?? 0),
       modified: folder.modified ?? null
     })),
     contentIndexed: Number(manifest.contentIndexed || 0),
@@ -7912,15 +7943,15 @@ async function backgroundIndexContentForEntry(root, entry, signal) {
     return { skipped: true, reason: "content-too-large" };
   }
   try {
-    const content = await fs.readFile(entry.path, "utf8");
+    const content = await readEditableTextFile(entry.path, { maxBytes: root.maxContentBytes, signal });
     throwIfOperationCanceled(signal);
-    const text = content.slice(0, root.maxContentBytes);
     return {
       indexed: true,
-      bytes: Buffer.byteLength(text, "utf8"),
-      text
+      bytes: content.bytes,
+      text: content.content
     };
   } catch (error) {
+    if (isOperationCanceled(error) || isAbortError(error) || signal?.aborted) throw error;
     return { skipped: true, reason: error.code || "content-unreadable" };
   }
 }
@@ -7930,7 +7961,7 @@ async function backgroundIndexContentForEntries(root, entries, remainingContentS
   let skipped = 0;
   let truncated = false;
   const candidates = [];
-  if (!root.includeContent || remainingContentSlots <= 0) {
+  if (!root.includeContent) {
     return { resultByPath, indexed: 0, skipped, bytes: 0, truncated };
   }
   for (const entry of entries) {
@@ -8008,6 +8039,7 @@ function backgroundIndexSearchEntry(root, folderPath, entry, content = null) {
 
 async function buildBackgroundIndexRoot(root, job, signal) {
   const buildStart = monotonicMs();
+  const guard = await createTraversalGuard(root.path, { signal });
   const queue = [root.path];
   const visited = new Set();
   const folders = [];
@@ -8052,6 +8084,7 @@ async function buildBackgroundIndexRoot(root, job, signal) {
 
     let index;
     try {
+      if (!(await guard(folderPath))) continue;
       index = await buildFolderIndex(folderPath, {
         signal,
         showHidden: root.showHidden !== false,
@@ -8060,6 +8093,7 @@ async function buildBackgroundIndexRoot(root, job, signal) {
         priority: "background"
       });
     } catch (error) {
+      if (isOperationCanceled(error) || isAbortError(error) || signal?.aborted) throw error;
       errors.push({
         path: folderPath,
         error: error.message || String(error)
@@ -8080,6 +8114,7 @@ async function buildBackgroundIndexRoot(root, job, signal) {
       path: index.path,
       builtAt: index.builtAt,
       count: index.count,
+      freshnessCount: index.count + Number(index.hiddenFiltered || 0),
       modified: folderModified,
       bytes: index.bytes || 0,
       listMs: Number(index.listTiming?.totalMs || 0),
@@ -8092,8 +8127,9 @@ async function buildBackgroundIndexRoot(root, job, signal) {
 
     const entries = Array.isArray(index.entries) ? index.entries : [];
     const entryCapacity = Math.max(0, root.maxEntries - aggregateEntries.length);
-    const aggregateCandidates = entries.slice(0, entryCapacity);
-    if (entries.length > aggregateCandidates.length) {
+    const eligibleEntries = entries.filter(entry => !entry.isSymlink && !entry.reparse && (!entry.linkType || entry.linkType === "Hard Link"));
+    const aggregateCandidates = eligibleEntries.slice(0, entryCapacity);
+    if (eligibleEntries.length > aggregateCandidates.length) {
       truncated = true;
     }
     const contentResults = await backgroundIndexContentForEntries(
@@ -8124,7 +8160,7 @@ async function buildBackgroundIndexRoot(root, job, signal) {
 
     if (root.recursive !== false && folders.length < root.maxFolders && aggregateEntries.length < root.maxEntries) {
       for (const entry of entries) {
-        if (!entry.isDirectory || entry.linkType) {
+        if (!entry.isDirectory || entry.isSymlink || entry.reparse || entry.linkType) {
           continue;
         }
         if (!isInsidePath(entry.path, root.path)) {
@@ -8145,7 +8181,7 @@ async function buildBackgroundIndexRoot(root, job, signal) {
 
   const builtAt = new Date().toISOString();
   const manifest = {
-    version: 1,
+    version: 2,
     rootId: root.id,
     path: root.path,
     name: root.name,
@@ -8379,7 +8415,7 @@ function backgroundIndexWatchFolders(root, manifest = null) {
   const folderLimit = backgroundIndexWatchFolderLimit();
   const seen = new Set();
   const folders = [];
-  const sourceFolders = Array.isArray(manifest?.folders) && manifest.folders.length ? manifest.folders : [{ path: root.path }];
+  const sourceFolders = manifest?.version === 2 && Array.isArray(manifest.folders) && manifest.folders.length ? manifest.folders : [{ path: root.path }];
   for (const folder of sourceFolders) {
     const folderPath = String(folder?.path || "").trim();
     if (!folderPath) {
@@ -8679,6 +8715,10 @@ async function searchBackgroundIndexes({ query, limit = 200, rootId = "", rootPa
         read: backgroundIndexReadSummary(manifestRead, searchRead),
         ...readFreshness
       });
+      // Earlier stores can contain followed-link descendants and incorrectly
+      // decoded content. Keep them on disk for rebuilding, but do not serve
+      // their results under the current traversal and encoding contract.
+      if (readFreshness.reason === "search-store-outdated") continue;
     }
     if (!store || !Array.isArray(store.entries)) {
       continue;
@@ -8696,7 +8736,7 @@ async function searchBackgroundIndexes({ query, limit = 200, rootId = "", rootPa
     stores += 1;
     const entries = Array.isArray(store.entries) ? store.entries : [];
     const candidatePlan = backgroundSearchCandidatePlan(store, q);
-    if (store.tokenIndex?.version === 1) {
+    if (store.tokenIndex?.version === 2) {
       tokenIndexedStores += 1;
     }
     if (candidatePlan.narrowed) {
@@ -13057,12 +13097,14 @@ async function undoRecordedOperation(operation) {
     return { result: { undone: operation.id, restored }, undo: null };
   }
 
-  if (undo.type === "replace-file-restore") {
+  if (undo.type === "replace-file-restore" || undo.type === "text-write-restore") {
     const target = resolveUserPath(undo.path);
     const backup = resolveUserPath(undo.backup);
     if (!(await pathExists(backup))) throw new Error("The original file backup is no longer available.");
-    const current = await pathSnapshot(target);
-    if (current.contentDigest !== undo.committedContentDigest) throw new Error("The file changed after this operation. Both the current file and backup were preserved.");
+    if (undo.type === "replace-file-restore") {
+      const current = await pathSnapshot(target);
+      if (current.contentDigest !== undo.committedContentDigest) throw new Error("The file changed after this operation. Both the current file and backup were preserved.");
+    }
     const result = await replaceFileTransaction(target, (staging) => fs.copyFile(backup, staging, 1), { backupRoot: trashRoot });
     operation.undo.appliedAt = new Date().toISOString();
     operation.undo.result = { restored: target, replacedBackup: result.result.transaction.backupPath };
@@ -13075,19 +13117,6 @@ async function undoRecordedOperation(operation) {
     operation.undo.appliedAt = new Date().toISOString();
     operation.undo.result = trashed.result;
     return { result: { undone: operation.id, trashed: trashed.result }, undo: null };
-  }
-
-  if (undo.type === "text-write-restore") {
-    const target = resolveUserPath(undo.path);
-    const backup = resolveUserPath(undo.backup);
-    if (!(await pathExists(backup))) {
-      throw new Error("The transactional text backup is no longer available.");
-    }
-    await fs.rm(target, { recursive: true, force: true });
-    await fs.rename(backup, target);
-    operation.undo.appliedAt = new Date().toISOString();
-    operation.undo.result = { restored: target };
-    return { result: { undone: operation.id, restored: target }, undo: null };
   }
 
   if (undo.type === "move-back" || undo.type === "restore-trash") {
@@ -14636,6 +14665,9 @@ function nativeDirectoryListingEligible(dir, entryCount, options = {}) {
 }
 
 let nativeFilesystemHelperClientState = null;
+const nativeFilesystemHelperClients = new Set();
+let nativeFilesystemHelperStopPromise = null;
+let nativeFilesystemHelperStopped = false;
 
 function failNativeFilesystemHelperClient(client, error) {
   if (!client || client.failed) return;
@@ -14651,6 +14683,7 @@ function failNativeFilesystemHelperClient(client, error) {
 }
 
 function ensureNativeFilesystemHelperClient() {
+  if (nativeFilesystemHelperStopped) throw new Error("Native filesystem helper is stopped.");
   const helperPath = nativeFilesystemHelperPath();
   if (!helperPath) {
     throw new Error("Native filesystem helper is unavailable.");
@@ -14675,6 +14708,13 @@ function ensureNativeFilesystemHelperClient() {
     spawnedAt: null,
     failed: false
   };
+  nativeFilesystemHelperClients.add(client);
+  client.closed = new Promise((resolve) => {
+    child.once("close", () => {
+      nativeFilesystemHelperClients.delete(client);
+      resolve();
+    });
+  });
   nativeFilesystemHelperClientState = client;
   child.once("spawn", () => {
     client.spawnedAt = monotonicMs();
@@ -14782,14 +14822,36 @@ function nativeFilesystemHelperRequest(op, payload = {}, options = {}) {
 }
 
 function stopNativeFilesystemHelperClient() {
-  const client = nativeFilesystemHelperClientState;
-  nativeFilesystemHelperClientState = null;
-  if (!client) return;
-  failNativeFilesystemHelperClient(client, new Error("Native filesystem helper stopped."));
-  if (client.child.exitCode === null) {
-    client.child.stdin.end();
-    client.child.kill();
-  }
+  if (nativeFilesystemHelperStopPromise) return nativeFilesystemHelperStopPromise;
+  nativeFilesystemHelperStopped = true;
+  const stopping = Promise.resolve().then(async () => {
+    nativeFilesystemHelperClientState = null;
+    const results = await Promise.allSettled([...nativeFilesystemHelperClients].map((client) => {
+      failNativeFilesystemHelperClient(client, new Error("Native filesystem helper stopped."));
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          if (error) reject(error);
+          else resolve();
+        };
+        const timeout = setTimeout(() => finish(new Error("Native filesystem helper did not exit during cleanup.")), 8000);
+        client.closed.then(() => finish(), finish);
+        try {
+          if (!client.child.stdin.destroyed) client.child.stdin.end();
+          if (client.child.exitCode === null && !client.child.signalCode) client.child.kill();
+        } catch (error) { finish(error); }
+      });
+    }));
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure) throw failure.reason;
+  }).finally(() => {
+    if (nativeFilesystemHelperStopPromise === stopping) nativeFilesystemHelperStopPromise = null;
+  });
+  nativeFilesystemHelperStopPromise = stopping;
+  return stopping;
 }
 
 function shouldWarmNativeFilesystemHelper() {
@@ -17735,7 +17797,7 @@ async function advancedSearchUncached(options) {
       if (nameOk && kindOk && criteriaOk && contentNeedle && entry.isFile && textExtensions.has(entry.extension)) {
         if (Number(entry.size || 0) <= maxContentBytes) {
           try {
-            const content = await fs.readFile(entry.path, { encoding: "utf8", signal: options.signal });
+            const { content } = await readEditableTextFile(entry.path, { maxBytes: maxContentBytes, signal: options.signal });
             contentScanned += 1;
             contentOk = containsText(content, contentNeedle);
             if (contentOk) {
@@ -21250,16 +21312,19 @@ const server = http.createServer(async (req, res) => {
 });
 
 let serverStartPromise = null;
+let serverStopPromise = null;
 
 export { advancedSearch, checksumReport, duplicateFiles, compareDirectories, propertiesReport };
 
 export async function startServer() {
+  if (serverStopPromise) await serverStopPromise;
   if (server.listening) {
     return server;
   }
   if (serverStartPromise) return serverStartPromise;
   serverStartPromise = (async () => {
     await readCachedState();
+    nativeFilesystemHelperStopped = false;
     warmNativeFilesystemHelper().catch((error) => {
       console.warn(`Could not warm native filesystem helper: ${error.message}`);
     });
@@ -21289,20 +21354,25 @@ export async function startServer() {
 }
 
 export function stopServer() {
-  if (!server.listening) {
-    stopNativeFilesystemHelperClient();
-    return Promise.resolve();
-  }
-  return new Promise((resolve, reject) => {
-    server.close((error) => {
-      if (error) {
-        reject(error);
-        return;
+  if (serverStopPromise) return serverStopPromise;
+  const stopping = (async () => {
+    // A pending start may still warm the helper or open HTTP after state loads.
+    // Finish that attempt before closing, including when startup itself fails.
+    await serverStartPromise?.catch(() => {});
+    try {
+      if (server.listening) {
+        await new Promise((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
       }
-      stopNativeFilesystemHelperClient();
-      resolve();
-    });
+    } finally {
+      await stopNativeFilesystemHelperClient();
+    }
+  })().finally(() => {
+    if (serverStopPromise === stopping) serverStopPromise = null;
   });
+  serverStopPromise = stopping;
+  return stopping;
 }
 
 let mcpAutomationServicePromise = null;
@@ -21492,6 +21562,17 @@ const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
 const modulePath = path.resolve(fileURLToPath(import.meta.url));
 
 if (invokedPath === modulePath) {
+  if (typeof process.send === "function") {
+    let shutdownRequested = false;
+    process.on("message", (message) => {
+      if (message?.type !== "explore-better:shutdown" || shutdownRequested) return;
+      shutdownRequested = true;
+      stopServer().then(() => process.exit(0), (error) => {
+        console.error(error);
+        process.exit(1);
+      });
+    });
+  }
   startServer().catch((error) => {
     console.error(error);
     process.exitCode = 1;

@@ -267,8 +267,8 @@ async function main() {
     finalRoot = restarted.completed;
     const finalManifest = JSON.parse(await fs.readFile(manifestFile, "utf8"));
     const finalStore = JSON.parse(await fs.readFile(searchFile, "utf8"));
-    check(checks, "manual-rebuild-restores-manifest", finalManifest.version === 1 && finalManifest.rootId === rootId, `version=${finalManifest.version}; root=${finalManifest.rootId}.`);
-    check(checks, "manual-rebuild-restores-search-store", finalStore.version === 1 && Array.isArray(finalStore.entries) && finalStore.entries.length >= 4, `entries=${finalStore.entries?.length || 0}.`);
+    check(checks, "manual-rebuild-restores-manifest", finalManifest.version === 2 && finalManifest.rootId === rootId, `version=${finalManifest.version}; root=${finalManifest.rootId}.`);
+    check(checks, "manual-rebuild-restores-search-store", finalStore.version === 2 && finalStore.tokenIndex?.version === 2 && Array.isArray(finalStore.entries) && finalStore.entries.length >= 4, `version=${finalStore.version}; tokens=${finalStore.tokenIndex?.version}; entries=${finalStore.entries?.length || 0}.`);
 
     const summary = {
       pass: checks.filter((item) => item.status === "pass").length,

@@ -6,6 +6,8 @@ import { promises as fs } from "node:fs";
 
 const protocolVersion = 2;
 const maxFrameBytes = 4 * 1024 * 1024;
+const maxSubscriptions = 256;
+const maxResourceUriBytes = 2048;
 const heartbeatTimeoutMs = 45_000;
 
 function bridgeManifestPath() {
@@ -16,9 +18,13 @@ function bridgeManifestPath() {
 async function atomicWriteJson(file, value) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await fs.rename(temp, file);
-  await fs.chmod(file, 0o600).catch(() => {});
+  try {
+    await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await fs.rename(temp, file);
+    await fs.chmod(file, 0o600).catch(() => {});
+  } finally {
+    await fs.rm(temp, { force: true }).catch(() => {});
+  }
 }
 
 function safeError(error) {
@@ -48,9 +54,13 @@ export function createMcpBridgeService(options) {
   const pipeName = `\\\\.\\pipe\\explore-better-ai-${crypto.randomBytes(16).toString("hex")}`;
   const nonce = crypto.randomBytes(32).toString("base64url");
   const connections = new Map();
+  const sockets = new Set();
+  const lifecycle = new AbortController();
   let server = null;
   let startedAt = null;
   let disposed = false;
+  let startPromise = null;
+  let stopPromise = null;
 
   function status() {
     return {
@@ -118,11 +128,17 @@ export function createMcpBridgeService(options) {
           signal: controller.signal
         });
       } else if (frame.op === "subscribe" || frame.op === "unsubscribe") {
-        const uri = String(frame.uri || "").slice(0, 2048);
-        if (!uri) {
+        const uri = frame.uri;
+        if (typeof uri !== "string" || !uri) {
           const error = new Error("A resource URI is required.");
           error.code = "INVALID_REQUEST";
           throw error;
+        }
+        if (Buffer.byteLength(uri, "utf8") > maxResourceUriBytes) {
+          throw Object.assign(new Error("A resource URI cannot exceed 2048 UTF-8 bytes."), { code: "LIMIT_EXCEEDED" });
+        }
+        if (frame.op === "subscribe" && !connection.subscriptions.has(uri) && connection.subscriptions.size >= maxSubscriptions) {
+          throw Object.assign(new Error("The resource subscription limit is reached. Unsubscribe from unused resources before adding another."), { code: "LIMIT_EXCEEDED" });
         }
         if (frame.op === "subscribe") connection.subscriptions.add(uri);
         else connection.subscriptions.delete(uri);
@@ -145,6 +161,7 @@ export function createMcpBridgeService(options) {
   }
 
   function accept(socket) {
+    sockets.add(socket);
     socket.setNoDelay(true);
     socket.setEncoding("utf8");
     let buffer = "";
@@ -152,6 +169,7 @@ export function createMcpBridgeService(options) {
     let handshakeTimer = setTimeout(() => socket.destroy(new Error("AI Bridge handshake timed out.")), 5000);
 
     const close = () => {
+      sockets.delete(socket);
       clearTimeout(handshakeTimer);
       if (connection) {
         for (const controller of connection.inFlight.values()) controller.abort();
@@ -163,13 +181,14 @@ export function createMcpBridgeService(options) {
     socket.on("error", () => {});
     socket.on("data", (chunk) => {
       buffer += chunk;
-      if (Buffer.byteLength(buffer) > maxFrameBytes) {
-        socket.destroy(new Error("AI Bridge frame exceeded the size limit."));
-        return;
-      }
       let newline;
       while ((newline = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, newline).trim();
+        const rawLine = buffer.slice(0, newline);
+        if (Buffer.byteLength(rawLine) + 1 > maxFrameBytes) {
+          socket.destroy(new Error("AI Bridge frame exceeded the size limit."));
+          return;
+        }
+        const line = rawLine.trim();
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
         let frame;
@@ -219,6 +238,9 @@ export function createMcpBridgeService(options) {
         connection.lastHeartbeat = Date.now();
         handleRequest(connection, frame).catch(() => {});
       }
+      if (Buffer.byteLength(buffer) > maxFrameBytes) {
+        socket.destroy(new Error("AI Bridge frame exceeded the size limit."));
+      }
     });
   }
 
@@ -230,46 +252,34 @@ export function createMcpBridgeService(options) {
   }, 15_000);
   heartbeat.unref();
 
-  async function start() {
-    if (server?.listening) return status();
+  function checkActive() {
     if (disposed) throw new Error("The AI Bridge service has been disposed.");
-    await options.backend.setMcpUiDispatcher(options.dispatchUiAction);
-    server = net.createServer(accept);
-    server.maxConnections = 32;
-    await new Promise((resolve, reject) => {
-      const onError = (error) => { server.off("listening", onListening); reject(error); };
-      const onListening = () => { server.off("error", onError); resolve(); };
-      server.once("error", onError);
-      server.once("listening", onListening);
-      server.listen(pipeName);
-    });
-    startedAt = new Date().toISOString();
-    await atomicWriteJson(manifestPath, {
-      version: protocolVersion,
-      pipeName,
-      nonce,
-      pid: process.pid,
-      executablePath: options.executablePath,
-      appPath: options.appPath,
-      appVersion: options.appVersion,
-      startedAt
-    });
-    return status();
   }
 
-  async function stop() {
-    if (disposed) return;
-    disposed = true;
-    clearInterval(heartbeat);
+  async function untilStopped(pending) {
+    checkActive();
+    let onStop;
+    const stopped = new Promise((_, reject) => {
+      onStop = () => reject(new Error("The AI Bridge service has been stopped."));
+      lifecycle.signal.addEventListener("abort", onStop, { once: true });
+    });
+    try { return await Promise.race([pending, stopped]); }
+    finally { lifecycle.signal.removeEventListener("abort", onStop); }
+  }
+
+  async function closeListener(active) {
     for (const connection of connections.values()) {
       for (const controller of connection.inFlight.values()) controller.abort();
-      connection.socket.destroy();
     }
+    for (const socket of sockets) socket.destroy();
+    sockets.clear();
     connections.clear();
     updateConnectionCount();
-    const active = server;
-    server = null;
+    if (server === active) server = null;
     if (active) await new Promise((resolve) => active.close(() => resolve()));
+  }
+
+  async function removeManifest() {
     try {
       const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
       if (manifest.pid === process.pid && manifest.nonce === nonce) await fs.rm(manifestPath, { force: true });
@@ -278,9 +288,60 @@ export function createMcpBridgeService(options) {
     }
   }
 
+  async function start() {
+    checkActive();
+    if (startPromise) return startPromise;
+    if (server?.listening) return status();
+    startPromise = (async () => {
+      let active = null;
+      try {
+        await untilStopped(options.backend.setMcpUiDispatcher(options.dispatchUiAction));
+        checkActive();
+        active = net.createServer(accept);
+        server = active;
+        active.maxConnections = 32;
+        await untilStopped(new Promise((resolve, reject) => {
+          const onError = (error) => { active.off("listening", onListening); reject(error); };
+          const onListening = () => { active.off("error", onError); resolve(); };
+          active.once("error", onError);
+          active.once("listening", onListening);
+          active.listen(pipeName);
+        }));
+        checkActive();
+        startedAt = new Date().toISOString();
+        await atomicWriteJson(manifestPath, {
+          version: protocolVersion, pipeName, nonce, pid: process.pid,
+          executablePath: options.executablePath, appPath: options.appPath,
+          appVersion: options.appVersion, startedAt
+        });
+        checkActive();
+        return status();
+      } catch (error) {
+        await closeListener(active);
+        await removeManifest();
+        throw error;
+      }
+    })();
+    try { return await startPromise; }
+    finally { startPromise = null; }
+  }
+
+  async function stop() {
+    if (stopPromise) return stopPromise;
+    disposed = true;
+    lifecycle.abort();
+    clearInterval(heartbeat);
+    stopPromise = (async () => {
+      await startPromise?.catch(() => {});
+      await closeListener(server);
+      await removeManifest();
+    })();
+    return stopPromise;
+  }
+
   function publishResourceUpdate(uri, revision = 0) {
-    const safeUri = String(uri || "").slice(0, 2048);
-    if (!safeUri) return 0;
+    const safeUri = typeof uri === "string" ? uri : "";
+    if (!safeUri || Buffer.byteLength(safeUri, "utf8") > maxResourceUriBytes) return 0;
     let published = 0;
     for (const connection of connections.values()) {
       if (!connection.subscriptions.has(safeUri)) continue;

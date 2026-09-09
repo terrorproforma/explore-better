@@ -13,6 +13,7 @@ export function sameFileIdentity(left, right) {
 export async function pathSnapshot(target, { signal } = {}) {
   const content = crypto.createHash("sha256");
   const state = crypto.createHash("sha256");
+  const observations = [];
   let rootIdentity;
   let entries = 0;
   async function visit(itemPath, relative) {
@@ -35,10 +36,7 @@ export async function pathSnapshot(target, { signal } = {}) {
     } else {
       throw new Error(`Unsupported file type in transaction: ${itemPath}`);
     }
-    const after = await fs.lstat(itemPath);
-    if (!sameFileIdentity(identity, after) || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
-      throw new Error(`File changed while verifying transaction: ${itemPath}`);
-    }
+    observations.push({ itemPath, identity, mode: before.mode, size: before.size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs });
     entries += 1;
     content.update(JSON.stringify([relative, kind, value]) + "\n");
     state.update(JSON.stringify([relative, kind, identity, before.mode, before.size, before.mtimeMs, value]) + "\n");
@@ -49,6 +47,16 @@ export async function pathSnapshot(target, { signal } = {}) {
     }
   }
   await visit(path.resolve(target), "");
+  // Recheck after the entire traversal: an earlier file can change while a
+  // sibling is hashed, and a directory can gain children after readdir.
+  for (const before of observations) {
+    throwIfAborted(signal);
+    const after = await fs.lstat(before.itemPath);
+    if (!sameFileIdentity(before.identity, after) || before.size !== after.size || before.mtimeMs !== after.mtimeMs ||
+        before.ctimeMs !== after.ctimeMs || before.mode !== after.mode) {
+      throw new Error(`File changed while verifying transaction: ${before.itemPath}`);
+    }
+  }
   throwIfAborted(signal);
   return { version: 1, identity: rootIdentity, entries, contentDigest: content.digest("hex"), stateDigest: state.digest("hex") };
 }
@@ -86,6 +94,24 @@ export function encodeEditableText(content, { encoding = "utf8", bom = false } =
   let bytes = Buffer.from(String(content), encoding === "utf8" ? "utf8" : "utf16le");
   if (encoding === "utf16be") bytes = bytes.swap16();
   return bom ? Buffer.concat([Buffer.from(encoding === "utf8" ? [0xef, 0xbb, 0xbf] : encoding === "utf16le" ? [0xff, 0xfe] : [0xfe, 0xff]), bytes]) : bytes;
+}
+
+export async function readEditableTextFile(target, { maxBytes, signal } = {}) {
+  throwIfAborted(signal);
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("A valid text read byte limit is required.");
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of createReadStream(target, { signal })) {
+    bytes += chunk.length;
+    if (bytes > maxBytes) {
+      const error = new Error(`Text file exceeds the ${maxBytes} byte read limit.`);
+      error.code = "TEXT_TOO_LARGE";
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  throwIfAborted(signal);
+  return { ...decodeEditableText(Buffer.concat(chunks, bytes)), bytes };
 }
 
 export async function physicalPath(target) {

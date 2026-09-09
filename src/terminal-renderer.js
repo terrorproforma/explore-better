@@ -130,6 +130,9 @@ function createView({ host, settings = {}, onInput, onResize, onDropPaths }) {
   const resizeDisposable = terminal.onResize(({ cols, rows }) => onResize?.(cols, rows));
   const keyHandler = (event) => {
     if (!(event.ctrlKey && event.shiftKey)) return true;
+    // xterm invokes this handler for keyup too. Suppress the shortcut there
+    // without repeating a clipboard read or executing a pasted command twice.
+    if ((event.code === "KeyC" || event.code === "KeyV") && event.type !== "keydown") return false;
     if (event.code === "KeyC") {
       const selected = terminal.getSelection();
       if (selected) navigator.clipboard.writeText(selected).catch(() => {});

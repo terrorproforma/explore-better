@@ -356,26 +356,23 @@ export async function createMcpAutomationService(deps) {
   let lastJobPruneAt = 0;
 
   const resolvePath = (value) => deps.resolveUserPath(value);
-  const canonicalRootCache = new Map();
-  const canonicalizeRoot = (value) => {
-    const resolved = resolvePath(value);
-    const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
-    if (!canonicalRootCache.has(key)) {
-      const pending = canonicalizePath(resolved, { allowMissing: true }).catch((error) => {
-        canonicalRootCache.delete(key);
-        throw error;
-      });
-      canonicalRootCache.set(key, pending);
-    }
-    return canonicalRootCache.get(key);
-  };
+  const canonicalizeRoot = (value) => canonicalizePath(resolvePath(value), { allowMissing: true });
   const internalRoots = Object.freeze(await Promise.all((deps.internalRoots || []).map(canonicalizeRoot)));
   const defaultConfig = () => ({ version: 1, enabled: false, auditRetentionDays: 30, profiles: [], updatedAt: new Date().toISOString() });
 
   async function readConfig() {
     if (configCache) return clone(configCache);
+    let bytes;
     try {
-      const raw = JSON.parse(await fs.readFile(configFile, "utf8"));
+      bytes = await fs.readFile(configFile, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      configCache = defaultConfig();
+      return clone(configCache);
+    }
+    try {
+      const raw = JSON.parse(bytes);
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new SyntaxError("Invalid AI Bridge configuration.");
       configCache = {
         version: 1,
         enabled: raw.enabled === true,
@@ -384,8 +381,10 @@ export async function createMcpAutomationService(deps) {
         updatedAt: raw.updatedAt || new Date().toISOString()
       };
       return clone(configCache);
-    } catch (error) {
-      if (error.code !== "ENOENT") await fs.rename(configFile, `${configFile}.corrupt-${Date.now()}`).catch(() => {});
+    } catch {
+      // Preserve malformed data before replacing it. Filesystem read failures
+      // above must never turn a valid configuration into an empty default.
+      await fs.rename(configFile, `${configFile}.corrupt-${Date.now()}`);
       configCache = defaultConfig();
       return clone(configCache);
     }
@@ -401,10 +400,13 @@ export async function createMcpAutomationService(deps) {
         updatedAt: new Date().toISOString()
       };
       const temp = `${configFile}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-      await fs.writeFile(temp, `${JSON.stringify(clean, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-      await fs.rename(temp, configFile);
+      try {
+        await fs.writeFile(temp, `${JSON.stringify(clean, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+        await fs.rename(temp, configFile);
+      } finally {
+        await fs.rm(temp, { force: true }).catch(() => {});
+      }
       configCache = clean;
-      canonicalRootCache.clear();
       return clone(clean);
   }
 
@@ -490,10 +492,19 @@ export async function createMcpAutomationService(deps) {
     if (!profile) bridgeError("UNKNOWN_PROFILE", "The AI Bridge profile is missing or revoked.");
     if (!profile.tools.includes(tool.name)) bridgeError("TOOL_NOT_ALLOWED", "This profile does not permit the requested tool.");
     if (tool.access === "write" && profile.access !== "read-write") bridgeError("READ_ONLY_PROFILE", "This profile is read-only.");
-    const profileRoots = await Promise.all(profile.roots.map(canonicalizeRoot));
+    // Resolve roots again for each principal: a logical workspace can be a
+    // junction whose physical target changed since the preceding request.
+    const rootCache = new Map();
+    const requestRoot = (value) => {
+      const resolved = resolvePath(value);
+      const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+      if (!rootCache.has(key)) rootCache.set(key, canonicalizeRoot(resolved));
+      return rootCache.get(key);
+    };
+    const profileRoots = await Promise.all(profile.roots.map(requestRoot));
     const rawClientRoots = Array.isArray(request.clientRoots) ? request.clientRoots : [];
     const normalizedClientRoots = rawClientRoots.map(normalizeClientRoot).filter(Boolean);
-    const clientRoots = await Promise.all(normalizedClientRoots.map(canonicalizeRoot));
+    const clientRoots = await Promise.all(normalizedClientRoots.map(requestRoot));
     return Object.freeze({
       profile: Object.freeze(profile),
       profileId: profile.id,
@@ -598,7 +609,7 @@ export async function createMcpAutomationService(deps) {
   async function writeJob(job) {
     const write = async () => {
       const record = {
-        version: 1, id: job.id, profileId: job.profileId, sessionId: job.sessionId,
+        version: 1, id: job.id, profileId: job.profileId, sessionId: job.sessionId, policySignature: job.policySignature,
         type: job.type, status: job.status, progress: job.progress,
         createdAt: job.createdAt, updatedAt: job.updatedAt, updatedMs: job.updatedMs,
         result: job.result, error: job.error, summary: job.summary
@@ -1173,14 +1184,16 @@ export async function createMcpAutomationService(deps) {
                 else request.signal?.addEventListener?.("abort", onAbort, { once: true });
               });
       const [data, waitedOperation] = await Promise.all([uiWait, operationWait]);
-      if (waitedOperation) {
-        try { await authorizeOperation(await currentPrincipal(principal), waitedOperation); operation = waitedOperation; }
+      if (waitedOperation) operation = waitedOperation;
+      const latest = await uiDispatcher({ type: "wait", afterRevision: 0, timeoutMs: 100, condition: {}, signal: request.signal });
+      const fresh = await currentPrincipal(principal);
+      if (operation) {
+        try { await authorizeOperation(fresh, operation); }
         catch { operation = null; }
       }
-      const latest = await uiDispatcher({ type: "wait", afterRevision: 0, timeoutMs: 100, condition: {}, signal: request.signal });
       const operationMatched = !operationId || Boolean(operation && (!operationStatus || operation.status === operationStatus));
       const matched = data?.matched === true && operationMatched;
-      const authorized = await contextForPrincipal(principal, latest.context || data.context || principal.context);
+      const authorized = await contextForPrincipal(fresh, latest.context || data.context || principal.context);
       return resultEnvelope({
         matched,
         reason: matched ? "condition-matched" : "timeout",
@@ -1231,7 +1244,7 @@ export async function createMcpAutomationService(deps) {
     }
     if (name === "inspect_paths") {
       const paths = await authorizePaths(principal, args.paths);
-      return resultEnvelope(await deps.propertiesReport({ ...args, paths, recursive: args.recursive === true }), { contextRevision: revision });
+      return resultEnvelope(await deps.propertiesReport({ ...args, paths, recursive: args.recursive === true }, { signal: request.signal }), { contextRevision: revision });
     }
     if (name === "read_text") {
       const itemPath = await authorizePath(principal, args.path);

@@ -198,6 +198,20 @@ async function main() {
     for (const viewport of viewports) {
       const context = await browser.newContext({ viewport, reducedMotion: "reduce" });
       const page = await context.newPage();
+      await page.addInitScript(() => {
+        window.copyFixture = { mode: "modern", writes: [], commands: [] };
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+          async writeText(value) {
+            window.copyFixture.writes.push(value);
+            if (window.copyFixture.mode !== "modern") throw new Error("Fixture clipboard unavailable");
+          }
+        } });
+        document.execCommand = (command) => {
+          window.copyFixture.commands.push(command);
+          if (window.copyFixture.mode === "fallback-throws") throw new Error("Fixture copy rejected");
+          return window.copyFixture.mode === "fallback-success";
+        };
+      });
       page.on("pageerror", (error) => errors.push(`${viewport.name}: ${error.message}`));
       const response = await page.goto(baseUrl, { waitUntil: "networkidle" });
       await page.waitForSelector("h1");
@@ -314,6 +328,27 @@ async function main() {
         commandCopyStatus === "Command copied",
         commandCopyStatus || "Missing copy status"
       );
+      for (const mode of ["modern", "fallback-success", "fallback-false", "fallback-throws"]) {
+        await page.evaluate((value) => {
+          window.copyFixture.mode = value;
+          window.copyFixture.writes = [];
+          window.copyFixture.commands = [];
+          document.querySelector("[data-command-copy-status]").textContent = "";
+        }, mode);
+        await page.locator('[data-copy-target="[data-verify-command]"]').click();
+        const copy = await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve({
+          status: document.querySelector("[data-command-copy-status]").textContent.trim(),
+          focused: document.activeElement.matches('[data-copy-target="[data-verify-command]"]'),
+          textareas: document.querySelectorAll("textarea").length,
+          ...window.copyFixture
+        }))));
+        const success = ["modern", "fallback-success"].includes(mode);
+        addCheck(checks, `${viewport.name}-copy-${mode}`,
+          copy.status === (success ? "Command copied" : "Could not copy. Select and copy the text manually.") &&
+            copy.focused && copy.textareas === 0 && copy.writes[0] === snapshot.verifyCommand &&
+            copy.commands.length === (mode === "modern" ? 0 : 1),
+          JSON.stringify(copy));
+      }
 
       const codexChapter = page.locator('[data-demo-time="36.5"]');
       await page.locator("[data-demo-video]").evaluate((video) => {

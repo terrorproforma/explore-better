@@ -18,7 +18,10 @@ var getVolumePathNameW = kernel32.NewProc("GetVolumePathNameW")
 var getDiskFreeSpaceW = kernel32.NewProc("GetDiskFreeSpaceW")
 
 func filetimeMilliseconds(value syscall.Filetime) int64 {
-	return value.Nanoseconds() / 1_000_000
+	ticks := uint64(value.HighDateTime)<<32 | uint64(value.LowDateTime)
+	// FILETIME spans dates outside int64 Unix nanoseconds. Convert its 100 ns
+	// ticks directly to milliseconds before applying the Windows epoch offset.
+	return int64(ticks/10000) - 11644473600000
 }
 
 func browseDirectory(ctx context.Context, root string, maxEntries int, showHidden *bool, compact bool) (map[string]interface{}, error) {

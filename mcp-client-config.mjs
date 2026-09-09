@@ -34,9 +34,13 @@ async function readOptional(file) {
 async function atomicWrite(file, data) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-  await fs.writeFile(temp, data, { mode: 0o600 });
-  await fs.rename(temp, file);
-  await fs.chmod(file, 0o600).catch(() => {});
+  try {
+    await fs.writeFile(temp, data, { mode: 0o600 });
+    await fs.rename(temp, file);
+    await fs.chmod(file, 0o600).catch(() => {});
+  } finally {
+    await fs.rm(temp, { force: true }).catch(() => {});
+  }
 }
 
 function timestamp() {
