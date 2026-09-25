@@ -1,14 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import net from "node:net";
 import { pathToFileURL } from "node:url";
-import { createTerminalAdapterEmitter, createTerminalService, runTerminalBroker } from "../terminal-service.mjs";
+import { createTerminalAdapterEmitter, createTerminalService, runTerminalBroker, terminalBrokerArguments, terminalBrokerBindingFromArgv, terminalEnvironment } from "../terminal-service.mjs";
 import { terminalMarkerDirectory, windowsArgumentList } from "../lib/terminal-protocol.mjs";
+import { powerShellLiteral } from "../lib/shell-quote.mjs";
 
 const artifacts = path.resolve("artifacts");
 await mkdir(artifacts, { recursive: true });
@@ -40,13 +41,24 @@ function adapter() {
   item.finish = () => { exit.resolve({ exitCode: 0 }); item.emit("exit", { exitCode: 0, signal: 0 }); };
   return item;
 }
-function harness(factory = async () => adapter()) {
+function harness(factory = async () => adapter(), serviceOptions = {}) {
   const messages = [];
+  const channels = [];
   const frame = { url: "http://127.0.0.1:54321/", postMessage: (...args) => messages.push(args) };
   const sender = { id: 1, mainFrame: frame, isDestroyed: () => false };
-  const service = createTerminalService({ MessageChannelMain: Channel, getMainWindow: () => ({ webContents: sender }),
-    getBaseUrl: () => "http://127.0.0.1:54321", runtime: {}, createAdapter: factory });
-  return { service, frame, event: { sender, senderFrame: frame }, messages };
+  class TrackedChannel extends Channel { constructor() { super(); channels.push(this); } }
+  const service = createTerminalService({ MessageChannelMain: TrackedChannel, getMainWindow: () => ({ webContents: sender }),
+    getBaseUrl: () => "http://127.0.0.1:54321", runtime: { smoke: true }, createAdapter: factory, ...serviceOptions });
+  // Simulates renderer input arriving over the session's message port.
+  const type = data => channels.at(-1).port1.emit("message", { data: { type: "write", data } });
+  return { service, frame, event: { sender, senderFrame: frame }, messages, channels, type };
+}
+// Captures the per-session prompt nonce the service hands to the adapter factory.
+function nonceHarness() {
+  const item = adapter();
+  const h = harness(async options => { item.markerNonce = options.markerNonce; return item; });
+  const idle = () => `\x1b]633;EB;idle;${item.markerNonce}\x07`;
+  return { ...h, item, idle };
 }
 const request = { tabId: "terminal-tab-1234", cwd: fixture, profileId: process.platform === "win32" ? "command-prompt" : "auto" };
 const windowsOnly = { skip: process.platform !== "win32" };
@@ -66,7 +78,7 @@ test("PowerShell launches preserve spaces, quotes, Unicode and trailing slashes"
   const output = path.join(dir, "args.json");
   await writeFile(receiver, "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n");
   const values = ["one two", 'quote"here', "C:\\trailing\\", "100% α"];
-  const ps = value => `'${value.replaceAll("'", "''")}'`;
+  const ps = powerShellLiteral;
   const command = `Start-Process -FilePath ${ps(process.execPath)} -WindowStyle Hidden -ArgumentList ${ps(windowsArgumentList([receiver, ...values]))} -Wait -RedirectStandardOutput ${ps(output)}`;
   await new Promise((resolve, reject) => {
     const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
@@ -184,8 +196,9 @@ test("a native exit before adapter creation returns cannot leave a ready orphan"
 test("terminal startup retains a bounded prompt and its markers until listeners attach", windowsOnly, async () => {
   const item = adapter();
   const cwd = path.join(fixture, "early prompt α");
-  const prompt = `\x1b]633;EB;idle\x07\x1b]9;9;${cwd}\x07ready α> `;
-  const h = harness(async () => {
+  let prompt;
+  const h = harness(async options => {
+    prompt = `\x1b]633;EB;idle;${options.markerNonce}\x07\x1b]9;9;${cwd}\x07ready α> `;
     item.pushOutput("startup ".repeat(50_000));
     item.pushOutput(prompt);
     return item;
@@ -204,12 +217,137 @@ test("terminal startup retains a bounded prompt and its markers until listeners 
   assert.equal(await h.service.waitForIdle(), true);
 });
 
-async function brokerManifest(pipeName) {
+test("shell environment drops host listener and API credentials", () => {
+  const nonce = "0123456789abcdef0123456789abcdef";
+  const env = terminalEnvironment({ kind: "cmd" }, nonce, {
+    Path: "C:\\Windows", PORT: "54321", Host: "127.0.0.1", EXPLORE_BETTER_API_CAPABILITY: "secret",
+    EXPLORE_BETTER_DESKTOP_INSTANCE_TOKEN: "token", explore_better_require_api_capability: "1", EB_UPDATE_URL: "x",
+    EXPLORE_BETTER_TERMINAL: "0", EBX: "kept"
+  });
+  assert.equal(env.Path, "C:\\Windows");
+  assert.equal(env.EBX, "kept");
+  assert.equal(env.EXPLORE_BETTER_TERMINAL, "1");
+  for (const key of Object.keys(env)) assert.doesNotMatch(key, /^(PORT|HOST|EXPLORE_BETTER_(?!TERMINAL$)|EB_)/i);
+  assert.equal(env.PROMPT.includes(`633;EB;idle;${nonce}`), true);
+  assert.throws(() => terminalEnvironment({ kind: "cmd" }, "", {}), /prompt integration/);
+});
+
+test("marker folders reject remote shares unless the session owns them", windowsOnly, async () => {
+  assert.equal(terminalMarkerDirectory("file://attacker/share", true), "");
+  assert.equal(terminalMarkerDirectory("file://attacker/share/docs", true, new Set(["\\\\other\\share"])), "");
+  assert.equal(terminalMarkerDirectory("\\\\attacker\\share"), "");
+  assert.equal(terminalMarkerDirectory("//attacker/share"), "");
+  assert.equal(terminalMarkerDirectory("\\\\?\\C:\\Windows"), "");
+  assert.equal(terminalMarkerDirectory("relative\\folder"), "");
+  assert.equal(terminalMarkerDirectory("file://localhost/C:/Windows", true), "C:\\Windows");
+  assert.equal(terminalMarkerDirectory("file://Server/Share/docs", true, new Set(["\\\\server\\share"])), "\\\\server\\Share\\docs");
+  assert.equal(terminalMarkerDirectory("\\\\server\\share\\..\\..\\evil", false, new Set(["\\\\server\\share"])), "\\\\server\\share\\evil");
+  const h = nonceHarness();
+  await h.service.create(h.event, request);
+  h.item.emit("data", "\x1b]7;file://attacker/share\x07\x1b]9;9;\\\\attacker\\share\x07");
+  assert.equal(h.service.cwdForSmoke(), fixture);
+  h.service.disposeAll(); h.item.finish(); await h.service.waitForIdle();
+});
+
+test("idle markers require the session nonce and survive a split ESC", windowsOnly, async () => {
+  const h = nonceHarness();
+  await h.service.create(h.event, request);
+  assert.match(h.item.markerNonce, /^[0-9a-f]{32}$/);
+  h.service.writeForSmoke("dir\r");
+  h.item.emit("data", "\x1b]633;EB;idle\x07");
+  h.item.emit("data", "\x1b]633;EB;idle;00000000000000000000000000000000\x07");
+  assert.equal((await h.service.syncForSmoke(fixture)).queued, true, "forged idle markers are ignored");
+  assert.equal(h.item.writes.length, 1);
+  h.item.emit("data", "output\x1b");
+  h.item.emit("data", h.idle().slice(1));
+  assert.equal(h.item.writes.length, 2, "the queued folder is applied at the real prompt");
+  assert.match(h.item.writes[1], /^cd \/d /);
+  h.service.disposeAll(); h.item.finish(); await h.service.waitForIdle();
+});
+
+test("folder follow waits for a half-typed line instead of appending to it", windowsOnly, async () => {
+  const h = nonceHarness();
+  await h.service.create(h.event, request);
+  h.item.emit("data", h.idle());
+  const percent = path.join(fixture, "100% sync");
+  await mkdir(percent, { recursive: true });
+  h.type("\x1b[12;1R");
+  assert.equal((await h.service.syncForSmoke(percent)).queued, false, "terminal reports are not user input");
+  assert.equal(h.item.writes.at(-1), `cd /d "${fixture}\\100"^%" sync"\r`);
+  h.item.emit("data", h.idle());
+  h.type("git sta");
+  assert.equal((await h.service.syncForSmoke(fixture)).queued, true);
+  assert.equal(h.item.writes.at(-1), "git sta");
+  h.type("tus\r");
+  h.item.emit("data", `output${h.idle()}`);
+  assert.equal(h.item.writes.at(-1), `cd /d "${fixture}"\r`);
+  // Type-ahead entered while a command runs lands on the next prompt line.
+  h.type("ping\r");
+  h.type("dir");
+  assert.equal((await h.service.syncForSmoke(percent)).queued, true);
+  h.item.emit("data", h.idle());
+  assert.equal(h.item.writes.at(-1), "dir", "type-ahead keeps the folder queued");
+  h.type("\x03");
+  h.item.emit("data", h.idle());
+  assert.match(h.item.writes.at(-1), /^cd \/d .*sync"\r$/);
+  h.service.disposeAll(); h.item.finish(); await h.service.waitForIdle();
+});
+
+test("shutdown rejects new terminals and aborts pending ones", windowsOnly, async () => {
+  const started = deferred(), gate = deferred();
+  const item = adapter();
+  const h = harness(() => { started.resolve(); return gate.promise; });
+  const creating = h.service.create(h.event, request);
+  const rejected = assert.rejects(creating);
+  await started.promise;
+  h.service.disposeAll();
+  await assert.rejects(h.service.create(h.event, { ...request, tabId: "terminal-tab-5678" }), /closing/);
+  gate.resolve(item);
+  await rejected;
+  assert.equal(item.killCount, 1);
+  assert.equal(h.service.sessionCount(), 0);
+  item.finish();
+  assert.equal(await h.service.waitForIdle(), true);
+});
+
+test("a retired adapter that never exits is dropped after a bound", windowsOnly, async () => {
+  const item = adapter();
+  const h = harness(async () => item, { retireTimeoutMs: 20 });
+  const created = await h.service.create(h.event, request);
+  h.service.disposeForEvent(h.event, created.sessionId);
+  assert.equal(await h.service.waitForIdle(5), false);
+  assert.equal(await h.service.waitForIdle(1000), true);
+});
+
+const brokerMarkerNonce = "fedcba9876543210fedcba9876543210";
+async function brokerManifest(pipeName, overrides = {}) {
   const manifestPath = path.join(fixture, `broker-${randomUUID()}.json`);
-  await writeFile(manifestPath, JSON.stringify({ version: 1, pipeName, nonce: "fixture-nonce", parentPid: process.pid,
-    profileId: "command-prompt", cwd: fixture, cols: 100, rows: 28, createdAt: Date.now() }));
-  return manifestPath;
+  const bytes = Buffer.from(JSON.stringify({ version: 1, pipeName, nonce: "fixture-nonce", parentPid: process.pid,
+    profileId: "command-prompt", cwd: fixture, cols: 100, rows: 28, markerNonce: brokerMarkerNonce, createdAt: Date.now(), ...overrides }));
+  await writeFile(manifestPath, bytes);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const binding = terminalBrokerBindingFromArgv(terminalBrokerArguments({ manifestPath, pipeName, nonce: "fixture-nonce", digest }));
+  return { manifestPath, binding };
 }
+
+test("administrator broker only follows the pipe bound on its command line", { ...windowsOnly, timeout: 5000 }, async () => {
+  let creations = 0;
+  const createAdapter = async () => { creations++; return adapter(); };
+  const pipeName = `\\\\.\\pipe\\ExploreBetter-Broker-Bound-${randomUUID()}`;
+  const redirected = await brokerManifest(pipeName);
+  const attacker = await brokerManifest(`\\\\.\\pipe\\ExploreBetter-Attacker-${randomUUID()}`);
+  // A rewritten manifest no longer matches the launch digest.
+  await writeFile(redirected.manifestPath, await readFile(attacker.manifestPath));
+  await assert.rejects(runTerminalBroker(redirected.manifestPath, { createAdapter, binding: redirected.binding }), /launch binding/);
+  // A consistent attacker manifest still names a different pipe and nonce.
+  const other = await brokerManifest(pipeName, { nonce: "attacker" });
+  await assert.rejects(runTerminalBroker(other.manifestPath, { createAdapter, binding: { ...other.binding, digest: redirected.binding.digest } }), /launch binding/);
+  const unbound = await brokerManifest(pipeName);
+  await assert.rejects(runTerminalBroker(unbound.manifestPath, { createAdapter, binding: {} }), /launch binding/);
+  const remote = await brokerManifest("\\\\attacker\\pipe\\ExploreBetter-Terminal");
+  await assert.rejects(runTerminalBroker(remote.manifestPath, { createAdapter, binding: remote.binding }), /launch binding/);
+  assert.equal(creations, 0);
+});
 
 async function brokerHarness(t, createAdapter, shutdownTimeoutMs = 1000) {
   const pipeName = `\\\\.\\pipe\\ExploreBetter-Broker-Test-${randomUUID()}`;
@@ -240,7 +378,8 @@ async function brokerHarness(t, createAdapter, shutdownTimeoutMs = 1000) {
   });
   server.listen(pipeName);
   await once(server, "listening");
-  const running = runTerminalBroker(await brokerManifest(pipeName), { createAdapter, shutdownTimeoutMs });
+  const { manifestPath, binding } = await brokerManifest(pipeName);
+  const running = runTerminalBroker(manifestPath, { createAdapter, shutdownTimeoutMs, binding });
   running.catch(() => {});
   return { running, connected: connected.promise, messages,
     message: async type => messages.find(message => message.type === type) || (await once(events, type))[0] };
@@ -252,8 +391,9 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 test("administrator broker does not create a PTY without a parent connection", brokerTest, async () => {
   let creations = 0;
   const pipeName = `\\\\.\\pipe\\ExploreBetter-Broker-Missing-${randomUUID()}`;
-  await assert.rejects(runTerminalBroker(await brokerManifest(pipeName), {
-    createAdapter: async () => { creations++; return adapter(); }
+  const { manifestPath, binding } = await brokerManifest(pipeName);
+  await assert.rejects(runTerminalBroker(manifestPath, {
+    createAdapter: async () => { creations++; return adapter(); }, binding
   }), /ENOENT|ECONNREFUSED/);
   assert.equal(creations, 0);
 });
