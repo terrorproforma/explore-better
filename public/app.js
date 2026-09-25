@@ -13523,6 +13523,20 @@ async function mountModelViewport(container, preview, scope) {
   }
 }
 
+function renderInspectorAfterViewerCloses() {
+  const dialog = document.getElementById("viewer-dialog");
+  if (!dialog || app.inspectorAwaitsViewerClose) {
+    return;
+  }
+  app.inspectorAwaitsViewerClose = true;
+  dialog.addEventListener("close", () => {
+    app.inspectorAwaitsViewerClose = false;
+    if (!dialog.open && document.querySelector("#inspector [data-model-deferred]")) {
+      renderInspector();
+    }
+  }, { once: true });
+}
+
 async function renderInspector(options = {}) {
   const inspector = document.getElementById("inspector");
   const body = inspector.querySelector(".inspector-body");
@@ -13627,9 +13641,15 @@ async function renderInspector(options = {}) {
       return;
     }
     if (preview.type === "model") {
-      body.innerHTML = `<h3 class="preview-name">${escapeHtml(
-        preview.name
-      )}</h3>${meta}${labelPanel}${previewActionBar(preview)}${modelViewportMarkup("inspector")}`;
+      const modelHeader = `<h3 class="preview-name">${escapeHtml(preview.name)}</h3>${meta}${labelPanel}${previewActionBar(preview)}`;
+      if (document.getElementById("viewer-dialog")?.open) {
+        // The viewer already renders this model; a second hidden viewport
+        // would repeat the STEP conversion and hold another WebGL context.
+        body.innerHTML = `${modelHeader}<div class="muted" data-model-deferred>3D preview is showing in the Viewer</div>`;
+        renderInspectorAfterViewerCloses();
+        return;
+      }
+      body.innerHTML = `${modelHeader}${modelViewportMarkup("inspector")}`;
       await mountModelViewport(body.querySelector('[data-model-viewport="inspector"]'), preview, "inspector");
       return;
     }
@@ -14669,6 +14689,9 @@ function beginInlineRename(paneName, itemPath = null) {
   if (entry.unavailable) {
     return showToast("Unavailable items cannot be renamed");
   }
+  if (app.inlineRename?.committing && samePath(app.inlineRename.path, entry.path)) {
+    return showToast("Rename in progress");
+  }
   const tab = tabOf(paneName);
   app.activePane = paneName;
   tab.selected = new Set([entry.path]);
@@ -14742,18 +14765,34 @@ async function commitInlineRename(input = null) {
     cancelInlineRename({ status: "Rename unchanged" });
     return;
   }
-  app.inlineRename = { ...rename, value: nextName, committing: true };
+  const sourceParent = parentPathOf(rename.path);
+  const collision = tabOf(paneName).entries.find(
+    (entry) =>
+      !samePath(entry.path, rename.path) &&
+      String(entry.name || "").toLowerCase() === nextName.toLowerCase() &&
+      samePath(parentPathOf(entry.path), sourceParent)
+  );
+  if (collision) {
+    showToast(`An item named ${collision.name} already exists here`);
+    focusInlineRenameInput(false);
+    return;
+  }
+  // Another inline rename may start while this one saves; only touch
+  // app.inlineRename while it still refers to this commit.
+  const committing = { ...rename, value: nextName, committing: true };
+  app.inlineRename = committing;
   setStatus(`Renaming ${rename.originalName}`);
   try {
     const result = await request("/api/rename", {
       method: "POST",
       body: JSON.stringify({ path: rename.path, name: nextName })
     });
-    app.inlineRename = null;
+    if (app.inlineRename === committing) app.inlineRename = null;
     await refreshPane(paneName);
     const renamedPath = renameResultPath(result, rename, nextName);
     await syncStateAndChrome();
-    if (selectRenamedEntryInPane(paneName, renamedPath, nextName, rename.path)) {
+    // Leave selection alone if the user has started renaming something else.
+    if (!app.inlineRename && selectRenamedEntryInPane(paneName, renamedPath, nextName, rename.path)) {
       renderPane(paneName);
       scrollFocusedEntryIntoView(paneName);
     }
@@ -14761,9 +14800,11 @@ async function commitInlineRename(input = null) {
     renderInspector();
     showToast(`Renamed to ${labelForPath(renamedPath)}`);
   } catch (error) {
-    app.inlineRename = { ...rename, value: nextName, committing: false };
-    renderPane(paneName);
-    focusInlineRenameInput(false);
+    if (app.inlineRename === committing) {
+      app.inlineRename = { ...rename, value: nextName, committing: false };
+      renderPane(paneName);
+      focusInlineRenameInput(false);
+    }
     showToast(error.message);
     setStatus("Rename failed");
   }
@@ -14782,15 +14823,26 @@ function cancelAsyncDialogTask(dialogId) {
 
 function beginAsyncDialogTask(dialogId, payload, owner = null, paneName = null) {
   cancelAsyncDialogTask(dialogId);
+  const tab = paneName ? tabOf(paneName) : null;
+  // Pane-bound scans track the tab's location rather than the pane load
+  // counter, so a silent auto-refresh of the same folder does not drop results.
   const task = { dialogId, controller: new AbortController(), payload: JSON.parse(JSON.stringify(payload)), owner,
-    paneName, tab: paneName ? tabOf(paneName) : null, paneRevision: paneName ? app.paneLoads[paneName].id : null };
+    paneName, tab, tabLocation: tab ? { path: tab.path, searchMode: Boolean(tab.searchMode), virtualMode: tab.virtualMode || "" } : null };
   asyncDialogTasks.set(dialogId, task);
   return task;
 }
 
+function asyncDialogTaskPaneCurrent(task) {
+  if (!task.paneName) return true;
+  const tab = tabOf(task.paneName);
+  const location = task.tabLocation;
+  return tab === task.tab && samePath(tab.path, location.path) && Boolean(tab.searchMode) === location.searchMode &&
+    (tab.virtualMode || "") === location.virtualMode;
+}
+
 function ownsAsyncDialogTask(task) {
   return asyncDialogTasks.get(task.dialogId) === task && document.getElementById(task.dialogId)?.open &&
-    !task.controller.signal.aborted && (!task.paneName || (tabOf(task.paneName) === task.tab && app.paneLoads[task.paneName].id === task.paneRevision));
+    !task.controller.signal.aborted && asyncDialogTaskPaneCurrent(task);
 }
 
 async function requestDialogTask(task, url, options) {
@@ -16106,7 +16158,7 @@ function pathDiagnosticTimingText(report) {
 }
 
 function renderPathDiagnostics(report) {
-  app.properties.diagnostics = report;
+  if (app.properties) app.properties.diagnostics = report;
   const status = pathDiagnosticStatus(report);
   const metrics = [
     ["Kind", pathDiagnosticKindText(report)],
@@ -16156,12 +16208,33 @@ function renderPathDiagnostics(report) {
   `;
 }
 
+// Late properties/diagnostics responses must not render into a dialog that was
+// closed or reopened for another selection, or over a newer run's results.
+function beginPropertiesRun(key) {
+  const owner = app.properties;
+  const run = Symbol(key);
+  if (owner) owner[key] = run;
+  return () => app.properties === owner && (!owner || owner[key] === run) &&
+    document.getElementById("properties-dialog")?.open === true;
+}
+
+async function awaitPropertiesRun(isCurrent, promise) {
+  try {
+    const result = await promise;
+    return isCurrent() ? result : null;
+  } catch (error) {
+    if (!isCurrent()) return null;
+    throw error;
+  }
+}
+
 async function runPathDiagnostics() {
   const paneName = app.properties?.paneName || app.activePane;
   const targetPath = app.properties?.paths?.[0] || tabOf(paneName).path;
   if (!targetPath) {
     return showToast("Select a path first");
   }
+  const isCurrent = beginPropertiesRun("diagnosticsRun");
   const output = document.getElementById("properties-diagnostics");
   output.innerHTML = `<div class="path-diagnostic-loading">Diagnosing ${escapeHtml(labelForPath(targetPath))}...</div>`;
   const params = new URLSearchParams({
@@ -16169,7 +16242,8 @@ async function runPathDiagnostics() {
     timeoutMs: "3500",
     sampleLimit: "12"
   });
-  const report = await request(`/api/path/diagnostics?${params}`);
+  const report = await awaitPropertiesRun(isCurrent, request(`/api/path/diagnostics?${params}`));
+  if (!report) return null;
   renderPathDiagnostics(report);
   const status = pathDiagnosticStatus(report);
   setStatus(`Path health ${status.text.toLowerCase()} / ${pathDiagnosticTimingText(report)}`);
@@ -16181,12 +16255,15 @@ async function runPropertiesReport() {
   if (!app.properties?.paths?.length) {
     return showToast("Select an item first");
   }
+  const isCurrent = beginPropertiesRun("reportRun");
   document.getElementById("properties-summary").textContent = "Analyzing...";
-  const report = await request("/api/properties", {
+  const report = await awaitPropertiesRun(isCurrent, request("/api/properties", {
     method: "POST",
     body: JSON.stringify(propertiesPayload())
-  });
+  }));
+  if (!report) return null;
   renderPropertiesReport(report);
+  return report;
 }
 
 async function trashSelected(paneName) {
@@ -16477,7 +16554,9 @@ function duplicateTab(paneName) {
     sortKey: current.sortKey,
     sortDir: current.sortDir,
     viewMode: current.viewMode,
-    searchMode: false,
+    // Search/flat results are copied as-is, so the copy must stay a result tab
+    // instead of claiming those entries are the folder's listing.
+    searchMode: current.searchMode === true,
     virtualMode: current.virtualMode || "",
     virtual: current.virtual ? { ...current.virtual } : null,
     title: current.title,
@@ -16676,11 +16755,26 @@ async function reopenClosedTab(paneName = app.activePane) {
   app.closedTabs = closedTabs.filter((_, index) => index !== recordIndex);
   const targetPane = isPaneName(record.paneName) ? record.paneName : paneName;
   const pane = panes[targetPane];
+  const sourceTab = tabOf(targetPane);
   const insertIndex = Math.min(pane.activeTab + 1, pane.tabs.length);
-  pane.tabs.splice(insertIndex, 0, normalizeSavedTab(record.tab, record.tab.path));
+  const reopenedTab = normalizeSavedTab(record.tab, record.tab.path);
+  pane.tabs.splice(insertIndex, 0, reopenedTab);
   pane.activeTab = insertIndex;
   app.activePane = targetPane;
-  await loadPane(targetPane, record.tab.path, false, { allowLockedNavigation: true });
+  try {
+    const loaded = await loadPane(targetPane, record.tab.path, false, { allowLockedNavigation: true });
+    if (!loaded || tabOf(targetPane) !== reopenedTab) return false;
+  } catch (error) {
+    // Keep the closed-tab record (and its history) so the reopen can be retried.
+    removeTabByIdentity(targetPane, reopenedTab, sourceTab);
+    if (!(app.closedTabs || []).includes(record)) {
+      const restored = [...(app.closedTabs || [])];
+      restored.splice(Math.min(recordIndex, restored.length), 0, record);
+      app.closedTabs = restored.slice(0, 20);
+    }
+    renderPane(targetPane);
+    throw error;
+  }
   showToast(`Reopened ${labelForPath(record.tab.path)}`);
   focusPaneList(targetPane);
   return true;
@@ -17347,7 +17441,7 @@ function applySearchResultToPane(paneName, result, label, options = {}) {
 
 async function runBackgroundSearch(options, label, paneName, task) {
   const response = await requestDialogTask(task, `/api/background-indexes/search?${backgroundSearchParams(options).toString()}`);
-  if (!response || JSON.stringify(searchOptionsFromForm()) !== JSON.stringify(task.payload)) return { canceled: true };
+  if (!response || JSON.stringify(searchOptionsFromForm()) !== task.formKey) return { canceled: true };
   const result = backgroundSearchResultFromResponse(response, options);
   applySearchResultToPane(paneName, result, label);
   if (!result.indexed) {
@@ -17368,6 +17462,9 @@ async function runBackgroundSearch(options, label, paneName, task) {
 async function runAdvancedSearch() {
   const paneName = app.activePane;
   const options = searchOptionsFromForm();
+  // Validation normalizes options in place (sizeBytes, numeric dateDays), so
+  // the staleness check compares fresh form reads against this raw snapshot.
+  const formKey = JSON.stringify(options);
   const validation = searchCriteriaValidation(options);
   if (!validation.valid) {
     document.getElementById("search-summary").textContent = validation.message;
@@ -17377,6 +17474,7 @@ async function runAdvancedSearch() {
   const label = searchCriteriaLabel(options);
   cancelPaneLoad(paneName);
   const task = beginAsyncDialogTask("search-dialog", options, null, paneName);
+  task.formKey = formKey;
   setStatus(`Searching ${label}`);
   if (options.backgroundCache) {
     return runBackgroundSearch(options, label, paneName, task);
@@ -17385,7 +17483,7 @@ async function runAdvancedSearch() {
     method: "POST",
     body: JSON.stringify(options)
   });
-  if (!result || JSON.stringify(searchOptionsFromForm()) !== JSON.stringify(task.payload)) return { canceled: true };
+  if (!result || JSON.stringify(searchOptionsFromForm()) !== task.formKey) return { canceled: true };
   applySearchResultToPane(paneName, result, label);
   setStatus(`${result.entries.length} matches`);
 }

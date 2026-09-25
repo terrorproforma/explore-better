@@ -252,6 +252,12 @@ async function main() {
     evidence.stepViewer = await modelEvidence(page, "viewer", 60000);
     check(checks, "step-worker-renders", evidence.stepViewer.state === "ready" && evidence.stepViewer.meshes >= 1 && evidence.stepViewer.triangles >= 12 && /^STEP\b/.test(evidence.stepViewer.status), JSON.stringify(evidence.stepViewer));
     check(checks, "viewer-replaces-webgl-cleanly", await page.locator('#viewer-body [data-model-viewport="viewer"] canvas').count() === 1, `viewer canvases=${await page.locator('#viewer-body canvas').count()}`);
+    const inspectorDeferred = await page.waitForFunction(
+      () => document.querySelector("#inspector [data-model-deferred]") && !document.querySelector("#inspector canvas"),
+      null,
+      { timeout: 10000 }
+    ).then(() => true, () => false);
+    check(checks, "inspector-defers-model-while-viewer-open", inspectorDeferred, `inspector canvases=${await page.locator("#inspector canvas").count()}`);
     await page.screenshot({ path: screenshotPath, fullPage: true });
 
     await page.locator('[data-close-dialog="viewer-dialog"]').click();
@@ -261,6 +267,8 @@ async function main() {
       { timeout: 5000 }
     );
     check(checks, "viewer-disposes-on-close", await page.locator("#viewer-body canvas").count() === 0, `viewer canvases=${await page.locator("#viewer-body canvas").count()}`);
+    evidence.inspectorAfterViewer = await modelEvidence(page, "inspector", 60000);
+    check(checks, "inspector-restores-model-after-viewer-close", evidence.inspectorAfterViewer.state === "ready" && /^STEP\b/.test(evidence.inspectorAfterViewer.status), JSON.stringify(evidence.inspectorAfterViewer));
     check(checks, "browser-page-errors-clean", pageErrors.length === 0, JSON.stringify(pageErrors));
     check(checks, "browser-console-errors-clean", consoleErrors.length === 0, JSON.stringify(consoleErrors));
     check(checks, "api-failures-clean", apiFailures.length === 0, JSON.stringify(apiFailures));
