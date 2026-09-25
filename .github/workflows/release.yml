@@ -303,7 +303,13 @@ jobs:
           if ($null -eq $release) {
             gh release create $tag --draft --verify-tag --generate-notes --title "Explore Better $tag"
             if ($LASTEXITCODE -ne 0) { throw "Could not create draft release $tag." }
-            $release = Get-Release
+            # A new draft can take a few seconds to appear in the releases listing.
+            $attempts = if ($env:RELEASE_LOOKUP_ATTEMPTS) { [int]$env:RELEASE_LOOKUP_ATTEMPTS } else { 10 }
+            for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+              $release = Get-Release
+              if ($null -ne $release) { break }
+              if ($attempt -lt $attempts) { Start-Sleep -Seconds 3 }
+            }
           }
           if ($null -eq $release -or $release.draft -ne $true) {
             throw "Release $tag is not a verified draft. Refusing to upload assets."
