@@ -183,6 +183,29 @@ async function main() {
       `${evidence.sortDescending.sortText} -> ${evidence.sortAscending.sortText}`
     );
 
+    const nameGrip = page.locator('.pane[data-pane="left"] .file-head [data-column-resize="name"]');
+    const gripBox = await nameGrip.boundingBox();
+    const widthBefore = (await nameHeader.boundingBox())?.width || 0;
+    if (gripBox) {
+      const gripX = gripBox.x + gripBox.width / 2;
+      const gripY = gripBox.y + gripBox.height / 2;
+      await page.mouse.move(gripX, gripY);
+      await page.mouse.down();
+      await page.mouse.move(gripX + 24, gripY, { steps: 4 });
+      await page.mouse.move(gripX + 48, gripY, { steps: 4 });
+      await page.mouse.up();
+      await page.waitForTimeout(120);
+    }
+    evidence.afterColumnResize = await paneState(page);
+    evidence.columnResizeWidth = { before: widthBefore, after: (await nameHeader.boundingBox())?.width || 0 };
+    check(
+      checks,
+      "column-resize-does-not-toggle-sort",
+      Boolean(gripBox) && /↑/.test(evidence.afterColumnResize.sortText) &&
+        Math.abs(evidence.columnResizeWidth.after - evidence.columnResizeWidth.before) > 1,
+      JSON.stringify({ sortText: evidence.afterColumnResize.sortText, width: evidence.columnResizeWidth })
+    );
+
     await page.locator('[data-list="left"]').focus();
     await page.keyboard.press("Control+a");
     evidence.selectAllCount = await selectedCount(page);
@@ -214,6 +237,27 @@ async function main() {
         evidence.maskSelected.selected.every((item) => item.endsWith(".txt")),
       JSON.stringify({ preview: evidence.maskPreview, selected: evidence.maskSelected.selected })
     );
+    await page.locator('[data-close-dialog="select-dialog"]').click();
+
+    await page.locator('[data-list="left"]').focus();
+    await page.keyboard.press("Control+Shift+m");
+    await page.waitForFunction(() => document.getElementById("select-dialog")?.open === true);
+    await page.locator("#select-scope").selectOption("all");
+    await page.locator("#select-size-op").selectOption("less");
+    await page.locator("#select-size-value").fill("10 MB");
+    await page.locator("#select-pattern").fill("*");
+    await page.waitForFunction(() => document.querySelectorAll("#select-preview .select-preview-row").length === 4, null, { timeout: 3000 }).catch(() => {});
+    evidence.sizeMaskPreview = await page.evaluate(() =>
+      [...document.querySelectorAll("#select-preview .select-preview-row")].map((item) => item.textContent.trim())
+    );
+    check(
+      checks,
+      "size-mask-skips-unsized-folders",
+      evidence.sizeMaskPreview.length === 4 && !evidence.sizeMaskPreview.some((item) => item.includes("child-folder")),
+      JSON.stringify(evidence.sizeMaskPreview)
+    );
+    await page.locator("#select-size-op").selectOption("any");
+    await page.locator("#select-size-value").fill("");
     await page.locator('[data-close-dialog="select-dialog"]').click();
 
     const pathInput = page.locator('[data-path-input="left"]');
