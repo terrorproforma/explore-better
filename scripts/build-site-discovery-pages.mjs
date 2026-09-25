@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -249,25 +250,30 @@ function renderPage(page) {
     <meta property="og:type" content="website" />
     <meta property="og:url" content="${canonical}" />
     <meta property="og:image" content="${baseUrl}/assets/workspace.png" />
+    <meta property="og:image:width" content="1440" />
+    <meta property="og:image:height" content="900" />
+    <meta name="twitter:card" content="summary_large_image" />
     <title>${esc(page.title)} - Explore Better</title>
     <link rel="canonical" href="${canonical}" />
     <link rel="alternate" type="text/plain" href="${baseUrl}/llms.txt" title="Explore Better LLM index" />
     <link rel="icon" type="image/svg+xml" href="${prefix}assets/brand-mark.svg" />
     <link rel="icon" type="image/png" href="${prefix}assets/app-icon.png" />
     <link rel="stylesheet" href="${prefix}styles.css" />
+    <script src="${prefix}script.js" defer></script>
     <script type="application/ld+json">${JSON.stringify({
       "@context": "https://schema.org",
       "@graph": [
         { "@type": "SoftwareApplication", "@id": `${baseUrl}/#software`, name: "Explore Better", operatingSystem: "Windows 11 x64", applicationCategory: "UtilitiesApplication" },
-        { "@type": "WebPage", name: page.title, description: page.description, url: canonical, isPartOf: { "@type": "WebSite", name: "Explore Better", url: `${baseUrl}/` }, about: { "@id": `${baseUrl}/#software` } }
+        { "@type": "WebPage", name: page.title, description: page.description, url: canonical, isPartOf: { "@id": `${baseUrl}/#website` }, about: { "@id": `${baseUrl}/#software` } }
       ]
     })}</script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
-    <header class="site-header detail-header">
+    <header class="site-header detail-header" data-header>
       <a class="brand" href="${prefix}" aria-label="Explore Better home"><img src="${prefix}assets/brand-mark.svg" alt="" width="44" height="42" /><span>Explore Better</span></a>
-      <nav class="site-nav" aria-label="Primary navigation"><a href="${prefix}ai-file-manager-windows/">Human + AI</a><a href="${prefix}mcp-file-manager/">MCP server</a><a href="${prefix}integrations/">Integrations</a><a href="${prefix}mcp/">Proof</a></nav>
+      <button class="icon-button nav-toggle" type="button" data-nav-toggle aria-expanded="false" aria-controls="site-nav"><img src="${prefix}assets/icons/menu.svg" alt="" width="20" height="20" /><span class="sr-only">Open navigation</span></button>
+      <nav class="site-nav" id="site-nav" data-nav aria-label="Primary navigation"><a href="${prefix}ai-file-manager-windows/">Human + AI</a><a href="${prefix}mcp-file-manager/">MCP server</a><a href="${prefix}integrations/">Integrations</a><a href="${prefix}mcp/">Proof</a></nav>
       <a class="header-download" href="${prefix}#download"><img src="${prefix}assets/icons/download.svg" alt="" width="18" height="18" /><span>Download</span></a>
     </header>
     <main class="detail-main" id="main">
@@ -285,18 +291,30 @@ for (const page of pages) {
   await fs.writeFile(path.join(directory, "index.html"), renderPage(page), "utf8");
 }
 
-const sitemapUrls = [
-  { path: "", priority: "1.0" },
-  { path: "mcp/", priority: "0.9" },
-  ...pages.map((page) => ({ path: `${page.slug}/`, priority: page.slug === "ai-file-manager-windows" || page.slug === "mcp-file-manager" ? "0.9" : "0.8" }))
-];
+const buildDate = new Date().toISOString().slice(0, 10);
+
+function git(argv) {
+  try {
+    return execFileSync("git", argv, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim();
+  } catch {
+    return "";
+  }
+}
+
+// A page's lastmod is its file's last commit date, or today when the file has uncommitted
+// changes, is untracked, or git history is unavailable.
+function lastModified(urlPath) {
+  const file = path.posix.join("site", urlPath, "index.html");
+  if (git(["status", "--porcelain", "--", file])) return buildDate;
+  return git(["log", "-1", "--format=%cs", "--", file]) || buildDate;
+}
+
+const sitemapUrls = ["", "mcp/", ...pages.map((page) => `${page.slug}/`)];
 const sitemap = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${sitemapUrls.map((item) => `  <url>
-    <loc>${baseUrl}/${item.path}</loc>
-    <lastmod>2026-07-14</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>${item.priority}</priority>
+${sitemapUrls.map((urlPath) => `  <url>
+    <loc>${baseUrl}/${urlPath}</loc>
+    <lastmod>${lastModified(urlPath)}</lastmod>
   </url>`).join("\n")}
 </urlset>
 `;

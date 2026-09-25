@@ -1,6 +1,10 @@
+document.documentElement.classList.add("js");
+
 const header = document.querySelector("[data-header]");
 const nav = document.querySelector("[data-nav]");
 const navToggle = document.querySelector("[data-nav-toggle]");
+// Must match the styles.css breakpoint that shows .nav-toggle (max-width: 820px).
+const desktopNavigation = window.matchMedia("(min-width: 821px)");
 
 function setNavigation(open) {
   nav?.classList.toggle("open", open);
@@ -20,7 +24,13 @@ nav?.querySelectorAll("a").forEach((link) => {
 });
 
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") setNavigation(false);
+  if (event.key !== "Escape" || navToggle?.getAttribute("aria-expanded") !== "true") return;
+  setNavigation(false);
+  navToggle.focus();
+});
+
+desktopNavigation.addEventListener("change", (event) => {
+  if (event.matches) setNavigation(false);
 });
 
 window.addEventListener(
