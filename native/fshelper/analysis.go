@@ -9,8 +9,13 @@ import (
 const analysisTopFileLimit = 1200
 
 type analysisFolder struct {
-	Name      string `json:"name"`
-	Path      string `json:"path"`
+	Name string `json:"name"`
+	// Path is kept for traversal and top-file parents, but only the root row
+	// carries it on the wire (WirePath). Consumers rebuild every other path
+	// from the parent index and name, which keeps summaries for trees with
+	// hundreds of thousands of folders small.
+	Path      string `json:"-"`
+	WirePath  string `json:"path,omitempty"`
 	Parent    int    `json:"parent"`
 	Depth     int    `json:"depth"`
 	Logical   uint64 `json:"logicalBytes"`
@@ -50,7 +55,7 @@ type analysisAccumulator struct {
 func newAnalysisAccumulator(root string, modified int64) *analysisAccumulator {
 	return &analysisAccumulator{
 		Folders: []analysisFolder{{
-			Name: filepath.Base(filepath.Clean(root)), Path: filepath.Clean(root), Parent: -1, Depth: 0, Modified: modified,
+			Name: filepath.Base(filepath.Clean(root)), Path: filepath.Clean(root), WirePath: filepath.Clean(root), Parent: -1, Depth: 0, Modified: modified,
 		}},
 		TopFiles:   make([]analysisFile, 0, analysisTopFileLimit*2),
 		Extensions: make(map[string]*analysisExtension),
@@ -80,6 +85,10 @@ func analysisExtensionFor(name string) string {
 	return extension
 }
 
+// addFile charges one directory entry. Logical bytes are counted per link
+// (every hardlink shows its full size, as Explorer does), while callers pass
+// zero allocated bytes for repeat sightings of a hardlinked file so allocated
+// totals reflect the disk space actually used.
 func (acc *analysisAccumulator) addFile(name string, itemPath string, parent int, logical uint64, allocated uint64, modified int64) {
 	acc.Files++
 	for current := parent; current >= 0; current = acc.Folders[current].Parent {

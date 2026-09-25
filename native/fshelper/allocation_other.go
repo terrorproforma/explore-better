@@ -63,8 +63,8 @@ func browseDirectory(ctx context.Context, root string, maxEntries int, showHidde
 
 func collectTreeEntries(ctx context.Context, root string, maxEntries int) (treeScanMetadata, error) {
 	result := treeScanMetadata{
-		Items:       make([]fileEntry, 0, min(maxEntries, 10000)),
-		FileIndexes: make([]int, 0, min(maxEntries, 10000)),
+		Items:        make([]fileEntry, 0, min(maxEntries, 10000)),
+		QueryIndexes: make([]int, 0, min(maxEntries, 10000)),
 	}
 	err := filepath.WalkDir(root, func(itemPath string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -100,7 +100,7 @@ func collectTreeEntries(ctx context.Context, root string, maxEntries int) (treeS
 			return nil
 		}
 		result.Items = append(result.Items, fileEntry{Name: entry.Name(), Path: itemPath, Logical: info.Size(), Modified: info.ModTime().UnixMilli()})
-		result.FileIndexes = append(result.FileIndexes, len(result.Items)-1)
+		result.QueryIndexes = append(result.QueryIndexes, len(result.Items)-1)
 		result.Files++
 		result.Scanned++
 		result.Logical += uint64(max(info.Size(), 0))

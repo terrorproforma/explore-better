@@ -25,11 +25,28 @@ function run(file, args, options = {}) {
 
 async function main() {
   await fs.mkdir(outputDir, { recursive: true });
-  await run("go", ["build", "-buildvcs=false", "-trimpath", "-ldflags", "-s -w", "-o", outputPath, "."], {
-    cwd: sourceDir,
-    env: { ...process.env, CGO_ENABLED: "0", GOTOOLCHAIN: "go1.25.12", GOOS: process.platform === "win32" ? "windows" : process.platform, GOARCH: "amd64" }
-  });
-  const bytes = await fs.readFile(outputPath);
+  // Build next to the output and rename it into place, so a running helper
+  // never leaves Go's "<name>~" backup behind and a failed build keeps the
+  // previous executable.
+  const candidatePath = path.join(
+    outputDir,
+    `${path.basename(outputPath, path.extname(outputPath))}-${process.pid}.tmp${path.extname(outputPath)}`
+  );
+  let bytes;
+  try {
+    await run("go", ["build", "-buildvcs=false", "-trimpath", "-ldflags", "-s -w", "-o", candidatePath, "."], {
+      cwd: sourceDir,
+      env: { ...process.env, CGO_ENABLED: "0", GOTOOLCHAIN: "go1.25.12", GOOS: process.platform === "win32" ? "windows" : process.platform, GOARCH: "amd64" }
+    });
+    bytes = await fs.readFile(candidatePath);
+    const existing = await fs.readFile(outputPath).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!existing?.equals(bytes)) await fs.rename(candidatePath, outputPath);
+  } finally {
+    await fs.rm(candidatePath, { force: true });
+  }
   const report = {
     generatedAt: new Date().toISOString(),
     path: outputPath,
