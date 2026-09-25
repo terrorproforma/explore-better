@@ -1,6 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
-import { access, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { azureSigningConfig } from "./azure-signing-config.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const electronBuilderCli = path.join(root, "node_modules", "electron-builder", "out", "cli", "cli.js");
@@ -82,8 +84,25 @@ async function assertBuildOutputs() {
   }
 }
 
+// Signing is opt-in (see docs/CODE_SIGNING.md). The signing options are written to a
+// temporary parent configuration that package.json's "build" field extends, so arrays
+// and booleans keep their JSON types and an unconfigured build passes no extra argument.
+async function prepareSigningArguments() {
+  const signing = azureSigningConfig();
+  if (!signing) return { args: [], dir: null };
+  const dir = await mkdtemp(path.join(os.tmpdir(), "eb-signing-config-"));
+  const file = path.join(dir, "electron-builder.signing.json");
+  await writeFile(file, `${JSON.stringify(signing, null, 2)}\n`, "utf8");
+  const { endpoint, codeSigningAccountName, certificateProfileName } = signing.win.azureSignOptions;
+  console.log(`Azure Artifact Signing enabled: account ${codeSigningAccountName}, profile ${certificateProfileName}, endpoint ${endpoint}.`);
+  return { args: [`--config.extends=file:${file}`], dir };
+}
+
 let fallback = null;
+let signingDir = null;
 try {
+  const signingArguments = await prepareSigningArguments();
+  signingDir = signingArguments.dir;
   await assertBuildOutputs();
   fallback = await prepareCollectorFallback();
   const env = { ...process.env };
@@ -91,11 +110,12 @@ try {
     env.npm_config_user_agent = "traversal electron-builder-fallback";
     env.npm_execpath = "traversal";
   }
-  const code = await run(process.execPath, [electronBuilderCli, ...process.argv.slice(2)], { env });
+  const code = await run(process.execPath, [electronBuilderCli, ...process.argv.slice(2), ...signingArguments.args], { env });
   process.exitCode = code;
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 } finally {
   if (fallback?.createdHint) await rm(fallback.hintPath, { force: true });
+  if (signingDir) await rm(signingDir, { recursive: true, force: true });
 }
