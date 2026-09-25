@@ -3349,10 +3349,10 @@ async function runRetryableOperation(type, body, options = {}) {
     return enqueueRetryableOperation(type, body, () => extractZipArchive(body), options);
   }
   if (type === "shortcut-create") {
-    return enqueueRetryableOperation(type, body, () => createWindowsShortcuts(body), options);
+    return enqueueRetryableOperation(type, body, (hooks) => createWindowsShortcuts(body, hooks), options);
   }
   if (type === "link-create") {
-    return enqueueRetryableOperation(type, body, () => createFilesystemLinks(body), options);
+    return enqueueRetryableOperation(type, body, (hooks) => createFilesystemLinks(body, hooks), options);
   }
   if (type === "attributes-set") {
     return enqueueRetryableOperation(type, body, () => applyWindowsAttributes(body), options);
