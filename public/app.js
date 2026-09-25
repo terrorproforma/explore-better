@@ -25161,10 +25161,18 @@ function terminalCreateRequest(tab, session = null, overrides = {}) {
   };
 }
 
+// Mirrors lib/shell-quote.mjs (kept inline so the unbundled app.js fallback still
+// loads as a classic script); scripts/shell-quoting.test.mjs checks they agree.
 function shellQuoteDroppedPath(profileId, value) {
   const pathValue = String(value || "");
-  if (profileId === "command-prompt") return `"${pathValue.replaceAll('"', '""')}"`;
-  return `'${pathValue.replaceAll("'", "''")}'`;
+  if (profileId === "command-prompt") {
+    return pathValue.split("%").map((part) => {
+      const text = part.replaceAll('"', '""');
+      const body = text.replace(/\\+$/, "");
+      return `"${body}"${text.slice(body.length)}`;
+    }).join("^%");
+  }
+  return `'${pathValue.replace(/['\u2018-\u201B]/g, "$&$&")}'`;
 }
 
 function insertDroppedTerminalFiles(session, files) {

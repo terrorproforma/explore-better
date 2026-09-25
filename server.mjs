@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { StringDecoder } from "node:string_decoder";
+import { powerShellLiteral as quotePowerShellLiteral, cmdQuote } from "./lib/shell-quote.mjs";
 import { pathSnapshot, validSnapshot, decodeEditableText, encodeEditableText, readEditableTextFile, assertSafeDestination, physicalPath, insidePath, durableWrite, replaceFileTransaction, sameFileIdentity } from "./filesystem-integrity.mjs";
 
 const require = createRequire(import.meta.url);
@@ -3785,7 +3787,7 @@ if ($errors.Count -gt 0) {
 }
 
 function powerShellLiteral(value) {
-  return `'${String(value ?? "").replaceAll("'", "''")}'`;
+  return quotePowerShellLiteral(value);
 }
 
 async function writeElevatedRetryHelper(payload) {
@@ -10982,6 +10984,17 @@ async function listZipArchive(archivePath, options = {}) {
   };
 }
 
+const powerShellUtf8Prelude = "try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; $OutputEncoding = [Console]::OutputEncoding } catch {}";
+
+// Windows PowerShell 5.1 writes redirected output in the OEM code page; switch
+// it to UTF-8 right after any param() block, which must stay the first statement.
+function powerShellUtf8Output(scriptContent) {
+  const text = String(scriptContent ?? "");
+  const param = text.match(/^\s*param\s*\((?:[^()]|\([^()]*\))*\)/i);
+  const at = param ? param[0].length : 0;
+  return `${text.slice(0, at)}\n${powerShellUtf8Prelude}\n${text.slice(at)}`;
+}
+
 async function runPowerShellPayload(scriptContent, payload, options = {}) {
   const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto
     .randomBytes(3)
@@ -10991,7 +11004,7 @@ async function runPowerShellPayload(scriptContent, payload, options = {}) {
   const payloadPath = path.join(runDir, "payload.json");
   await fs.mkdir(runDir, { recursive: true });
   try {
-    await fs.writeFile(scriptPath, scriptContent, "utf8");
+    await fs.writeFile(scriptPath, `\ufeff${powerShellUtf8Output(scriptContent)}`, "utf8");
     await fs.writeFile(payloadPath, JSON.stringify(payload, null, 2), "utf8");
     const result = await runProcess("powershell.exe", [
       "-NoProfile",
@@ -11011,7 +11024,7 @@ async function runPowerShellPayload(scriptContent, payload, options = {}) {
     }
     return result;
   } finally {
-    await fs.rm(runDir, { recursive: true, force: true });
+    await fs.rm(runDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
   }
 }
 
@@ -18225,31 +18238,43 @@ async function duplicateFiles(options = {}, context = {}) {
   };
 }
 
-function launchExplorer(target, reveal = false) {
-  const item = resolveUserPath(target);
-  const args = reveal ? ["/select,", item] : [item];
-  const child = spawn("explorer.exe", args, {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
+function spawnDetachedStarted(file, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(file, args, {
+      ...options,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve(child);
+    });
   });
-  child.unref();
 }
 
-function launchDetached(file, args = [], cwd = undefined) {
+async function launchExplorer(target, reveal = false) {
+  const item = resolveUserPath(target);
+  const args = reveal ? ["/select,", item] : [item];
+  await spawnDetachedStarted("explorer.exe", args);
+}
+
+function cmdCommandLine(file, args = []) {
+  return [file, ...args].map(cmdQuote).join(" ");
+}
+
+async function launchDetached(file, args = [], cwd = undefined) {
   const lowerFile = String(file || "").toLowerCase();
   const isBatchFile = lowerFile.endsWith(".cmd") || lowerFile.endsWith(".bat");
-  const launchFile = isBatchFile ? "cmd.exe" : file;
-  const launchArgs = isBatchFile
-    ? ["/d", "/s", "/c", [file, ...args].map((item) => `"${String(item).replaceAll('"', '""')}"`).join(" ")]
-    : args;
-  const child = spawn(launchFile, launchArgs, {
-    cwd,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  child.unref();
+  if (isBatchFile) {
+    await spawnDetachedStarted("cmd.exe", ["/d", "/s", "/c", `"${cmdCommandLine(file, args)}"`], {
+      cwd,
+      windowsVerbatimArguments: true
+    });
+  } else {
+    await spawnDetachedStarted(file, args, { cwd });
+  }
   return {
     file,
     args,
@@ -18333,13 +18358,21 @@ async function openWithTerminal(targetPath) {
 $Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Dir = $Payload.dir
 if (Get-Command wt.exe -ErrorAction SilentlyContinue) {
-  Start-Process wt.exe -ArgumentList @("-d", $Dir)
+  Start-Process wt.exe -ArgumentList ([string]$Payload.wtArguments)
 } else {
   Start-Process powershell.exe -WorkingDirectory $Dir
 }
 `;
-  await runPowerShellPayload(script, { dir });
+  await runPowerShellPayload(script, { dir, wtArguments: windowsTerminalDirectoryArguments(dir) }, { timeoutMs: 15_000 });
   return { mode: "terminal", path: item, cwd: dir };
+}
+
+// Start-Process joins -ArgumentList without quoting, so build wt's command line
+// here: ; separates wt subcommands unless escaped, and trailing backslashes are
+// doubled so they do not escape the closing quote.
+function windowsTerminalDirectoryArguments(dir) {
+  const escaped = String(dir).replaceAll(";", "\\;").replace(/(\\+)$/, "$1$1");
+  return `-d "${escaped}"`;
 }
 
 async function openWithLaunch(body) {
@@ -18352,15 +18385,15 @@ async function openWithLaunch(body) {
     throw new Error("Select something to open first.");
   }
   if (mode === "default") {
-    const launched = paths.map((item) => {
-      launchExplorer(item, false);
+    const launched = await Promise.all(paths.map(async (item) => {
+      await launchExplorer(item, false);
       return { mode, path: item, file: "explorer.exe", args: [item] };
-    });
+    }));
     return { launched };
   }
   if (mode === "reveal") {
     const item = paths[0];
-    launchExplorer(item, true);
+    await launchExplorer(item, true);
     return { launched: [{ mode, path: item, file: "explorer.exe", args: ["/select,", item] }] };
   }
   if (mode === "terminal") {
@@ -18373,10 +18406,10 @@ async function openWithLaunch(body) {
     const tokens = splitArgumentTemplate(argsTemplate);
     const launchTogether = tokens.includes("{paths}");
     const targets = launchTogether ? [paths[0]] : paths;
-    const launched = targets.map((targetPath) => {
+    const launched = await Promise.all(targets.map(async (targetPath) => {
       const args = buildOpenWithArgs(argsTemplate, targetPath, paths);
-      return { mode, path: targetPath, ...launchDetached(appPath, args, cwd) };
-    });
+      return { mode, path: targetPath, ...(await launchDetached(appPath, args, cwd)) };
+    }));
     return { launched };
   }
   throw new Error("Unsupported open-with mode.");
@@ -18663,7 +18696,7 @@ $Text = [string]$Payload.text
 Set-Clipboard -Value $Text
 Write-Output $Text.Length
 `;
-  await runPowerShellPayload(script, { text: value });
+  await runPowerShellPayload(script, { text: value }, { timeoutMs: clipboardPowerShellTimeoutMs });
   return {
     chars: value.length,
     lines: value ? value.split(/\r\n|\r|\n/).length : 0
@@ -18712,6 +18745,8 @@ public static class EBClipboard {
 '@`;
 }
 
+const clipboardPowerShellTimeoutMs = 15_000;
+
 async function writeClipboardFiles(body = {}) {
   const paths = await resolveClipboardFilePaths(body.paths);
   const mode = normalizeClipboardFileMode(body.mode);
@@ -18757,7 +18792,7 @@ while ($true) {
   sequence = [EBClipboard]::GetClipboardSequenceNumber()
 } | ConvertTo-Json -Compress
 `;
-  const result = await runPowerShellPayload(script, { paths, mode }, { sta: true });
+  const result = await runPowerShellPayload(script, { paths, mode }, { sta: true, timeoutMs: clipboardPowerShellTimeoutMs });
   const parsed = parsePowerShellJson(result, {});
   return {
     paths,
@@ -18813,7 +18848,7 @@ if ($Changed -and $Attempts -ge 8) { throw "Clipboard changed while reading it. 
   sequence = $Sequence
 } | ConvertTo-Json -Compress
 `;
-  const result = await runPowerShellPayload(script, {}, { sta: true });
+  const result = await runPowerShellPayload(script, {}, { sta: true, timeoutMs: clipboardPowerShellTimeoutMs });
   const parsed = parsePowerShellJson(result, {});
   const paths = Array.isArray(parsed.paths)
     ? parsed.paths.map((item) => String(item || "")).filter(Boolean)
@@ -18849,7 +18884,7 @@ try {
   [pscustomobject]@{ cleared = $Matches; sequence = [EBClipboard]::GetClipboardSequenceNumber() } | ConvertTo-Json -Compress
 } finally { [void][EBClipboard]::CloseClipboard() }
 `;
-  const result = await runPowerShellPayload(script, { expectedSequence }, { sta: true });
+  const result = await runPowerShellPayload(script, { expectedSequence }, { sta: true, timeoutMs: clipboardPowerShellTimeoutMs });
   return parsePowerShellJson(result, { cleared: false });
 }
 
@@ -18870,13 +18905,53 @@ function pathExistsSync(target) {
   return Boolean(target) && existsSync(target);
 }
 
+function killProcessTree(child) {
+  if (process.platform === "win32" && child.pid) {
+    try {
+      const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      killer.once("error", () => {
+        try {
+          child.kill();
+        } catch {}
+      });
+      return;
+    } catch {}
+  }
+  try {
+    child.kill();
+  } catch {}
+}
+
+function boundedOutputCollector(limit) {
+  const chunks = [];
+  let bytes = 0;
+  let truncated = false;
+  return {
+    push(chunk) {
+      if (bytes >= limit) {
+        truncated = true;
+        return;
+      }
+      const piece = chunk.length > limit - bytes ? chunk.subarray(0, limit - bytes) : chunk;
+      truncated ||= piece.length < chunk.length;
+      chunks.push(piece);
+      bytes += piece.length;
+    },
+    text() {
+      const value = Buffer.concat(chunks, bytes).toString("utf8");
+      return truncated ? `${value}\n[output truncated]` : value;
+    }
+  };
+}
+
 function runProcess(file, args, options = {}) {
   return new Promise((resolve) => {
-    const child = spawn(file, args, { windowsHide: true });
-    let stdout = "";
-    let stderr = "";
+    const maxOutputBytes = Number(options.maxOutputBytes) > 0 ? Number(options.maxOutputBytes) : 64 * 1024 * 1024;
+    const stdout = boundedOutputCollector(maxOutputBytes);
+    const stderr = boundedOutputCollector(maxOutputBytes);
     let settled = false;
     let timeout = null;
+    let child;
     const finish = (result) => {
       if (settled) {
         return;
@@ -18885,39 +18960,41 @@ function runProcess(file, args, options = {}) {
       if (timeout) {
         clearTimeout(timeout);
       }
-      resolve(result);
+      resolve({ ...result, stdout: stdout.text(), stderr: result.stderr ?? stderr.text() });
     };
+    try {
+      child = spawn(file, args, { windowsHide: true });
+    } catch (error) {
+      finish({ code: -1, stderr: error.message });
+      return;
+    }
     const timeoutMs = Number(options.timeoutMs || 0);
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timeout = setTimeout(() => {
-        try {
-          child.kill();
-        } catch {}
-        finish({ code: -1, stdout, stderr, timedOut: true });
+        killProcessTree(child);
+        finish({ code: -1, timedOut: true });
       }, timeoutMs);
       timeout.unref?.();
     }
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.on("error", (error) => {
-      finish({ code: -1, stdout, stderr: error.message });
+      finish({ code: -1, stderr: error.message });
     });
+    child.on("close", (code) => {
+      finish({ code });
+    });
+    // A grandchild that inherited the pipes can hold them open after exit.
     child.on("exit", (code) => {
-      finish({ code, stdout, stderr });
+      setTimeout(() => finish({ code }), processCloseGraceMs).unref?.();
     });
   });
 }
 
+const processCloseGraceMs = 2000;
+
 function shellQuote(value, kind) {
-  const text = String(value ?? "");
-  if (kind === "cmd") {
-    return `"${text.replaceAll('"', '""')}"`;
-  }
-  return `'${text.replaceAll("'", "''")}'`;
+  return kind === "cmd" ? cmdQuote(value) : quotePowerShellLiteral(value);
 }
 
 function applyCommandTemplate(commandText, commandKind, context) {
@@ -18986,32 +19063,41 @@ async function runExternalCommand(savedCommand, context) {
   const file = command.kind === "cmd" ? "cmd.exe" : "powershell.exe";
   const args =
     command.kind === "cmd"
-      ? ["/d", "/s", "/c", rendered]
-      : ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", rendered];
+      ? ["/d", "/s", "/c", `"${rendered}"`]
+      : ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `${powerShellUtf8Prelude}\n${rendered}`];
 
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, {
-      cwd: context.cwd,
-      env,
-      windowsHide: true
-    });
+    let child;
+    try {
+      child = spawn(file, args, {
+        cwd: context.cwd,
+        env,
+        windowsHide: true,
+        windowsVerbatimArguments: command.kind === "cmd"
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
     let stdout = "";
     let stderr = "";
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     let settled = false;
     const timeout = setTimeout(() => {
       if (settled) {
         return;
       }
       settled = true;
-      child.kill();
+      killProcessTree(child);
       reject(new Error(`Command timed out after 60 seconds: ${command.name}`));
     }, 60_000);
 
     child.stdout.on("data", (chunk) => {
-      stdout = limitedAppend(stdout, chunk);
+      stdout = limitedAppend(stdout, stdoutDecoder.write(chunk));
     });
     child.stderr.on("data", (chunk) => {
-      stderr = limitedAppend(stderr, chunk);
+      stderr = limitedAppend(stderr, stderrDecoder.write(chunk));
     });
     child.on("error", (error) => {
       if (settled) {
@@ -19021,12 +19107,14 @@ async function runExternalCommand(savedCommand, context) {
       clearTimeout(timeout);
       reject(error);
     });
-    child.on("exit", (code) => {
+    const finish = (code) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timeout);
+      stdout = limitedAppend(stdout, stdoutDecoder.end());
+      stderr = limitedAppend(stderr, stderrDecoder.end());
       const result = {
         commandId: command.id,
         name: command.name,
@@ -19044,7 +19132,12 @@ async function runExternalCommand(savedCommand, context) {
         error.details = result;
         reject(error);
       }
+    };
+    child.on("exit", (code) => {
+      // Wait for buffered output; a detached grandchild may keep the pipes open.
+      setTimeout(() => finish(code), processCloseGraceMs).unref?.();
     });
+    child.on("close", (code) => finish(code));
   });
 }
 
@@ -21206,7 +21299,7 @@ async function handleApi(req, res, url) {
 
   if (route === "POST /api/open") {
     const body = await readJson(req);
-    launchExplorer(body.path, Boolean(body.reveal));
+    await launchExplorer(body.path, Boolean(body.reveal));
     return sendJson(res, 200, { ok: true });
   }
 
