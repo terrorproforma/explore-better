@@ -2,7 +2,7 @@
 
 Every cut matches the website's ink, fluorescent lime and off-white palette, Bahnschrift/Aptos typography and mono proof labels. All product footage is one continuous recording of the real Electron app; nothing in the UI is mocked.
 
-## Current website cut: v6
+## Current website cut: v7 (beat-synced to the D3 score)
 
 ```powershell
 cd path\to\explore-better
@@ -10,7 +10,37 @@ npm run build:renderer          # the capture launches the local app bundle
 cd demo-video-v2
 npm install
 npm run capture                 # records the real app (about two minutes)
-npm run render:v6               # master, silent cut, score, web assets, review files
+npm run render:music -- D3      # only if output/music-v7/explore-better-music-D3.wav is missing
+npm run render:v7               # picture, D3 mux, web assets, sync-check sheets, manifest
+```
+
+v7 keeps the v6 story, copy, chapters (`chapters-v6.json`, unchanged: the chapter cuts were already the score's downbeats), title card and end card, and re-cuts the picture to the D3 beat map (`music/beatmap-D3.json`).
+
+- **Retimed footage.** `src/v7-edit.mjs` gives every chapter the exact length of its beat-map section. Each clip plays through a piecewise-linear time map. Its anchors pin real on-screen moments to the grid: a key press opening a dialog, a click, search results landing, the treemap drawing, a copy completing, the refused-rename toast, the pane following the terminal, each Codex tool call, and the audit log opening. A small dynamic program picks a beat, bar or hit for every anchor. It keeps playback between 0.5× and 2.5× and moves each moment as little as possible from where the recording puts it. Clips are never blended, so each output frame is a real recorded frame.
+- **The frame that matters.** A capture marker is logged when the script acts, and the screen changes a few frames later. `render-v7.mjs` measures per-frame luminance change in the capture (`output/v7-capture-motion.json`), so an anchor lands the visible change on the hit, not the keystroke.
+- **What lands where.** The payoff of each chapter, marked `strongest`, takes that chapter's strongest accent. Hits are ranked by strength × kind weight, with drop and impact above stab, stab above kick accent, and kick accent above clap. Keycaps (Ctrl+P, Enter, Ctrl+A, F5, F2, Shift+F10, each ↓), clicks and cuts inside a chapter land on beats, and the copy progress cut lands on a bar line. Caption panels slam in on each chapter's downbeat, with their proof chips on the following beats. Camera pushes start on bar lines or anchors and peak on the accent they aim at. The Codex rows and the "revealed" banner land on beats.
+- **Transitions.** Drops after a silent stop get a 3-frame luminance lift and a 4.5% scale punch. Stab and impact cuts get the lime edge flash and a 3% punch. During each free-time stop the picture freezes on the last frame and dims slowly until the drop.
+- **Beat-reactive accents.** A 2% pulse on kick accents in the high-energy sections, and a 2.8% punch on reveals. There are none in the safety breakdown, during stops, or next to a cut that already punches.
+- **Re-scoring.** `npm run render:v7 -- --beatmap music/beatmap-D2.json` re-syncs the same plan to another score. `--plan` prints the solved anchors and speeds without rendering. `--stills 258,351` renders review frames to `output/review-v7/`. The helpers (`createMusicGrid(...).snap(time, "beat" | "bar" | "hit:<kind>")`, `nearestStrongHit(time, window)`) are exported for other cuts.
+
+The score is the D3 WAV master named in the beat map. Its SHA-256 is checked, and it is muxed as AAC 192 kbps at 48 kHz.
+
+**Sync check (required review).** Each render writes:
+
+- `output/review-v7/sync-hits.jpg`: frames rendered exactly on every impact, drop, stop and stab ≥ 0.7, labelled with the hit kind and the edit events anchored there.
+- `output/review-v7/sync-timeline.png`: the D3 waveform with beats and bars, lanes for cuts and transitions, captions, keycaps, reveals, pulses and stops, and a table of every anchor with its offset from the grid. "Measured" is where the rendered picture actually changes near the anchor.
+- `output/manifest-v7.json`: the same data plus clip time maps, speeds, loudness, sizes and hashes.
+
+Offsets come only from rounding to the 30 fps frame grid, so they stay within half a frame (±16.7 ms).
+
+**Outputs:** `output/explore-better-demo-v7-1080p.mp4` (master, D3 audio), `output/explore-better-demo-v7-silent.mp4`, `output/explore-better-demo-v7.vtt`, `output/explore-better-v7-contact-sheet.jpg`, `output/explore-better-v7-poster.png`. On the site, `site/assets/explore-better-demo.mp4` is two-pass H.264 at 1600×900, yuv420p with faststart and AAC 192 kbps, under 9 MB. `site/assets/explore-better-demo-poster.webp` is under 120 KB.
+
+The capture now also records every pointer click (`clicks` in `capture/capture-manifest.json`) and the `disk-scanned`, `terminal-enter`, `terminal-cd` and `terminal-cat` markers. v6 ignores them.
+
+## v6 (story, copy and chapters reused by v7)
+
+```powershell
+npm run render:v6               # master, silent cut, original industrial score, web assets
 ```
 
 v6 is a product-led cut of about 56 seconds at 1920×1080 and 30 fps. Each chapter opens on the user outcome, and the burned-in kinetic captions tell the whole story with the sound off, which matters because the site player autoplays muted. Keycaps show every shortcut on screen.
@@ -43,7 +73,7 @@ If `codex` is on `PATH` (or `CODEX_CLI_PATH` is set), the capture runs `codex ex
 - `output/explore-better-demo-v6.vtt`: WebVTT captions that mirror the burned-in text.
 - `output/explore-better-v6-contact-sheet.jpg`, `output/explore-better-v6-poster.png`: review files.
 - `output/manifest-v6.json`: chapters, captions, clip sources, AI evidence, loudness, sizes and SHA-256 hashes.
-- `site/assets/explore-better-demo.mp4`: two-pass H.264 at 1600×900 with faststart and yuv420p, kept under 8 MB.
+- `site/assets/explore-better-demo.mp4`: two-pass H.264 at 1600×900 with faststart and yuv420p, kept under 8 MB. (Running `render:v6` overwrites the site assets with the v6 cut and its industrial score.)
 - `site/assets/explore-better-demo-poster.webp`: 1600×900, kept under 120 KB.
 - `chapters-v6.json` (tracked): chapter titles and start times for the website's chapter list.
 
@@ -98,7 +128,7 @@ npm run render:music            # current candidates D2 and D3, about 40 seconds
 npm run render:music -- D E     # any subset of A B C D E D2 D3; earlier rounds kept for reference
 ```
 
-This replaces only the soundtrack. It reads `chapters-v6.json` and the published picture `site/assets/explore-better-demo.mp4`, then writes fully arranged and mastered scores. Each one is muxed onto that picture with `-c:v copy`, so the video stream stays bit-identical. Nothing in `site/assets` is changed. The owner picks a candidate before the site MP4 is replaced and the picture is re-cut to its beat map.
+This replaces only the soundtrack. It reads `chapters-v6.json` and the published picture `site/assets/explore-better-demo.mp4`, then writes fully arranged and mastered scores. Each one is muxed onto that picture with `-c:v copy`, so the video stream stays bit-identical. Nothing in `site/assets` is changed. The owner picked D3, and v7 re-cuts the picture to its beat map (see above). Note that the preview cuts reuse whatever picture is currently published, which is now v7.
 
 **Current candidates: D2 and D3 (overhauled club techno).** The owner preferred D, so D2 rebuilds it with real production techniques. D3 adds E's cinematic drama to D2's club groove. Both keep D's form and tempo map (128 BPM, free-time stops before the disk and transfer cuts, every cut on a downbeat) and master to −14 LUFS. The master uses a peak-to-loudness ratio (PLR) of about 8.5 dB, a density typical of techno, which puts peaks near −5 dBTP. They are mono below 120 Hz.
 

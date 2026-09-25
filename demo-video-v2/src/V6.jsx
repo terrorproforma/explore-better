@@ -12,22 +12,22 @@ import {
 } from "remotion";
 
 // Brand tokens shared with site/styles.css (--ink, --acid, --paper).
-const ink = "#111715";
-const lime = "#c7ff4a";
-const paper = "#f4f7f5";
-const muted = "#c8cfca";
-const display = 'Bahnschrift, "Aptos Display", "Segoe UI", sans-serif';
-const body = 'Aptos, "Segoe UI", sans-serif';
-const mono = '"Cascadia Mono", Consolas, monospace';
-const W = 1920;
-const H = 1080;
-const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" };
-const smooth = Easing.bezier(0.45, 0, 0.2, 1);
+export const ink = "#111715";
+export const lime = "#c7ff4a";
+export const paper = "#f4f7f5";
+export const muted = "#c8cfca";
+export const display = 'Bahnschrift, "Aptos Display", "Segoe UI", sans-serif';
+export const body = 'Aptos, "Segoe UI", sans-serif';
+export const mono = '"Cascadia Mono", Consolas, monospace';
+export const W = 1920;
+export const H = 1080;
+export const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" };
+export const smooth = Easing.bezier(0.45, 0, 0.2, 1);
 
-const rise = (frame, start, length = 14) => interpolate(frame, [start, start + length], [0, 1], { ...clamp, easing: Easing.out(Easing.cubic) });
-const fall = (frame, start, length = 12) => interpolate(frame, [start, start + length], [1, 0], { ...clamp, easing: Easing.in(Easing.cubic) });
+export const rise = (frame, start, length = 14) => interpolate(frame, [start, start + length], [0, 1], { ...clamp, easing: Easing.out(Easing.cubic) });
+export const fall = (frame, start, length = 12) => interpolate(frame, [start, start + length], [1, 0], { ...clamp, easing: Easing.in(Easing.cubic) });
 
-function cameraAt(cam, frame) {
+export function cameraAt(cam, frame) {
   if (cam.length === 1 || frame <= cam[0].f) return cam[0];
   for (let index = 1; index < cam.length; index += 1) {
     const a = cam[index - 1];
@@ -82,7 +82,7 @@ function Stage({ edit }) {
   ));
 }
 
-function Mark({ size = 54, label = 25 }) {
+export function Mark({ size = 54, label = 25 }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
       <Img src={staticFile("brand-mark.svg")} style={{ width: size, height: size, display: "block" }} />
@@ -91,12 +91,12 @@ function Mark({ size = 54, label = 25 }) {
   );
 }
 
-function Words({ text, frame, start, stagger = 2.4, style }) {
+export function Words({ text, frame, start, stagger = 2.4, length = 13, style }) {
   const words = text.split(" ");
   return (
     <div style={style}>
       {words.map((word, index) => {
-        const p = rise(frame, start + index * stagger, 13);
+        const p = rise(frame, start + index * stagger, length);
         return (
           <span key={`${word}-${index}`} style={{ display: "inline-block", overflow: "hidden", verticalAlign: "top", paddingBottom: "0.08em", marginRight: "0.24em" }}>
             <span style={{ display: "inline-block", transform: `translateY(${(1 - p) * 105}%)`, opacity: p }}>{word}</span>
@@ -107,7 +107,7 @@ function Words({ text, frame, start, stagger = 2.4, style }) {
   );
 }
 
-function Chip({ children, solid, opacity }) {
+export function Chip({ children, solid, opacity }) {
   return (
     <div style={{
       padding: "9px 12px 8px",
@@ -125,7 +125,7 @@ function Chip({ children, solid, opacity }) {
   );
 }
 
-const slots = {
+export const slots = {
   bottomRight: { right: 64, bottom: 72, width: 790 },
   bottomLeft: { left: 64, bottom: 72, width: 820 },
   topRight: { right: 64, top: 104, width: 790 },
@@ -219,12 +219,16 @@ function KeyCaps({ edit }) {
   });
 }
 
-function AiPanel({ ai }) {
+export function AiPanel({ ai }) {
   const frame = useCurrentFrame();
   const enter = rise(frame, 4, 16);
   const exit = fall(frame, ai.duration - 12, 12);
   const lastRow = ai.rows.at(-1);
-  const done = lastRow ? rise(frame, lastRow.at - ai.from + 12, 12) : 0;
+  // v7 pins the banner to a beat (ai.doneAt); v6 shows it 12 frames after the last call.
+  const doneStart = ai.doneAt !== undefined ? ai.doneAt - ai.from : lastRow ? lastRow.at - ai.from + 12 : null;
+  // v7 (ai.onBeat) starts each entrance a frame early so it is already visible on its beat.
+  const lead = ai.onBeat ? 1 : 0;
+  const done = doneStart === null ? 0 : rise(frame, doneStart - lead, ai.onBeat ? 4 : 12);
   return (
     <div style={{
       position: "absolute",
@@ -247,7 +251,7 @@ function AiPanel({ ai }) {
         <div style={{ marginTop: 8, padding: "13px 15px", background: "#17201c", borderRadius: 4, fontFamily: body, fontSize: 22, lineHeight: 1.25 }}>{ai.task}</div>
         <div style={{ marginTop: 14 }}>
           {ai.rows.map((row) => {
-            const p = rise(frame, row.at - ai.from, 10);
+            const p = rise(frame, row.at - ai.from - lead, ai.onBeat ? 4 : 10);
             return (
               <div key={row.tool} style={{ padding: "12px 0", borderTop: "1px solid rgba(244,247,245,.14)", opacity: p, transform: `translateY(${(1 - p) * 10}px)` }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -271,23 +275,27 @@ function AiPanel({ ai }) {
   );
 }
 
-function Hero({ total }) {
+// Default timings are the v6 cut's; v7 passes frames taken from the score's beat grid.
+const heroTiming = { eyebrow: 2, headline: 4, tagline: 26, fadeOut: 12, version: "0.2.7" };
+
+export function Hero({ total, timing }) {
   const frame = useCurrentFrame();
-  const panel = rise(frame, 0, 14) * fall(frame, total - 12, 12);
+  const t = { ...heroTiming, ...timing };
+  const panel = rise(frame, 0, 14) * fall(frame, total - t.fadeOut, t.fadeOut);
   return (
     <AbsoluteFill style={{ pointerEvents: "none" }}>
       <AbsoluteFill style={{ background: "linear-gradient(90deg, rgba(17,23,21,.97) 0%, rgba(17,23,21,.94) 56%, rgba(17,23,21,.45) 78%, rgba(17,23,21,.12) 100%)", opacity: panel }} />
       <div style={{ position: "absolute", left: 84, top: 70, opacity: panel }}><Mark /></div>
       <div style={{ position: "absolute", left: 84, top: 300, width: 1160, opacity: panel }}>
-        <div style={{ color: lime, fontFamily: mono, fontWeight: 700, fontSize: 20, letterSpacing: "0.12em", opacity: rise(frame, 2, 12) }}>REAL APP FOOTAGE / v0.2.7 / WINDOWS 11</div>
+        <div style={{ color: lime, fontFamily: mono, fontWeight: 700, fontSize: 20, letterSpacing: "0.12em", opacity: rise(frame, t.eyebrow, 12) }}>REAL APP FOOTAGE / v{t.version} / WINDOWS 11</div>
         <Words
           text="The Windows file manager built for humans and AI."
           frame={frame}
-          start={4}
+          start={t.headline}
           stagger={2.2}
           style={{ marginTop: 24, color: paper, fontFamily: display, fontWeight: 800, fontSize: 104, lineHeight: 0.95, letterSpacing: "-0.055em" }}
         />
-        <div style={{ marginTop: 30, width: 900, color: muted, fontFamily: display, fontWeight: 700, fontSize: 30, lineHeight: 1.2, opacity: rise(frame, 26, 14) }}>
+        <div style={{ marginTop: 30, width: 900, color: muted, fontFamily: display, fontWeight: 700, fontSize: 30, lineHeight: 1.2, opacity: rise(frame, t.tagline, 14) }}>
           Fast for you. Safe with your files. Scoped for your AI.
         </div>
       </div>
@@ -295,7 +303,7 @@ function Hero({ total }) {
   );
 }
 
-function ChapterRail({ edit }) {
+export function ChapterRail({ edit }) {
   const frame = useCurrentFrame();
   const chapters = edit.chapters.filter((chapter) => chapter.id !== "open");
   const first = chapters[0].startFrame;
@@ -315,28 +323,32 @@ function ChapterRail({ edit }) {
   );
 }
 
-function EndCard({ total }) {
+const endTiming = { background: 12, mark: 4, markLength: 12, headline: 8, cta: 22, footer: 28, recap: 30 };
+
+export function EndCard({ total, timing }) {
   const frame = useCurrentFrame();
-  const bg = rise(frame, 0, 12);
+  const t = { ...endTiming, ...timing };
+  const bg = rise(frame, 0, t.background);
   const recap = ["Filtered search", "Exact disk map", "Transactional copy", "Safe rename", "Keyboard menus", "Terminal", "Live AI context", "Scoped AI access"];
   const out = fall(frame, total - 8, 8);
+  const mark = rise(frame, t.mark, t.markLength);
   return (
     <AbsoluteFill style={{ background: `rgba(17,23,21,${0.55 + 0.4 * bg})`, color: paper, padding: "0 110px", justifyContent: "center", opacity: out }}>
-      <div style={{ opacity: rise(frame, 4, 12), transform: `translateY(${(1 - rise(frame, 4, 12)) * 20}px)` }}><Mark size={64} label={30} /></div>
+      <div style={{ opacity: mark, transform: `translateY(${(1 - mark) * 20}px)` }}><Mark size={64} label={30} /></div>
       <Words
         text="The Windows file manager built for humans and AI."
         frame={frame}
-        start={8}
+        start={t.headline}
         stagger={1.8}
         style={{ marginTop: 44, width: 1000, fontFamily: display, fontWeight: 800, fontSize: 84, lineHeight: 0.96, letterSpacing: "-0.052em" }}
       />
-      <div style={{ display: "flex", alignItems: "center", gap: 22, marginTop: 38, opacity: rise(frame, 22, 12) }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 22, marginTop: 38, opacity: rise(frame, t.cta, 12) }}>
         <div style={{ background: lime, color: ink, padding: "18px 26px", borderRadius: 5, fontFamily: display, fontWeight: 800, fontSize: 24 }}>Download for Windows</div>
         <div style={{ color: paper, fontFamily: mono, fontSize: 21 }}>terrorproforma.github.io/explore-better</div>
       </div>
-      <div style={{ marginTop: 22, color: lime, fontFamily: mono, fontSize: 17, fontWeight: 700, letterSpacing: "0.1em", opacity: rise(frame, 28, 12) }}>FREE / OPEN SOURCE / WINDOWS 11 / LOCAL-FIRST</div>
+      <div style={{ marginTop: 22, color: lime, fontFamily: mono, fontSize: 17, fontWeight: 700, letterSpacing: "0.1em", opacity: rise(frame, t.footer, 12) }}>FREE / OPEN SOURCE / WINDOWS 11 / LOCAL-FIRST</div>
       <div style={{ position: "absolute", left: 110, right: 110, bottom: 74, display: "flex", flexWrap: "wrap", gap: "10px 26px", color: muted, fontFamily: mono, fontSize: 15, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-        {recap.map((item, index) => <span key={item} style={{ opacity: rise(frame, 30 + index * 2, 10) }}>{String(index + 1).padStart(2, "0")} {item}</span>)}
+        {recap.map((item, index) => <span key={item} style={{ opacity: rise(frame, t.recap + index * 2, 10) }}>{String(index + 1).padStart(2, "0")} {item}</span>)}
       </div>
     </AbsoluteFill>
   );
