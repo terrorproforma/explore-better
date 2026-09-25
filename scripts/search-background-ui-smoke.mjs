@@ -120,6 +120,10 @@ async function prepareFixture() {
   await fs.writeFile(labelledPath, "ordinary labelled cache target\n", "utf8");
   await fs.writeFile(contentPath, "The normal Search dialog should find obsidian invoice from the warm cache.\n", "utf8");
   await fs.writeFile(otherContentPath, "This other root also says obsidian invoice and must stay scoped out.\n", "utf8");
+  const filterLargePath = path.join(fixture, "filter-target-large.txt");
+  const filterSmallPath = path.join(fixture, "filter-target-small.txt");
+  await fs.writeFile(filterLargePath, `${"size filter payload ".repeat(256)}\n`, "utf8");
+  await fs.writeFile(filterSmallPath, "tiny\n", "utf8");
   await fs.writeFile(
     statePath,
     JSON.stringify(
@@ -141,7 +145,43 @@ async function prepareFixture() {
     ),
     "utf8"
   );
-  return { labelledPath, contentPath, otherContentPath };
+  return { labelledPath, contentPath, otherContentPath, filterLargePath, filterSmallPath };
+}
+
+async function runFilteredSearch(page, label, settings, expected) {
+  await page.locator("#search-background-cache").setChecked(settings.backgroundCache);
+  await page.locator("#search-name").fill("filter-target");
+  await page.locator("#search-content").fill("");
+  await page.locator("#search-size-op").selectOption(settings.sizeOp || "any");
+  await page.locator("#search-size-value").fill(settings.sizeValue || "");
+  await page.locator("#search-date-op").selectOption(settings.dateOp || "any");
+  await page.locator("#search-date-days").fill(settings.dateDays || "");
+  await page.locator('#search-form button[type="submit"]').click();
+  return waitForResult(
+    page,
+    ({ include, exclude }) => {
+      const summary = document.getElementById("search-summary")?.textContent?.trim() || "";
+      const rows = [...document.querySelectorAll("#search-results [data-search-path]")].map(
+        (row) => row.getAttribute("data-search-path") || ""
+      );
+      const paneRows = [...document.querySelectorAll('.pane[data-pane="left"] [data-entry-path]')].map(
+        (row) => row.getAttribute("data-entry-path") || ""
+      );
+      return {
+        ok:
+          /\bmatch(es)?\b/i.test(summary) &&
+          include.every((item) => rows.includes(item) && paneRows.includes(item)) &&
+          !exclude.some((item) => rows.includes(item)),
+        summary,
+        status: document.getElementById("status-pill")?.textContent?.trim() || "",
+        rowCount: rows.length,
+        rows
+      };
+    },
+    label,
+    12000,
+    expected
+  );
 }
 
 function check(checks, id, ok, detail) {
@@ -263,6 +303,7 @@ async function main() {
   let labelSearch = null;
   let scanSearch = null;
   let emptySearch = null;
+  const filteredSearches = {};
   let layout = null;
   let backgroundRoots = [];
   try {
@@ -404,6 +445,19 @@ async function main() {
       "empty direct search"
     );
 
+    // Size/date criteria are normalized during validation; results must still
+    // be applied rather than treated as stale (regression: stuck "Searching").
+    const largeOnly = { include: [fixturePaths.filterLargePath], exclude: [fixturePaths.filterSmallPath] };
+    const bothTargets = { include: [fixturePaths.filterLargePath, fixturePaths.filterSmallPath], exclude: [] };
+    filteredSearches.scanSize = await runFilteredSearch(page, "direct scan size-filtered search",
+      { backgroundCache: false, sizeOp: "greater", sizeValue: "1KB" }, largeOnly);
+    filteredSearches.scanDate = await runFilteredSearch(page, "direct scan date-filtered search",
+      { backgroundCache: false, dateOp: "newer", dateDays: "7" }, bothTargets);
+    filteredSearches.indexSize = await runFilteredSearch(page, "indexed size-filtered search",
+      { backgroundCache: true, sizeOp: "greater", sizeValue: "1KB" }, largeOnly);
+    filteredSearches.indexDate = await runFilteredSearch(page, "indexed date-filtered search",
+      { backgroundCache: true, dateOp: "newer", dateDays: "7" }, bothTargets);
+
     layout = await inspectSearchLayout(page);
     const counts = endpointCounts(apiEvents);
     const searchEndpointHits = apiEvents.filter((event) => event.endpoint === "/api/search").length;
@@ -453,6 +507,10 @@ async function main() {
         !/root stores|\bscanned\b|Warm cache/i.test(`${contentSearch.summary} ${labelSearch.summary}`),
       `${contentSearch.summary} | ${labelSearch.summary}`
     );
+    for (const [key, result] of Object.entries(filteredSearches)) {
+      check(checks, `filtered-search-shows-results-${key}`, result.ok && !/^Searching/i.test(result.status),
+        `${result.rowCount} row(s); summary=${result.summary}; status=${result.status}.`);
+    }
     check(checks, "search-dialog-layout", layout.issues.length === 0, `${layout.issues.length} clipped/squished Search control(s).`);
     check(checks, "browser-console-clean", pageErrors.length === 0, `${pageErrors.length} page error(s).`);
   } catch (error) {
@@ -485,6 +543,7 @@ async function main() {
     labelSearch,
     scanSearch,
     emptySearch,
+    filteredSearches,
     layout,
     apiEvents,
     endpointCounts: endpointCounts(apiEvents),
