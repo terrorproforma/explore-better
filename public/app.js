@@ -4366,10 +4366,20 @@ async function runDeviceAction(action, id, paneName = app.activePane) {
   showToast("That action is not supported for this device");
 }
 
+function deviceSurfaceVisible() {
+  if (document.getElementById("devices-dialog")?.open) return true;
+  const section = document.getElementById("nav-devices-section");
+  return Boolean(section && !section.hidden && section.offsetParent !== null);
+}
+
 function scheduleDeviceRefresh() {
   clearInterval(app.devices.pollTimer);
   app.devices.pollTimer = setInterval(() => {
-    if (document.visibilityState === "visible") loadDevicesReport().catch(() => {});
+    if (document.visibilityState !== "visible") return;
+    // Poll briskly only while device rows are on screen; otherwise a slow check still catches new drives.
+    if (deviceSurfaceVisible() || Date.now() - (app.devices.lastLoadedAt || 0) >= 60_000) {
+      loadDevicesReport().catch(() => {});
+    }
   }, 15_000);
 }
 
@@ -23416,17 +23426,74 @@ function listHasKeyboardFocus(event) {
   return Boolean(activeList || eventList);
 }
 
+// Control characters the terminal would receive for the tab shortcuts that are also shell editing keys.
+const terminalTabShortcutInput = new Map([
+  ["close-tab", "\x17"],
+  ["duplicate-tab", "\x14"]
+]);
+
+function tabShortcutActionForKey(event) {
+  if (event.altKey || !(event.ctrlKey || event.metaKey)) {
+    return null;
+  }
+  const key = String(event.key || "").toLowerCase();
+  if (event.shiftKey) {
+    if (key === "t") return "reopen-tab";
+    if (key === "tab" || key === "pageup") return "previous-tab";
+    return null;
+  }
+  if (key === "t") return "duplicate-tab";
+  if (key === "w") return "close-tab";
+  if (key === "tab" || key === "pagedown") return "next-tab";
+  if (key === "pageup") return "previous-tab";
+  return null;
+}
+
+// Ctrl+W / Ctrl+T are text-editing keys in terminals (delete word, transpose) and must not
+// close or duplicate a tab while the user is typing; tab cycling and reopen stay available.
+function tabShortcutFocusGuard(action, target = document.activeElement) {
+  if (!terminalTabShortcutInput.has(action)) {
+    return "";
+  }
+  const element = target instanceof Element ? target : null;
+  if (element?.closest("[data-terminal-host]")) {
+    return "terminal";
+  }
+  return isTypingTarget(element) ? "typing" : "";
+}
+
+function forwardTabShortcutToTerminal(action, target = document.activeElement) {
+  const paneName = target instanceof Element ? target.closest("[data-terminal-host]")?.dataset.terminalHost : "";
+  const session = isPaneName(paneName) ? activeTerminalSession(paneName) : null;
+  const input = terminalTabShortcutInput.get(action);
+  if (session?.sessionId && input) {
+    desktopTerminalBridge()?.write(session.sessionId, input);
+  }
+}
+
 async function handleDesktopShortcutAction(action) {
   if (document.querySelector("dialog[open]")) {
     return false;
   }
-  const paneName = isPaneName(app.activePane) ? app.activePane : "left";
+  const guard = tabShortcutFocusGuard(action);
+  if (guard === "terminal") {
+    // Electron main swallowed the keystroke before the terminal saw it, so hand it back.
+    forwardTabShortcutToTerminal(action);
+    return true;
+  }
+  if (guard) {
+    return false;
+  }
+  return runTabShortcutAction(action, isPaneName(app.activePane) ? app.activePane : "left");
+}
+
+async function runTabShortcutAction(action, paneName) {
   if (action === "duplicate-tab") {
-    duplicateTab(paneName);
+    await duplicateTab(paneName);
     return true;
   }
   if (action === "close-tab") {
-    closeTab(paneName);
+    await closeTab(paneName);
     return true;
   }
   if (action === "next-tab") {
@@ -23445,10 +23512,15 @@ async function handleDesktopShortcutAction(action) {
 }
 
 async function handlePaneShortcut(event) {
-  if (document.querySelector("dialog[open]") || isTypingTarget(event.target)) {
+  if (document.querySelector("dialog[open]")) {
     return false;
   }
-  if (event.target.closest?.("button, a, select, summary, [role='button'], [role='menuitem'], [role='tab']")) {
+  // Tab shortcuts share the desktop path's focus guard; everything else stays out of text fields.
+  const tabAction = tabShortcutActionForKey(event);
+  if (tabAction ? tabShortcutFocusGuard(tabAction, event.target) : isTypingTarget(event.target)) {
+    return false;
+  }
+  if (!tabAction && event.target.closest?.("button, a, select, summary, [role='button'], [role='menuitem'], [role='tab']")) {
     return false;
   }
 
@@ -23456,8 +23528,14 @@ async function handlePaneShortcut(event) {
   if (!isPaneName(paneName)) {
     return false;
   }
-  app.activePane = paneName;
-  updateActivePaneChrome();
+  if (app.activePane !== paneName) {
+    app.activePane = paneName;
+    updateActivePaneChrome();
+  }
+  if (tabAction) {
+    event.preventDefault();
+    return runTabShortcutAction(tabAction, paneName);
+  }
 
   const key = event.key;
   const lowerKey = key.toLowerCase();
@@ -23476,37 +23554,7 @@ async function handlePaneShortcut(event) {
     openSelectMaskDialog(paneName);
     return true;
   }
-  if (hasCtrlShift && lowerKey === "t") {
-    event.preventDefault();
-    await reopenClosedTab(paneName);
-    return true;
-  }
-  if (hasCtrlShift && (lowerKey === "tab" || key === "PageUp")) {
-    event.preventDefault();
-    await cyclePaneTab(paneName, -1);
-    return true;
-  }
 
-  if (hasOnlyCtrl && lowerKey === "t") {
-    event.preventDefault();
-    duplicateTab(paneName);
-    return true;
-  }
-  if (hasOnlyCtrl && lowerKey === "w") {
-    event.preventDefault();
-    closeTab(paneName);
-    return true;
-  }
-  if (hasOnlyCtrl && (lowerKey === "tab" || key === "PageDown")) {
-    event.preventDefault();
-    await cyclePaneTab(paneName, 1);
-    return true;
-  }
-  if (hasOnlyCtrl && key === "PageUp") {
-    event.preventDefault();
-    await cyclePaneTab(paneName, -1);
-    return true;
-  }
   if (hasOnlyCtrl && lowerKey === "a") {
     event.preventDefault();
     selectAll(paneName);
@@ -24032,10 +24080,15 @@ function renderSpeedDialog(message = "") {
   }
 }
 
+// Status polls only feed the dialog; reopening it refreshes both from the server.
+function speedDialogOpen() {
+  return document.getElementById("speed-dialog")?.open === true;
+}
+
 async function refreshBackgroundIndexes() {
   app.speed.background = await request("/api/background-indexes");
   renderSpeedDialog();
-  if (backgroundIndexRunningCount()) {
+  if (backgroundIndexRunningCount() && speedDialogOpen()) {
     clearBackgroundSpeedPoll();
     app.speed.backgroundPollTimer = setTimeout(
       () => refreshBackgroundIndexes().catch((error) => renderSpeedDialog(error.message)),
@@ -24058,7 +24111,7 @@ async function refreshSpeedStatus() {
     clearSpeedPoll();
   }
   renderSpeedDialog();
-  if (app.speed.status?.job?.status === "running") {
+  if (app.speed.status?.job?.status === "running" && speedDialogOpen()) {
     clearSpeedPoll();
     app.speed.pollTimer = setTimeout(() => refreshSpeedStatus().catch((error) => renderSpeedDialog(error.message)), 650);
   }
@@ -24379,7 +24432,11 @@ function loadCommandCenterState() {
   if (app.commandPalette.loaded) return;
   app.commandPalette.loaded = true;
   try {
-    const saved = JSON.parse(localStorage.getItem(commandCenterStorageKey) || "{}");
+    // Saved settings survive relaunches; localStorage does not in the desktop app (its origin port changes).
+    const persisted = app.state?.settings?.commandCenter;
+    const saved = persisted && typeof persisted === "object"
+      ? persisted
+      : JSON.parse(localStorage.getItem(commandCenterStorageKey) || "{}");
     const pins = Array.isArray(saved.pins) ? saved.pins.filter((value) => typeof value === "string").slice(0, 64) : [];
     const recents = Array.isArray(saved.recents) ? saved.recents.filter((value) => typeof value === "string").slice(0, 12) : [];
     app.commandPalette.pins = new Set(pins);
@@ -24391,11 +24448,13 @@ function loadCommandCenterState() {
 }
 
 function saveCommandCenterState() {
+  const saved = { pins: [...app.commandPalette.pins].slice(0, 64), recents: app.commandPalette.recents.slice(0, 12) };
+  if (app.state) {
+    app.state.settings = { ...(app.state.settings || {}), commandCenter: saved };
+    scheduleStateSave();
+  }
   try {
-    localStorage.setItem(
-      commandCenterStorageKey,
-      JSON.stringify({ pins: [...app.commandPalette.pins].slice(0, 64), recents: app.commandPalette.recents.slice(0, 12) })
-    );
+    localStorage.setItem(commandCenterStorageKey, JSON.stringify(saved));
   } catch {
     // Command history is an optional convenience and must never block execution.
   }
@@ -24595,11 +24654,15 @@ async function runCommandPaletteItem(index = app.commandPalette.activeIndex) {
     return;
   }
   const dialog = document.getElementById("command-dialog");
-  recordCommandPaletteRecent(item.key);
   if (dialog?.open) {
     dialog.close();
   }
-  await item.run();
+  try {
+    await item.run();
+  } finally {
+    // Recorded afterwards so the settings save cannot race state changes the command makes on the server.
+    recordCommandPaletteRecent(item.key);
+  }
 }
 
 async function handleCommandPaletteKey(event) {
@@ -24632,7 +24695,11 @@ async function handleCommandPaletteKey(event) {
   }
   if (event.key === "Enter") {
     event.preventDefault();
-    await runCommandPaletteItem();
+    try {
+      await runCommandPaletteItem();
+    } catch (error) {
+      reportUnexpectedUiError(error);
+    }
     return true;
   }
   return false;
@@ -24963,10 +25030,16 @@ async function runScriptCode(code, outputElement = null, metadata = {}) {
   if (outputElement) {
     outputElement.textContent = text;
   }
-  await refreshPane(app.activePane);
-  await loadState();
-  renderOperations();
-  renderSavedCommandStrip();
+  // The script already ran; a failed follow-up refresh must not read as a script failure and invite a rerun.
+  try {
+    await refreshPane(app.activePane);
+    await loadState();
+    renderOperations();
+    renderSavedCommandStrip();
+  } catch (error) {
+    console.warn(error);
+    showToast(`Script finished, but the view could not refresh: ${error.message}`);
+  }
   return text;
 }
 
@@ -26768,7 +26841,11 @@ function wireEvents() {
     }
   });
 
-  document.body.addEventListener("keydown", async (event) => {
+  document.body.addEventListener("keydown", (event) => {
+    handleBodyKeydown(event).catch(reportUnexpectedUiError);
+  });
+
+  async function handleBodyKeydown(event) {
     const paneFilter = event.target.closest?.("[data-filter]");
     if (paneFilter && event.key === "Escape") {
       event.preventDefault();
@@ -26907,7 +26984,7 @@ function wireEvents() {
     if (await handlePaneShortcut(event)) {
       return;
     }
-  });
+  }
 
   document.body.addEventListener("click", async (event) => {
     const previewActionButton = event.target.closest("[data-preview-action]");
@@ -28028,6 +28105,10 @@ function wireEvents() {
     sizeAnalysisDialog.addEventListener("cancel", cancelActiveSizeAnalysis);
     sizeAnalysisDialog.addEventListener("close", cancelActiveSizeAnalysis);
   }
+  document.getElementById("speed-dialog")?.addEventListener("close", () => {
+    clearSpeedPoll();
+    clearBackgroundSpeedPoll();
+  });
   const viewerDialog = document.getElementById("viewer-dialog");
   if (viewerDialog) {
     viewerDialog.addEventListener("close", () => {
@@ -28654,8 +28735,16 @@ function initializeDesktopEvents() {
   });
 }
 
+function reportUnexpectedUiError(error) {
+  if (isAbortError(error)) return;
+  console.error(error);
+  showToast(error?.message || String(error || "Unexpected error"));
+}
+
 async function init() {
   const startupStartedAt = performance.now();
+  // Last-resort reporting for async UI handlers that do not catch their own failures.
+  window.addEventListener("unhandledrejection", (event) => reportUnexpectedUiError(event.reason));
   wireEvents();
   initializeDesktopEvents();
   initializeMcpUiObservation();
@@ -28728,7 +28817,9 @@ async function init() {
     window.addEventListener("explorebetter:first-pane-window", schedule, { once: true });
     secondaryStartupTimer = setTimeout(schedule, 1500);
   });
-  const terminalInitialization = initializeTerminalBridge();
+  // The terminal is optional; a failed capability probe must not abort startup or polling.
+  const terminalInitialization = initializeTerminalBridge()
+    .catch((error) => console.warn(`Could not initialize terminal: ${error?.message || error}`));
   const loadInitialPane = (paneName) =>
     loadStartupPane(
       paneName,
@@ -28777,7 +28868,10 @@ async function init() {
   scheduleDeviceRefresh();
   setTimeout(() => loadDevicesReport().catch((error) => console.warn(`Could not load devices: ${error.message}`)), 0);
   window.addEventListener("focus", () => {
-    if (document.visibilityState === "visible") loadDevicesReport({ refresh: true }).catch(() => {});
+    // A forced refresh spawns a PowerShell inventory on the server, so rapid Alt+Tab cycles share one.
+    if (document.visibilityState !== "visible" || Date.now() - (app.devices.lastFocusRefreshAt || 0) < 30_000) return;
+    app.devices.lastFocusRefreshAt = Date.now();
+    loadDevicesReport({ refresh: true }).catch(() => {});
   });
   initializeAppUpdates().catch((error) => console.warn(`Could not initialize app updates: ${error.message}`));
   setTimeout(() => {
