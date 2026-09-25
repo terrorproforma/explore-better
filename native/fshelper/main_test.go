@@ -6,9 +6,33 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestScanTreeTruncationIsExactFit(t *testing.T) {
+	fixture := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		if err := os.WriteFile(filepath.Join(fixture, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := &writer{encoder: json.NewEncoder(io.Discard)}
+	for _, item := range []struct {
+		maxEntries int
+		truncated  bool
+	}{{3, false}, {2, true}, {4, false}} {
+		result, err := scanTree(context.Background(), request{ID: "scan", Path: fixture, MaxEntries: item.maxEntries}, out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["truncated"] != item.truncated {
+			t.Errorf("maxEntries=%d: truncated = %v, want %v", item.maxEntries, result["truncated"], item.truncated)
+		}
+	}
+}
 
 func TestInputCloseCancelsActiveRequests(t *testing.T) {
 	input, sender := io.Pipe()

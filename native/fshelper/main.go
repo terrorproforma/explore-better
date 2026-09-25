@@ -102,14 +102,17 @@ type fileEntry struct {
 }
 
 type treeScanMetadata struct {
-	Items       []fileEntry
-	FileIndexes []int
-	Logical     uint64
-	Files       int
-	Folders     int
-	Skipped     int
-	Scanned     int
-	Truncated   bool
+	Items []fileEntry
+	// QueryIndexes lists files whose allocation still needs a per-file query;
+	// every other file already carries its allocation from enumeration.
+	QueryIndexes []int
+	Logical      uint64
+	Allocated    uint64
+	Files        int
+	Folders      int
+	Skipped      int
+	Scanned      int
+	Truncated    bool
 }
 
 type treeColumns struct {
@@ -124,7 +127,11 @@ type treeColumns struct {
 
 func compactTreeEntries(root string, items []fileEntry) treeColumns {
 	cleanRoot := filepath.Clean(root)
-	prefix := cleanRoot + string(os.PathSeparator)
+	prefix := cleanRoot
+	// Drive roots such as C:\ already end in a separator.
+	if !strings.HasSuffix(prefix, string(os.PathSeparator)) {
+		prefix += string(os.PathSeparator)
+	}
 	columns := treeColumns{
 		Format:      "columns-v1",
 		Root:        cleanRoot,
@@ -217,14 +224,14 @@ func scanTree(ctx context.Context, req request, out *writer) (map[string]interfa
 	}
 	metadataMs := float64(time.Since(metadataStarted).Microseconds()) / 1000
 	items := metadata.Items
-	fileIndexes := metadata.FileIndexes
+	queryIndexes := metadata.QueryIndexes
 	logical := metadata.Logical
 	files := metadata.Files
 	folders := metadata.Folders
 	skipped := metadata.Skipped
 	scanned := metadata.Scanned
 	truncated := metadata.Truncated
-	var allocated uint64
+	allocated := metadata.Allocated
 
 	allocationStarted := time.Now()
 	workerCount := min(max(4, runtime.GOMAXPROCS(0)*4), 32)
@@ -261,7 +268,7 @@ func scanTree(ctx context.Context, req request, out *writer) (map[string]interfa
 			}
 		}()
 	}
-	for _, index := range fileIndexes {
+	for _, index := range queryIndexes {
 		select {
 		case <-ctx.Done():
 			close(jobs)
@@ -289,7 +296,7 @@ func scanTree(ctx context.Context, req request, out *writer) (map[string]interfa
 	return map[string]interface{}{
 		"path": req.Path, "entries": entries, "files": files, "folders": folders, "skipped": skipped,
 		"logicalBytes": logical, "allocatedBytes": allocated, "scannedEntries": scanned,
-		"truncated": truncated || scanned >= maxEntries, "entryLimitMode": "all-entries", "wireFormat": wireFormat, "volume": volume,
+		"truncated": truncated, "entryLimitMode": "all-entries", "wireFormat": wireFormat, "volume": volume,
 		"timing": map[string]interface{}{"enumerationMs": metadataMs, "allocationMs": allocationMs, "allocationWorkers": workerCount},
 	}, nil
 }
@@ -375,5 +382,4 @@ func main() {
 	if err := serveRequests(os.Stdin, out, handle); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
-	time.Sleep(time.Millisecond)
 }

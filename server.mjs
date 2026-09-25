@@ -14704,7 +14704,7 @@ function ensureNativeFilesystemHelperClient() {
   const client = {
     child,
     helperPath,
-    stdout: "",
+    stdoutChunks: [],
     stderr: "",
     pending: new Map(),
     requests: 0,
@@ -14723,17 +14723,25 @@ function ensureNativeFilesystemHelperClient() {
   child.once("spawn", () => {
     client.spawnedAt = monotonicMs();
   });
+  // The decoder keeps multi-byte UTF-8 sequences intact across chunks. Only
+  // new data is searched for newlines; partial lines are joined once complete.
+  child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
-    client.stdout += chunk.toString();
+    let start = 0;
     let index;
-    while ((index = client.stdout.indexOf("\n")) !== -1) {
-      const line = client.stdout.slice(0, index).trim();
-      client.stdout = client.stdout.slice(index + 1);
-      if (!line) continue;
+    while ((index = chunk.indexOf("\n", start)) !== -1) {
+      let line;
       let message;
       try {
+        const tail = chunk.slice(start, index);
+        line = (client.stdoutChunks.length ? client.stdoutChunks.join("") + tail : tail).trim();
+        client.stdoutChunks = [];
+        start = index + 1;
+        if (!line) continue;
         message = JSON.parse(line);
       } catch (error) {
+        // Invalid JSON, or a line beyond the maximum string length.
+        client.stdoutChunks = [];
         failNativeFilesystemHelperClient(client, error);
         if (child.exitCode === null) child.kill();
         return;
@@ -14750,10 +14758,15 @@ function ensureNativeFilesystemHelperClient() {
       }
       pending.complete(null, message.data || {});
     }
+    if (start < chunk.length) client.stdoutChunks.push(start ? chunk.slice(start) : chunk);
   });
+  child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => {
-    client.stderr = `${client.stderr}${chunk.toString()}`.slice(-8192);
+    client.stderr = `${client.stderr}${chunk}`.slice(-8192);
   });
+  // Writes after the helper dies fail with EPIPE; fail the client instead of
+  // letting an unhandled stream error take down the backend.
+  child.stdin.on("error", (error) => failNativeFilesystemHelperClient(client, error));
   child.once("error", (error) => failNativeFilesystemHelperClient(client, error));
   child.once("exit", (code) => {
     failNativeFilesystemHelperClient(
@@ -15328,15 +15341,26 @@ async function nativeSizeAnalysisSummary(rootPath, maxEntries, signal, onProgres
 
 function sizeAnalysisReportFromNativeSummary(payload = {}, context = {}) {
   const folderRows = Array.isArray(payload.folderNodes) ? payload.folderNodes : [];
-  const nodes = folderRows.map((row, index) => {
-    const node = makeSizeNode(String(row.path || (index === 0 ? context.rootPath : "")), null, Number(row.depth || 0));
+  const nodes = [];
+  folderRows.forEach((row, index) => {
+    // The helper sends a path for the root row only; every other folder is
+    // rebuilt from its parent (always emitted earlier) and its name.
+    const parentNode = index > 0 ? nodes[Number(row?.parent)] || nodes[0] : null;
+    const rowPath = row.path
+      ? String(row.path)
+      : index === 0
+        ? String(context.rootPath || "")
+        : parentNode
+          ? path.join(parentNode.path, String(row.name || ""))
+          : "";
+    const node = makeSizeNode(rowPath, null, Number(row.depth || 0));
     node.name = String(row.name || node.name);
     node.size = Number(row.logicalBytes || 0);
     node.allocated = Number(row.allocatedBytes || 0);
     node.files = Number(row.files || 0);
     node.folders = Number(row.folders || 0);
     node.modified = Number(row.modifiedMs || 0) || null;
-    return node;
+    nodes.push(node);
   });
   for (let index = 1; index < nodes.length; index += 1) {
     const parentIndex = Number(folderRows[index]?.parent);
@@ -15964,7 +15988,8 @@ async function sizeAnalysisReport(body = {}, options = {}) {
           continue;
         }
         const bytes = Number(row.logicalBytes || 0);
-        const allocated = Number(row.allocatedBytes || allocatedBytesForPath(fullPath, bytes, allocationSnapshot));
+        // Zero is a real value: repeat hardlinks are charged no allocation.
+        const allocated = Number(row.allocatedBytes ?? allocatedBytesForPath(fullPath, bytes, allocationSnapshot));
         const modified = Number(row.modifiedMs || 0) || null;
         addFileToSizeNode(current, bytes, allocated, modified);
         rememberExtensionStat(extensionStats, fileName, bytes, allocated);
