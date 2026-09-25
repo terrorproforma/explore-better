@@ -180,6 +180,8 @@ try {
     { name: "upload-fails", step: upload, responses: [releaseResponse(true)], uploadExit: 1, calls: ["http:200", "upload"], error: "Could not upload assets" },
     { name: "published-after-create", step: upload, responses: [{ status: 404 }, listResponse(), releaseResponse(false)], calls: ["http:404", "list:200", "create", "http:200"], error: "not a verified draft" },
     { name: "missing-after-create", step: upload, responses: [{ status: 404 }, listResponse(), { status: 404 }, listResponse()], calls: ["http:404", "list:200", "create", "http:404", "list:200"], error: "not a verified draft" },
+    { name: "draft-appears-after-retry", step: upload, lookupAttempts: 3, responses: [{ status: 404 }, listResponse(), { status: 404 }, listResponse(), { status: 404 }, listResponse(true)], calls: ["http:404", "list:200", "create", "http:404", "list:200", "sleep", "http:404", "list:200", "upload"] },
+    { name: "draft-never-appears", step: upload, lookupAttempts: 2, responses: [{ status: 404 }, listResponse(), { status: 404 }, listResponse(), { status: 404 }, listResponse()], calls: ["http:404", "list:200", "create", "http:404", "list:200", "sleep", "http:404", "list:200"], error: "not a verified draft" },
     { name: "lookup-fails-after-create", step: upload, responses: [{ status: 404 }, listResponse(), { status: 500 }], calls: ["http:404", "list:200", "create", "http:500"], error: "HTTP 500" },
     { name: "upload-wrong-tag", step: upload, responses: [releaseResponse(true, { tag_name: "v9.9.9" })], calls: ["http:200"], error: "invalid or mismatched" }
   ];
@@ -209,6 +211,7 @@ function Invoke-WebRequest {
   Write-FixtureTrace @{ call = "$(if ($isList) { 'list' } else { 'http' }):$($response.status)" }
   return [pscustomobject]@{ StatusCode = $response.status; Content = $response.content }
 }
+function Start-Sleep { param($Seconds) Write-FixtureTrace @{ call = 'sleep' } }
 function gh {
   if ($args[0] -ne 'release' -or $args[1] -notin @('create', 'upload')) { throw 'Unexpected fixture gh command.' }
   Write-FixtureTrace @{ call = $args[1]; arguments = @($args) }
@@ -219,7 +222,7 @@ exit 0
 `);
     const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", scriptPath], {
       cwd: workflowTemp, windowsHide: true, encoding: "utf8", timeout: 15000,
-      env: { ...process.env, GH_TOKEN: "fixture-token", GH_REPO: "fixture/repo", GITHUB_REPOSITORY: "fixture/repo", GITHUB_API_URL: "https://api.fixture.invalid", GITHUB_REF_NAME: tag, RELEASE_WORKFLOW_FIXTURE: fixturePath, RELEASE_WORKFLOW_TRACE: tracePath }
+      env: { ...process.env, GH_TOKEN: "fixture-token", GH_REPO: "fixture/repo", GITHUB_REPOSITORY: "fixture/repo", GITHUB_API_URL: "https://api.fixture.invalid", GITHUB_REF_NAME: tag, RELEASE_WORKFLOW_FIXTURE: fixturePath, RELEASE_WORKFLOW_TRACE: tracePath, RELEASE_LOOKUP_ATTEMPTS: String(fixture.lookupAttempts || 1) }
     });
     assert.ifError(result.error);
     const output = result.stderr + result.stdout;
