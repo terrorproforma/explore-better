@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { pathSnapshot, validSnapshot, decodeEditableText, encodeEditableText, readEditableTextFile, assertSafeDestination, physicalPath, insidePath, durableWrite, replaceFileTransaction, sameFileIdentity } from "./filesystem-integrity.mjs";
@@ -1138,62 +1139,67 @@ function sanitizeStoredOperations(operations) {
   return retainOperationHistory(clean);
 }
 
+function isStateRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// Sanitize a stored list without letting one null or malformed row fail the whole state load.
+function sanitizeStateList(items, sanitizer, limit = Infinity, { allowStrings = false } = {}) {
+  const clean = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    if (clean.length >= limit) {
+      break;
+    }
+    if (!isStateRecord(item) && !(allowStrings && typeof item === "string" && item)) {
+      continue;
+    }
+    try {
+      clean.push(sanitizer(item));
+    } catch {
+      // Skip the malformed row and keep the rest of the list.
+    }
+  }
+  return clean;
+}
+
+function stateRecords(items) {
+  return (Array.isArray(items) ? items : []).filter(isStateRecord);
+}
+
 function mergeState(rawState) {
   const base = defaultState();
-  const raw = rawState && typeof rawState === "object" ? rawState : {};
+  const raw = isStateRecord(rawState) ? rawState : {};
   return {
     ...base,
     ...raw,
     layout: sanitizeLayoutSnapshot(raw.layout || base.layout),
-    settings: sanitizeSettings({ ...base.settings, ...(raw.settings || {}) }),
-    integration: { ...base.integration, ...(raw.integration || {}) },
-    favorites: Array.isArray(raw.favorites) ? raw.favorites : base.favorites,
+    settings: sanitizeSettings({ ...base.settings, ...(isStateRecord(raw.settings) ? raw.settings : {}) }),
+    integration: { ...base.integration, ...(isStateRecord(raw.integration) ? raw.integration : {}) },
+    favorites: Array.isArray(raw.favorites) ? stateRecords(raw.favorites) : base.favorites,
     aliases: Array.isArray(raw.aliases) ? uniquePathAliases(raw.aliases).slice(0, 100) : base.aliases,
     recentLocations: Array.isArray(raw.recentLocations)
-      ? raw.recentLocations.map(sanitizeRecentLocation).slice(0, 20)
+      ? sanitizeStateList(raw.recentLocations, sanitizeRecentLocation, 20, { allowStrings: true })
       : base.recentLocations,
     fileBasket: Array.isArray(raw.fileBasket) ? uniqueCollectionItems(raw.fileBasket).slice(0, 1000) : [],
-    collections: Array.isArray(raw.collections)
-      ? raw.collections.map(sanitizeSavedCollection).slice(0, 50)
-      : [],
-    paneSnapshots: Array.isArray(raw.paneSnapshots)
-      ? raw.paneSnapshots.map(sanitizePaneSnapshot).slice(0, 50)
-      : [],
-    selectionSets: Array.isArray(raw.selectionSets)
-      ? raw.selectionSets.map(sanitizeSelectionSet).slice(0, 100)
-      : [],
+    collections: sanitizeStateList(raw.collections, sanitizeSavedCollection, 50),
+    paneSnapshots: sanitizeStateList(raw.paneSnapshots, sanitizePaneSnapshot, 50),
+    selectionSets: sanitizeStateList(raw.selectionSets, sanitizeSelectionSet, 100),
     labels: Array.isArray(raw.labels) ? uniquePathLabels(raw.labels).slice(0, 2500) : [],
-    folderFormats: Array.isArray(raw.folderFormats)
-      ? raw.folderFormats.map(sanitizeFolderFormat).slice(0, 50)
-      : [],
-    displayPresets: Array.isArray(raw.displayPresets)
-      ? raw.displayPresets.map(sanitizeDisplayPreset).slice(0, 50)
-      : [],
-    filterPresets: Array.isArray(raw.filterPresets)
-      ? raw.filterPresets.map(sanitizeFilterPreset).slice(0, 50)
-      : [],
-    syncProfiles: Array.isArray(raw.syncProfiles)
-      ? raw.syncProfiles.map(sanitizeSyncProfile).slice(0, 50)
-      : [],
-    openWithPresets: Array.isArray(raw.openWithPresets)
-      ? raw.openWithPresets.map(sanitizeOpenWithPreset).slice(0, 50)
-      : [],
-    searchPresets: Array.isArray(raw.searchPresets)
-      ? raw.searchPresets.map(sanitizeSearchPreset).slice(0, 50)
-      : [],
-    selectPresets: Array.isArray(raw.selectPresets)
-      ? raw.selectPresets.map(sanitizeSelectPreset).slice(0, 50)
-      : [],
-    bulkRenamePresets: Array.isArray(raw.bulkRenamePresets)
-      ? raw.bulkRenamePresets.map(sanitizeBulkRenamePreset).slice(0, 50)
-      : [],
-    layouts: Array.isArray(raw.layouts) ? raw.layouts.map(sanitizeSavedLayout).slice(0, 30) : [],
-    tabGroups: Array.isArray(raw.tabGroups) ? raw.tabGroups.map(sanitizeTabGroup).slice(0, 50) : [],
+    folderFormats: sanitizeStateList(raw.folderFormats, sanitizeFolderFormat, 50),
+    displayPresets: sanitizeStateList(raw.displayPresets, sanitizeDisplayPreset, 50),
+    filterPresets: sanitizeStateList(raw.filterPresets, sanitizeFilterPreset, 50),
+    syncProfiles: sanitizeStateList(raw.syncProfiles, sanitizeSyncProfile, 50),
+    openWithPresets: sanitizeStateList(raw.openWithPresets, sanitizeOpenWithPreset, 50),
+    searchPresets: sanitizeStateList(raw.searchPresets, sanitizeSearchPreset, 50),
+    selectPresets: sanitizeStateList(raw.selectPresets, sanitizeSelectPreset, 50),
+    bulkRenamePresets: sanitizeStateList(raw.bulkRenamePresets, sanitizeBulkRenamePreset, 50),
+    layouts: sanitizeStateList(raw.layouts, sanitizeSavedLayout, 30),
+    tabGroups: sanitizeStateList(raw.tabGroups, sanitizeTabGroup, 50),
     backgroundIndexes: Array.isArray(raw.backgroundIndexes)
       ? uniqueBackgroundIndexRoots(raw.backgroundIndexes).slice(0, 50)
       : [],
-    scripts: Array.isArray(raw.scripts) ? raw.scripts.map(sanitizeScriptSnippet).slice(0, 100) : base.scripts,
-    commands: Array.isArray(raw.commands) ? raw.commands.map(sanitizeCommand) : base.commands,
+    scripts: Array.isArray(raw.scripts) ? sanitizeStateList(raw.scripts, sanitizeScriptSnippet, 100) : base.scripts,
+    commands: Array.isArray(raw.commands) ? sanitizeStateList(raw.commands, sanitizeCommand) : base.commands,
     operations: sanitizeStoredOperations(raw.operations)
   };
 }
@@ -1473,7 +1479,7 @@ function recoverInterruptedOperationsOnStartup(state) {
   const reason = "Operation interrupted by app restart before completion.";
   let changed = false;
   nextState.operations = (nextState.operations || []).map((operation) => {
-    if (!interruptedOperationStatuses.has(operation?.status)) {
+    if (!interruptedOperationStatuses.has(operation?.status) || operationControls.has(operation.id)) {
       return operation;
     }
     changed = true;
@@ -1517,10 +1523,16 @@ function operationHistoryNeedsPersist(state, normalizedState) {
   return JSON.stringify(rawOperations) !== JSON.stringify(normalizedOperations);
 }
 
+// Callers hold the state chain (see loadStateIntoCache), so the recovery write is serialized.
 async function cacheStateAfterStartupRecovery(state, stat = null, contentHash = "") {
   const recovery = recoverInterruptedOperationsOnStartup(state);
   if (recovery.changed || operationHistoryNeedsPersist(state, recovery.state)) {
-    return writeState(recovery.state);
+    try {
+      return await writeState(recovery.state, { merged: true });
+    } catch (error) {
+      console.warn(`Could not persist recovered operation history: ${error.message}`);
+      startupOperationRecoveryChecked = false;
+    }
   }
   return updateStateCache(recovery.state, stat, contentHash);
 }
@@ -1559,79 +1571,189 @@ async function statStateFile() {
   }
 }
 
-async function restoreStateFromBackup(reason) {
+const stateChainContext = new AsyncLocalStorage();
+const transientStateReadCodes = new Set(["EBUSY", "EPERM", "EACCES", "EMFILE", "ENFILE", "EAGAIN"]);
+let stateWriteCount = 0;
+
+// Serialize every state.json load/write; nested calls from inside the chain run directly.
+function runInStateChain(task) {
+  if (stateChainContext.getStore()) {
+    return task();
+  }
+  const run = () => stateChainContext.run(true, task);
+  stateChain = stateChain.then(run, run);
+  return stateChain;
+}
+
+async function withTransientStateRetry(action, attempts = 5) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      if (!transientStateReadCodes.has(error?.code) || attempt >= attempts - 1) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+}
+
+function parseStoredState(text) {
+  const state = parseStateText(text);
+  if (!isStateRecord(state)) {
+    throw new SyntaxError("State file does not contain a JSON object.");
+  }
+  return state;
+}
+
+async function quarantineStateFile(file) {
+  const target = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
   try {
-    const text = await fs.readFile(stateBackupFile, "utf8");
-    const backupState = parseStateText(text);
-    console.warn(`Restoring state from backup after read failure: ${reason?.message || reason}`);
-    await fs.mkdir(appDataRoot, { recursive: true });
-    await fs.copyFile(stateBackupFile, stateFile).catch(() => {});
-    const stat = await statStateFile();
-    return cacheStateAfterStartupRecovery(backupState, stat, stateContentHash(text));
-  } catch {
+    await renamePathWithRetry(file, target);
+    console.warn(`Kept unreadable state file as ${target}`);
+    return target;
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`Could not set aside unreadable state file ${file}: ${error.message}`);
+    }
     return null;
   }
 }
 
-async function readCachedState() {
-  await ensureStateCacheWatcher();
-  const stat = await statStateFile();
-  const key = stateCacheKeyFromStat(stat);
-  if (stateCache.state && stateCache.key === key && !stateCache.dirty) {
-    if (stat && Date.now() - Number(stateCache.checkedAt || 0) >= stateCacheContentCheckTtlMs) {
-      try {
-        const text = await fs.readFile(stateFile, "utf8");
-        const contentHash = stateContentHash(text);
-        if (contentHash !== stateCache.contentHash) {
-          return cacheStateAfterStartupRecovery(parseStateText(text), stat, contentHash);
-        }
-        stateCache.checkedAt = Date.now();
-      } catch (error) {
-        if (error.code !== "ENOENT") {
-          console.warn(`Could not verify state file cache: ${error.message}`);
-        }
-        stateCache.dirty = true;
-      }
+// Returns { state } when the backup was restored, otherwise why it could not be used.
+async function restoreStateFromBackup(reason) {
+  let text;
+  let backupState;
+  try {
+    text = await withTransientStateRetry(() => fs.readFile(stateBackupFile, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`Could not read state backup: ${error.message}`);
     }
-    if (!stateCache.dirty) {
-      return stateCache.state;
-    }
-  }
-  if (!stat) {
-    const backupState = await restoreStateFromBackup(new Error("state file missing"));
-    if (backupState) {
-      return backupState;
-    }
-    return cacheStateAfterStartupRecovery(defaultState(), null);
+    return { state: null, corrupt: false, missing: error.code === "ENOENT", error };
   }
   try {
-    const text = await fs.readFile(stateFile, "utf8");
-    return cacheStateAfterStartupRecovery(parseStateText(text), stat, stateContentHash(text));
+    backupState = parseStoredState(text);
+  } catch (error) {
+    console.warn(`State backup is unreadable: ${error.message}`);
+    return { state: null, corrupt: true, missing: false, error };
+  }
+  console.warn(`Restoring state from backup after read failure: ${reason?.message || reason}`);
+  await fs.mkdir(appDataRoot, { recursive: true });
+  await fs.copyFile(stateBackupFile, stateFile).catch(() => {});
+  const stat = await statStateFile();
+  return { state: await cacheStateAfterStartupRecovery(backupState, stat, stateContentHash(text)) };
+}
+
+async function stateCacheIsCurrent(stat) {
+  const key = stateCacheKeyFromStat(stat);
+  if (!stateCache.state || stateCache.key !== key) {
+    return false;
+  }
+  if (stateCache.dirty) {
+    // The folder watcher also fires for our own atomic renames; the post-write key identifies those.
+    if (!stat || key !== stateCache.selfWriteKey) {
+      return false;
+    }
+    stateCache.dirty = false;
+  }
+  if (stat && Date.now() - Number(stateCache.checkedAt || 0) >= stateCacheContentCheckTtlMs) {
+    try {
+      const text = await fs.readFile(stateFile, "utf8");
+      if (stateContentHash(text) !== stateCache.contentHash) {
+        return false;
+      }
+      stateCache.checkedAt = Date.now();
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        console.warn(`Could not verify state file cache: ${error.message}`);
+      }
+      return false;
+    }
+  }
+  return !stateCache.dirty;
+}
+
+async function loadStateWithoutPrimary(reason) {
+  const restored = await restoreStateFromBackup(reason);
+  if (restored.state) {
+    return restored.state;
+  }
+  if (restored.corrupt) {
+    await quarantineStateFile(stateBackupFile);
+  } else if (!restored.missing) {
+    // A locked backup may hold the only good copy: never replace it with defaults.
+    return transientStateFallback(restored.error);
+  }
+  // Defaults stay in memory until the next real change is saved.
+  return cacheStateAfterStartupRecovery(defaultState(), null);
+}
+
+function transientStateFallback(error) {
+  console.warn(`Could not read state file: ${error.message}`);
+  if (stateCache.state && !stateCache.fallback) {
+    // Keep serving the last good state and retry the read next time.
+    stateCache.dirty = true;
+    stateCache.key = null;
+    return stateCache.state;
+  }
+  const fallbackState = mergeState(defaultState());
+  stateCache = {
+    key: null,
+    state: fallbackState,
+    labelMap: labelMapFromState(fallbackState),
+    dirty: true,
+    watcher: stateCache.watcher,
+    contentHash: stateContentHash(JSON.stringify(fallbackState)),
+    checkedAt: Date.now(),
+    fallback: true
+  };
+  return fallbackState;
+}
+
+async function loadStateIntoCache() {
+  let stat;
+  try {
+    stat = await withTransientStateRetry(() => fs.stat(stateFile));
   } catch (error) {
     if (error.code === "ENOENT") {
-      const backupState = await restoreStateFromBackup(error);
-      if (backupState) {
-        return backupState;
-      }
-      return cacheStateAfterStartupRecovery(defaultState(), null);
+      stat = null;
+    } else {
+      return transientStateFallback(error);
     }
-    console.warn(`Could not read state file: ${error.message}`);
-    const backupState = await restoreStateFromBackup(error);
-    if (backupState) {
-      return backupState;
-    }
-    const fallbackState = mergeState(defaultState());
-    stateCache = {
-      key: null,
-      state: fallbackState,
-      labelMap: labelMapFromState(fallbackState),
-      dirty: true,
-      watcher: stateCache.watcher,
-      contentHash: stateContentHash(JSON.stringify(fallbackState)),
-      checkedAt: Date.now()
-    };
-    return fallbackState;
   }
+  if (await stateCacheIsCurrent(stat)) {
+    return stateCache.state;
+  }
+  if (!stat) {
+    return loadStateWithoutPrimary(new Error("state file missing"));
+  }
+  let text;
+  try {
+    text = await withTransientStateRetry(() => fs.readFile(stateFile, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return loadStateWithoutPrimary(error);
+    }
+    return transientStateFallback(error);
+  }
+  let parsed;
+  try {
+    parsed = parseStoredState(text);
+  } catch (error) {
+    console.warn(`State file is unreadable: ${error.message}`);
+    await quarantineStateFile(stateFile);
+    return loadStateWithoutPrimary(error);
+  }
+  return cacheStateAfterStartupRecovery(parsed, stat, stateContentHash(text));
+}
+
+async function readCachedState() {
+  await ensureStateCacheWatcher();
+  if (await stateCacheIsCurrent(await statStateFile())) {
+    return stateCache.state;
+  }
+  return runInStateChain(loadStateIntoCache);
 }
 
 async function readState(options = {}) {
@@ -1651,11 +1773,10 @@ async function readLabelMap() {
   return (await readLabelState()).labelMap;
 }
 
-async function writeState(state) {
-  const nextState = mergeState({
-    ...state,
-    updatedAt: new Date().toISOString()
-  });
+async function writeState(state, { merged = false } = {}) {
+  const updatedAt = new Date().toISOString();
+  const nextState = merged ? { ...state, updatedAt } : mergeState({ ...state, updatedAt });
+  stateWriteCount += 1;
   await fs.mkdir(appDataRoot, { recursive: true });
   const text = JSON.stringify(nextState, null, 2);
   const tempFile = path.join(
@@ -1674,7 +1795,9 @@ async function writeState(state) {
     throw error;
   }
   const stat = await statStateFile();
-  return cloneState(updateStateCache(nextState, stat, stateContentHash(text)));
+  const cached = updateStateCache(nextState, stat, stateContentHash(text));
+  stateCache.selfWriteKey = stateCache.key;
+  return cloneState(cached);
 }
 
 function transientPathRenameError(error) {
@@ -1699,17 +1822,25 @@ async function renamePathWithRetry(source, dest, attempts = 8) {
 }
 
 async function mutateState(mutator) {
-  const run = async () => {
+  return runInStateChain(async () => {
     const state = await readState();
+    if (stateCache.fallback) {
+      throw new Error("Explore Better settings are temporarily unreadable, so this change was not saved. Try again.");
+    }
+    const current = stateCache.state;
     const result = await mutator(state);
-    const saved = await writeState(state);
+    const nextState = mergeState({ ...state, updatedAt: current?.updatedAt });
+    // Skip the fsync'd rewrite when the change normalizes to the stored state.
+    const saved =
+      current && JSON.stringify(nextState) === JSON.stringify(current)
+        ? cloneState(current)
+        : await writeState(nextState, { merged: true });
     return result === undefined ? saved : result;
-  };
-  stateChain = stateChain.then(run, run);
-  return stateChain;
+  });
 }
 
-function sanitizeFavorite(favorite) {
+function sanitizeFavorite(value) {
+  const favorite = isStateRecord(value) ? value : {};
   return {
     id: String(favorite.id || crypto.randomUUID()),
     name: String(favorite.name || labelFromPath(favorite.path)),
@@ -1804,26 +1935,40 @@ function uniquePathLabels(labels) {
   return [...byPath.values()].slice(0, 2500);
 }
 
-function pathShiftedByTransfer(labelPath, sourcePath, destPath) {
-  const labelResolved = resolveUserPath(labelPath);
-  const sourceResolved = resolveUserPath(sourcePath);
-  const destResolved = resolveUserPath(destPath);
-  if (!isInsidePath(labelResolved, sourceResolved)) {
-    return null;
+// Returns the earliest transfer whose source is the label path or one of its ancestors.
+function transferForLabelPath(labelPath, transferIndexBySource) {
+  let best = null;
+  let candidate = labelPath;
+  for (;;) {
+    const match = transferIndexBySource.get(pathIdentity(candidate));
+    if (match && (!best || match.index < best.index)) {
+      best = match;
+    }
+    const parent = path.dirname(candidate);
+    if (parent === candidate) {
+      return best;
+    }
+    candidate = parent;
   }
-  const relative = path.relative(sourceResolved, labelResolved);
-  return relative ? path.join(destResolved, relative) : destResolved;
 }
 
 async function updateLabelsForTransfers(items, mode = "move") {
   const transfers = (Array.isArray(items) ? items : [])
     .filter((item) => item?.source && item?.dest)
-    .map((item) => ({
+    .map((item, index) => ({
+      index,
       source: resolveUserPath(item.source),
       dest: resolveUserPath(item.dest)
     }));
   if (!transfers.length) {
     return;
+  }
+  const transferIndexBySource = new Map();
+  for (const transfer of transfers) {
+    const key = pathIdentity(transfer.source);
+    if (!transferIndexBySource.has(key)) {
+      transferIndexBySource.set(key, transfer);
+    }
   }
 
   await mutateState((state) => {
@@ -1832,15 +1977,15 @@ async function updateLabelsForTransfers(items, mode = "move") {
     const now = new Date().toISOString();
 
     for (const label of state.labels || []) {
-      const matchingTransfer = transfers.find((item) =>
-        pathShiftedByTransfer(label.path, item.source, item.dest)
-      );
+      const labelPath = resolveUserPath(label.path);
+      const matchingTransfer = transferForLabelPath(labelPath, transferIndexBySource);
       if (!matchingTransfer) {
         nextLabels.push(label);
         continue;
       }
 
-      const shiftedPath = pathShiftedByTransfer(label.path, matchingTransfer.source, matchingTransfer.dest);
+      const relative = path.relative(matchingTransfer.source, labelPath);
+      const shiftedPath = relative ? path.join(matchingTransfer.dest, relative) : matchingTransfer.dest;
       const shiftedLabel = sanitizePathLabel({
         ...label,
         path: shiftedPath,
@@ -2584,8 +2729,9 @@ function sanitizeBulkRenamePreset(bulkRenamePreset) {
   };
 }
 
-function sanitizeCommand(command) {
+function sanitizeCommand(value) {
   const allowedKinds = new Set(["powershell", "cmd"]);
+  const command = isStateRecord(value) ? value : {};
   return {
     id: String(command.id || crypto.randomUUID()),
     name: String(command.name || "Untitled Command").trim().slice(0, 80),
@@ -2596,7 +2742,8 @@ function sanitizeCommand(command) {
   };
 }
 
-function sanitizeScriptSnippet(snippet) {
+function sanitizeScriptSnippet(value) {
+  const snippet = isStateRecord(value) ? value : {};
   return {
     id: String(snippet.id || crypto.randomUUID()),
     name: String(snippet.name || "Untitled Script").trim().slice(0, 80),
@@ -2877,6 +3024,26 @@ function boundedLogLines(logs, maxLines = 50, maxLineLength = 1000) {
   });
 }
 
+const operationPersistIntervalMs = 1000;
+
+// Replace journal rows of active operations with their live in-memory progress.
+function overlayLiveOperations(operations) {
+  if (!operationControls.size || !Array.isArray(operations)) {
+    return operations;
+  }
+  return operations.map((operation) => {
+    const live = operationControls.get(operation?.id)?.operation;
+    return (live && sanitizeStoredOperation(live)) || operation;
+  });
+}
+
+function stateWithLiveOperations(state) {
+  if (state && typeof state === "object") {
+    state.operations = overlayLiveOperations(state.operations);
+  }
+  return state;
+}
+
 async function saveOperation(operation) {
   await mutateState((state) => {
     const operations = Array.isArray(state.operations) ? state.operations : [];
@@ -2929,7 +3096,7 @@ async function waitForOperationCondition(operationId, status = "", timeoutMs = 1
     // Subscribe before reading: a transaction may finish while the async state
     // read is in flight, leaving its earlier snapshot behind the notification.
     if (!settled) readState().then((state) => {
-      const current = state.operations.find((operation) => operation.id === operationId) || null;
+      const current = overlayLiveOperations(state.operations).find((operation) => operation.id === operationId) || null;
       if (current && (!status || current.status === status)) waiter.finish(current);
     }, (error) => waiter.finish(null, error));
   });
@@ -3024,9 +3191,37 @@ async function enqueueOperation(type, label, runner, options = {}) {
     waiters: [],
     lastProgressEventAt: 0,
     lastProgressPercent: -1,
-    lastProgressPhase: ""
+    lastProgressPhase: "",
+    lastPersistAt: Date.now(),
+    persistTimer: null,
+    persistDirty: false
   };
   operationControls.set(operation.id, control);
+
+  // Live progress stays in memory (served through overlayLiveOperations); the journal is
+  // rewritten at most once per interval, and immediately for status changes and transactions.
+  const persistNow = async () => {
+    clearTimeout(control.persistTimer);
+    control.persistTimer = null;
+    control.persistDirty = false;
+    control.lastPersistAt = Date.now();
+    await saveOperation(operation);
+  };
+  const persistSoon = () => {
+    control.persistDirty = true;
+    if (control.persistTimer) {
+      return;
+    }
+    const delay = Math.max(0, operationPersistIntervalMs - (Date.now() - control.lastPersistAt));
+    control.persistTimer = setTimeout(() => {
+      control.persistTimer = null;
+      if (!control.persistDirty || operationControls.get(operation.id) !== control) {
+        return;
+      }
+      persistNow().catch((error) => console.warn(`Could not persist operation progress: ${error.message}`));
+    }, delay);
+    control.persistTimer.unref?.();
+  };
 
   const waitIfPaused = async () => {
     throwIfOperationCanceled(controller.signal);
@@ -3042,8 +3237,11 @@ async function enqueueOperation(type, label, runner, options = {}) {
     if (controller.signal.aborted || operation.status === "canceled") {
       markCanceledOperation(operation);
       appendOperationEvent(operation, { kind: "canceled", phase: "Canceled", message: "Operation canceled before it started." });
-      await saveOperation(operation);
-      operationControls.delete(operation.id);
+      try {
+        await persistNow();
+      } finally {
+        operationControls.delete(operation.id);
+      }
       return operation;
     }
     operation.status = "running";
@@ -3054,7 +3252,6 @@ async function enqueueOperation(type, label, runner, options = {}) {
       relatedOperationId: options.relatedOperationId || options.retryOf || null,
       correlationId: options.correlationId || null
     });
-    await saveOperation(operation);
     const updateProgress = async (progress) => {
       operation.progress = {
         ...(operation.progress || {}),
@@ -3078,12 +3275,15 @@ async function enqueueOperation(type, label, runner, options = {}) {
         control.lastProgressPercent = Math.max(control.lastProgressPercent, percent);
         control.lastProgressPhase = phase;
       }
-      await saveOperation(operation);
+      persistSoon();
     };
     const updateRecovery = async (details) => {
       if (!details || typeof details !== "object") {
         return;
       }
+      // Transaction journals (and the checkpoint that retires one) guard destructive steps,
+      // so they must be durable before the runner continues.
+      const durable = Boolean(details.transaction || operation.result?.transaction);
       if (Object.prototype.hasOwnProperty.call(details, "undo")) {
         operation.undo = details.undo || null;
         const { undo, ...resultDetails } = details;
@@ -3091,9 +3291,14 @@ async function enqueueOperation(type, label, runner, options = {}) {
       } else {
         operation.result = details;
       }
-      await saveOperation(operation);
+      if (durable) {
+        await persistNow();
+      } else {
+        persistSoon();
+      }
     };
     try {
+      await persistNow();
       const result = await runner({
         updateProgress,
         updateRecovery,
@@ -3118,7 +3323,7 @@ async function enqueueOperation(type, label, runner, options = {}) {
         message: type === "undo" ? "Undo completed." : options.retryOf ? "Retry completed." : "Operation completed.",
         relatedOperationId: options.relatedOperationId || options.retryOf || null
       });
-      await saveOperation(operation);
+      await persistNow();
       return operation;
     } catch (error) {
       operation.finishedAt = new Date().toISOString();
@@ -3126,7 +3331,7 @@ async function enqueueOperation(type, label, runner, options = {}) {
         markCanceledOperation(operation, operation.finishedAt);
         operation.result = bestCanceledOperationResult(operation.result, error.details);
         appendOperationEvent(operation, { kind: "canceled", phase: "Canceled", message: "Operation canceled." });
-        await saveOperation(operation);
+        await persistNow();
         return operation;
       }
       operation.status = "failed";
@@ -3137,9 +3342,10 @@ async function enqueueOperation(type, label, runner, options = {}) {
         operation.progress.updatedAt = operation.finishedAt;
       }
       appendOperationEvent(operation, { kind: "failed", phase: "Failed", message: operation.error });
-      await saveOperation(operation);
+      await persistNow();
       throw error;
     } finally {
+      clearTimeout(control.persistTimer);
       operationControls.delete(operation.id);
     }
   };
@@ -20176,7 +20382,15 @@ async function handleApi(req, res, url) {
   }
 
   if (route === "GET /api/state") {
-    return sendJson(res, 200, await readState());
+    return sendJson(res, 200, stateWithLiveOperations(await readState()));
+  }
+
+  if (route === "GET /api/operations") {
+    const state = await readState({ clone: false });
+    return sendJson(res, 200, {
+      operations: overlayLiveOperations(state.operations || []),
+      ...(process.env.EB_TEST_STATE_WRITE_COUNTER === "1" ? { stateWrites: stateWriteCount } : {})
+    });
   }
 
   if (route === "POST /api/state") {
@@ -20186,7 +20400,7 @@ async function handleApi(req, res, url) {
         state.layout = body.layout;
       }
       if (Array.isArray(body.favorites)) {
-        state.favorites = body.favorites.map(sanitizeFavorite);
+        state.favorites = sanitizeStateList(body.favorites, sanitizeFavorite);
       }
       if (Array.isArray(body.aliases)) {
         state.aliases = uniquePathAliases(body.aliases);
@@ -20198,7 +20412,7 @@ async function handleApi(req, res, url) {
         state.fileBasket = uniqueCollectionItems(body.fileBasket).slice(0, 1000);
       }
       if (Array.isArray(body.commands)) {
-        state.commands = body.commands.map(sanitizeCommand);
+        state.commands = sanitizeStateList(body.commands, sanitizeCommand);
       }
       if (body.settings && typeof body.settings === "object") {
         state.settings = sanitizeSettings({ ...state.settings, ...body.settings });
@@ -20210,7 +20424,7 @@ async function handleApi(req, res, url) {
         state.tabGroups = body.tabGroups.map(sanitizeTabGroup).slice(0, 50);
       }
       if (Array.isArray(body.scripts)) {
-        state.scripts = body.scripts.map(sanitizeScriptSnippet).slice(0, 100);
+        state.scripts = sanitizeStateList(body.scripts, sanitizeScriptSnippet, 100);
       }
       if (Array.isArray(body.collections)) {
         state.collections = body.collections.map(sanitizeSavedCollection).slice(0, 50);
@@ -20249,7 +20463,7 @@ async function handleApi(req, res, url) {
         state.bulkRenamePresets = body.bulkRenamePresets.map(sanitizeBulkRenamePreset).slice(0, 50);
       }
     });
-    return sendJson(res, 200, saved);
+    return sendJson(res, 200, stateWithLiveOperations(saved));
   }
 
   if (route === "GET /api/labels") {
