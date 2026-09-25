@@ -152,8 +152,10 @@ async function main() {
   const lastmods = [...sitemap.matchAll(/<lastmod>([^<]+)<\/lastmod>/g)].map((match) => match[1]);
   add(checks, "sitemap-lastmod", lastmods.length === sitemapUrls.length && lastmods.every((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)) && !/<changefreq>|<priority>/.test(sitemap), `${new Set(lastmods).size} distinct lastmod date(s); no changefreq/priority`);
 
-  const packageVersion = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8")).version;
+  // Published pages must agree with site/release.json, which trails package.json
+  // until the matching GitHub release has been published.
   const releaseJson = JSON.parse(await fs.readFile(path.join(siteRoot, "release.json"), "utf8"));
+  const packageVersion = releaseJson.version;
   const staleVersions = [];
   const softwareVersions = (html) => [...html.matchAll(/"softwareVersion":\s*"([^"]+)"/g)].map((match) => match[1]);
   for (const name of ["home", "mcp"]) {

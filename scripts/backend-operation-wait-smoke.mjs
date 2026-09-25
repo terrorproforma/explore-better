@@ -63,9 +63,9 @@ try {
       captureWaitRead = false;
       delayedSnapshotStatus = JSON.parse(result).operations.find(operation => operation.id === operationId)?.status;
       releaseStaging.resolve();
-      // Complete the real transaction while its earlier state read remains
-      // in flight, before returning the now-stale snapshot to the waiter.
-      await within(completionPublished.promise, "completion notification");
+      // State reads and writes are serialized, so the transaction commits
+      // right after this now-stale snapshot returns. The waiter subscribed
+      // before reading and must still observe the completion notification.
     }
     return result;
   };

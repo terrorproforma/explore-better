@@ -142,11 +142,12 @@ async function pageSnapshot(page, installerName) {
 }
 
 async function releaseExpectations() {
-  const pkg = JSON.parse(await fs.readFile(path.join(workspace, "package.json"), "utf8"));
+  // The site describes the latest published release, which trails package.json
+  // until that release exists, so site/release.json is the reference version.
   const release = JSON.parse(await fs.readFile(path.join(siteRoot, "release.json"), "utf8"));
-  const version = String(pkg.version || "").trim();
-  if (release.version !== version) {
-    throw new Error(`site/release.json version ${release.version || "missing"} does not match package version ${version}.`);
+  const version = String(release.version || "").trim();
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error(`site/release.json has an invalid version: ${release.version || "missing"}.`);
   }
   return {
     version,
