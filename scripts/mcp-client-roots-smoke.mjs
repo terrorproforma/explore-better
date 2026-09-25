@@ -18,7 +18,7 @@ try {
   await fs.writeFile(inside, "inside fixture"); await fs.writeFile(outside, "outside fixture");
   await bridge.start();
   sidecar = spawn(path.join(root, "native", "bin", "ExploreBetterMcp.exe"), ["--profile", fixture.profile.id, "--manifest", bridge.manifestPath], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
-  let mode = "normal", nextId = 0, stderr = "";
+  let mode = "normal", nextId = 0, stderr = "", rootsRequests = 0;
   const pending = new Map();
   sidecar.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-8000); });
   sidecar.stdin.on("error", () => {});
@@ -27,6 +27,7 @@ try {
   lines.on("line", line => {
     const frame = JSON.parse(line);
     if (frame.method === "roots/list") {
+      rootsRequests += 1;
       if (mode === "timeout") return;
       if (mode === "error") send({ jsonrpc: "2.0", id: frame.id, error: { code: -32603, message: "Temporary roots unavailable" } });
       else send({ jsonrpc: "2.0", id: frame.id, result: { roots: mode === "empty" ? [] : [{ uri: pathToFileURL(workspace).href, name: "Workspace" }] } });
@@ -46,15 +47,23 @@ try {
   assert.equal(allowed.result.structuredContent.data.text, "inside fixture");
   const excluded = await read(outside);
   assert.equal(excluded.result.structuredContent.error.code, "OUTSIDE_ROOTS");
-  for (const value of ["error", "empty", "timeout"]) {
+  // The client announced roots.listChanged, so its answer is reused until it
+  // sends notifications/roots/list_changed.
+  assert.equal(rootsRequests, 1, "roots/list must be cached until the client reports a change");
+  const changeRoots = async (value) => {
     mode = value;
+    send({ jsonrpc: "2.0", method: "notifications/roots/list_changed", params: {} });
+    await new Promise(resolve => setTimeout(resolve, 50));
+  };
+  for (const value of ["error", "empty", "timeout"]) {
+    await changeRoots(value);
     const result = await read(inside);
     assert.equal(result.result.isError, true, `${value} roots must not expand access`);
     assert.equal(result.result.structuredContent.error.code, value === "empty" ? "OUTSIDE_ROOTS" : "CLIENT_ROOTS_UNAVAILABLE");
   }
-  mode = "normal";
+  await changeRoots("normal");
   assert.equal((await read(inside)).result.structuredContent.data.text, "inside fixture");
-  console.log("MCP client roots: 6 passed (supported, excluded, empty, error, timeout, recovery).");
+  console.log("MCP client roots: 7 passed (supported, excluded, cached, empty, error, timeout, recovery).");
 } finally {
   lines?.close();
   if (sidecar && sidecar.exitCode === null) {
