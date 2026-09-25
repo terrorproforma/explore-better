@@ -205,9 +205,13 @@
     "package:installer": "node scripts/run-electron-builder.mjs --win nsis"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.11"
   },
   "devDependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/addon-webgl": "0.19.0",
+    "@xterm/xterm": "6.0.0",
     "electron": "^42.6.1",
     "electron-builder": "^26.15.3",
     "esbuild": "0.28.1",
@@ -239,8 +243,11 @@
       "lib/**/*",
       "server.mjs",
       "filesystem-integrity.mjs",
-      "native/bin/**/*",
       "public/**/*",
+      "!public/app.js",
+      "!public/model-runtime.js",
+      "!public/model-worker.js",
+      "!**/*~",
       "README.md",
       "USER_MANUAL.md",
       "RELEASE_NOTES.md",
@@ -291,10 +298,6 @@
   },
   "dependencies": {
     "@iarna/toml": "2.2.5",
-    "@xterm/addon-fit": "0.11.0",
-    "@xterm/addon-search": "0.16.0",
-    "@xterm/addon-webgl": "0.19.0",
-    "@xterm/xterm": "6.0.0",
     "electron-updater": "^6.8.9",
     "jsonc-parser": "3.3.1",
     "node-pty": "1.2.0-beta.14",

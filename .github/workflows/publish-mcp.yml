@@ -13,6 +13,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  attestations: read
 
 concurrency:
   group: publish-mcp-${{ github.event.release.tag_name || inputs.tag }}
@@ -65,6 +66,18 @@ jobs:
             "--assets=$RUNNER_TEMP/mcp-published" "--release=$RUNNER_TEMP/mcp-release.json" \
             --package=release-source/package.json \
             --output=dist/mcp-registry
+      - name: Verify the release workflow attested the MCP bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./release-source/package.json").version')"
+          for asset in "ExploreBetter-MCP-${version}-windows-x64.mcpb" manifest.json; do
+            gh attestation verify "$RUNNER_TEMP/mcp-published/$asset" \
+              --repo "$GH_REPO" \
+              --signer-workflow "${GH_REPO}/.github/workflows/release.yml" \
+              --source-ref "refs/tags/${RELEASE_TAG}" \
+              --deny-self-hosted-runners
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: verified-mcp-registry-metadata-${{ github.event.release.tag_name || inputs.tag }}
@@ -72,11 +85,17 @@ jobs:
           path: dist/mcp-registry/**
       - name: Install the official MCP Registry publisher
         shell: bash
+        env:
+          # Pinned release; bump both values together (sha256 from the release asset digest).
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
         run: |
           set -euo pipefail
-          curl -L --fail --retry 3 \
-            https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz \
-            | tar xz mcp-publisher
+          archive="$RUNNER_TEMP/mcp-publisher_linux_amd64.tar.gz"
+          curl -L --fail --retry 3 --output "$archive" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  ${archive}" | sha256sum --check --strict -
+          tar xzf "$archive" mcp-publisher
           chmod +x mcp-publisher
       - name: Publish the verified metadata to the official MCP Registry
         working-directory: dist/mcp-registry

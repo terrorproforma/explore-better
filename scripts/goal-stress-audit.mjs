@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { createProvenanceTracker } from "./verify-provenance.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -111,6 +112,11 @@ function artifact(name, label, validate, options = {}) {
       if (options.fresh !== false && ageMs > maxAgeMs) {
         return fail(`${name} is stale: ${formatAge(ageMs)} old, max ${maxAgeHours}h.`, { path: filePath, ageMs });
       }
+      // Different-commit evidence is listed in report.provenance; it fails only in strict mode.
+      const provenanceIssue = provenance?.inspect(name, stat);
+      if (provenanceIssue?.kind === "mismatch" && provenance.strict) {
+        return fail(provenanceIssue.detail, { path: filePath, ageMs });
+      }
       const result = await validate(data, filePath);
       return {
         ...result,
@@ -122,6 +128,8 @@ function artifact(name, label, validate, options = {}) {
     }
   };
 }
+
+let provenance = null;
 
 function allReportsHaveNoIssues(data) {
   const reports = Array.isArray(data.reports) ? data.reports : [];
@@ -1999,6 +2007,7 @@ async function main() {
   await fs.mkdir(artifactsDir, { recursive: true });
   const packagePath = path.join(workspace, "package.json");
   const pkg = JSON.parse(await fs.readFile(packagePath, "utf8"));
+  provenance = await createProvenanceTracker(workspace, artifactsDir);
   const areas = [];
   for (const area of coverageAreas) {
     areas.push(await evaluateArea(area, pkg));
@@ -2013,13 +2022,15 @@ async function main() {
     workspace,
     maxAgeHours,
     summary,
-    areas
+    areas,
+    provenance: provenance.summary()
   };
   await fs.writeFile(latestJsonPath, JSON.stringify(report, null, 2), "utf8");
   await fs.writeFile(latestMdPath, markdownReport(report), "utf8");
   console.log(`goal stress audit: ${summary.pass} pass, ${summary.warn} warn, ${summary.fail} fail`);
   console.log(`wrote ${latestJsonPath}`);
   console.log(`wrote ${latestMdPath}`);
+  provenance.warn("goal stress audit");
   if (summary.warn) {
     const warningLabels = areas.filter((area) => area.status === "warn").map((area) => area.id).join(", ");
     console.log(`warnings: ${warningLabels}`);
