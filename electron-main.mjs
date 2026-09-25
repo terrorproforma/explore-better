@@ -1195,8 +1195,10 @@ async function recoverBackend(reason = "watchdog") {
     backendConsecutiveHealthMisses = 0;
     rememberBackendEvent("recovered", `Backend recovered after ${reason}.`, { reason });
     if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.webContents.isCrashed()) await mainWindow.loadURL(listerUrl());
-      else await desktopEvents.send("backend-recovered", await backendStatus());
+      if (mainWindow.webContents.isCrashed()) {
+        await installBackendCapabilityCookie(mainWindow.webContents);
+        await mainWindow.loadURL(listerUrl());
+      } else await desktopEvents.send("backend-recovered", await backendStatus());
     }
     return backendStatus();
   })()
@@ -1404,6 +1406,18 @@ async function exitSmoke(code) {
   app.exit(code);
 }
 
+// The backend never hands the capability to HTTP clients in desktop mode; only this session gets it.
+async function installBackendCapabilityCookie(webContents) {
+  await webContents.session.cookies.set({
+    url: `${baseUrl}/`,
+    name: "ExploreBetterCapability",
+    value: backendApiCapability,
+    httpOnly: true,
+    sameSite: "strict",
+    path: "/"
+  });
+}
+
 async function showLister(targetPath = null, shellMode = null) {
   await ensureServer();
   await ensureMcpBridge();
@@ -1414,8 +1428,10 @@ async function showLister(targetPath = null, shellMode = null) {
       mainWindow.restore();
     }
     mainWindow.focus();
-    if (mainWindow.webContents.isCrashed()) await mainWindow.loadURL(targetUrl);
-    else if (targetPath) await desktopEvents.send("shell-open", { targetPath, shellMode });
+    if (mainWindow.webContents.isCrashed()) {
+      await installBackendCapabilityCookie(mainWindow.webContents);
+      await mainWindow.loadURL(targetUrl);
+    } else if (targetPath) await desktopEvents.send("shell-open", { targetPath, shellMode });
     return;
   }
 
@@ -1512,6 +1528,7 @@ async function showLister(targetPath = null, shellMode = null) {
     mcpRendererContext = { ...mcpRendererContext, live: false, selection: [], focusedPath: "", ui: normalizeMcpUiContext({}) };
     handleMcpConnectionCount(mcpBridgeService?.status().clients || 0);
   });
+  await installBackendCapabilityCookie(rendererWebContents);
   await mainWindow.loadURL(targetUrl);
 }
 

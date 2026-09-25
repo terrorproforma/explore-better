@@ -30,6 +30,7 @@ const contentSecurityPolicy = [
   "base-uri 'none'",
   "connect-src 'self'",
   "font-src 'self' data:",
+  "form-action 'none'",
   "frame-ancestors 'none'",
   "img-src 'self' data: blob:",
   "media-src 'self' blob:",
@@ -44,6 +45,8 @@ const modelWorkerContentSecurityPolicy = [
   "object-src 'none'",
   "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'"
 ].join("; ");
+const rawPlainTextExtensions = new Set([".js", ".mjs", ".cjs", ".css"]);
+const rawForbiddenFetchDestinations = new Set(["script", "worker", "sharedworker", "serviceworker", "style"]);
 
 function isLoopbackHostname(value) {
   const hostname = String(value || "").trim().replace(/^\[|\]$/g, "").toLowerCase();
@@ -586,7 +589,8 @@ function sendJson(res, status, payload) {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
-    "cache-control": "no-store"
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff"
   });
   res.end(body);
 }
@@ -678,8 +682,29 @@ function cookieValue(req, name) {
   return "";
 }
 
+function capabilityMatches(value) {
+  const supplied = Buffer.from(String(value || ""));
+  const expected = Buffer.from(apiCapability);
+  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+}
+
+function requestTargetPathname(requestTarget) {
+  // Only origin-form targets are accepted, so the boundary and router see the same pathname.
+  if (!requestTarget.startsWith("/")) return null;
+  try {
+    const parsed = new URL(requestTarget, "http://request-target.invalid");
+    return parsed.host === "request-target.invalid" ? parsed.pathname : null;
+  } catch {
+    return null;
+  }
+}
+
 function validateRequestBoundary(req) {
-  const isApiRequest = String(req.url || "").split("?", 1)[0].startsWith("/api/");
+  const requestPathname = requestTargetPathname(String(req.url || ""));
+  if (requestPathname === null) {
+    return { status: 400, message: "The request target must be an origin-form path." };
+  }
+  const isApiRequest = requestPathname.startsWith("/api/");
   const authority = String(req.headers.host || "");
   let requestOrigin;
   try {
@@ -721,8 +746,12 @@ function validateRequestBoundary(req) {
     }
   }
 
-  const suppliedCapability = cookieValue(req, apiCapabilityCookieName) || String(req.headers["x-explore-better-capability"] || "");
-  if (isApiRequest && (requireDirectApiCapability || originHeader || fetchSite) && suppliedCapability !== apiCapability) {
+  if (
+    isApiRequest &&
+    (requireDirectApiCapability || originHeader || fetchSite) &&
+    !capabilityMatches(cookieValue(req, apiCapabilityCookieName)) &&
+    !capabilityMatches(req.headers["x-explore-better-capability"])
+  ) {
     return { status: 403, message: "The launch capability is missing or invalid." };
   }
   return null;
@@ -4037,17 +4066,29 @@ async function resumeOperation(operationId) {
 }
 
 async function readJson(req) {
-  let body = "";
+  // The limit is 2M decoded characters; 3 UTF-8 bytes per UTF-16 unit bounds the raw bytes.
+  const tooLarge = () => Object.assign(new Error("Request body is too large."), { status: 413 });
+  const chunks = [];
+  let size = 0;
   for await (const chunk of req) {
-    body += chunk;
-    if (body.length > 2_000_000) {
-      throw new Error("Request body is too large.");
+    size += chunk.length;
+    if (size > 6_000_000) {
+      throw tooLarge();
     }
+    chunks.push(chunk);
+  }
+  const body = Buffer.concat(chunks, size).toString("utf8");
+  if (body.length > 2_000_000) {
+    throw tooLarge();
   }
   if (!body.trim()) {
     return {};
   }
-  return JSON.parse(body);
+  try {
+    return JSON.parse(body);
+  } catch (error) {
+    throw Object.assign(new Error(`Request body is not valid JSON: ${error.message}`), { status: 400 });
+  }
 }
 
 function resolveUserPath(value) {
@@ -20796,13 +20837,18 @@ async function handleApi(req, res, url) {
   }
 
   if (route === "GET /api/raw") {
+    if (rawForbiddenFetchDestinations.has(String(req.headers["sec-fetch-dest"] || "").toLowerCase())) {
+      return sendError(res, 403, "Raw files cannot be loaded as scripts or stylesheets.");
+    }
     const file = resolveUserPath(url.searchParams.get("path"));
     const stats = await fs.stat(file);
     if (!stats.isFile()) {
       return sendError(res, 400, "Only files can be streamed.");
     }
     const ext = path.extname(file).toLowerCase();
-    const contentType = mimeTypes.get(ext) || "application/octet-stream";
+    const contentType = rawPlainTextExtensions.has(ext)
+      ? "text/plain; charset=utf-8"
+      : mimeTypes.get(ext) || "application/octet-stream";
     const versioned = url.searchParams.has("v");
     const etag = `"${crypto
       .createHash("sha1")
@@ -20871,13 +20917,13 @@ async function handleApi(req, res, url) {
         "content-length": end - start + 1,
         "content-range": `bytes ${start}-${end}/${stats.size}`
       });
-      return createReadStream(file, { start, end }).pipe(res);
+      return pipeline(createReadStream(file, { start, end }), res).catch(() => {});
     }
     res.writeHead(200, {
       ...commonHeaders,
       "content-length": stats.size
     });
-    return createReadStream(file).pipe(res);
+    return pipeline(createReadStream(file), res).catch(() => {});
   }
 
   if (route === "POST /api/mkdir") {
@@ -21278,9 +21324,12 @@ async function serveStatic(req, res, url) {
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
       "x-frame-options": "DENY",
-      "set-cookie": `${apiCapabilityCookieName}=${apiCapability}; HttpOnly; SameSite=Strict; Path=/`
+      // Desktop mode installs the cookie on the window session, so static files never hand it out.
+      ...(requireDirectApiCapability ? {} : {
+        "set-cookie": `${apiCapabilityCookieName}=${apiCapability}; HttpOnly; SameSite=Strict; Path=/`
+      })
     });
-    return createReadStream(file).pipe(res);
+    return pipeline(createReadStream(file), res).catch(() => {});
   } catch {
     return sendError(res, 404, "Static file not found.");
   }
