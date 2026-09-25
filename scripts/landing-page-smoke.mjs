@@ -632,16 +632,20 @@ async function main() {
     // Clip URLs in the VideoObject use #t=<seconds>; arriving on one seeks the demo.
     const deepContext = await browser.newContext({ viewport: viewports[0], reducedMotion: "reduce" });
     const deepPage = await deepContext.newPage();
-    await deepPage.goto(`${baseUrl}/#t=25`, { waitUntil: "load" });
+    // Use a mid-video chapter from the page's own VideoObject so recuts stay covered.
+    const clipStarts = [...homepageSource.matchAll(/"@type":\s*"Clip"[^}]*?"startOffset":\s*([\d.]+)/g)].map((match) => match[1]);
+    if (clipStarts.length <= 2) throw new Error("The VideoObject should list chapter clips for the deep-link check.");
+    const deepStart = clipStarts[Math.floor(clipStarts.length / 2)] || "0";
+    await deepPage.goto(`${baseUrl}/#t=${deepStart}`, { waitUntil: "load" });
     const deepLinked = await deepPage
-      .waitForFunction(() => {
+      .waitForFunction((start) => {
         const video = document.querySelector("[data-demo-video]");
         const current = document.querySelector('[data-chapter-list] [aria-current="true"]');
-        return Math.abs(video.currentTime - 25) < 0.5 && current?.dataset.demoTime === "25";
-      }, null, { timeout: 10_000 })
+        return Math.abs(video.currentTime - Number(start)) < 0.5 && current?.dataset.demoTime === start;
+      }, deepStart, { timeout: 10_000 })
       .then(() => true)
       .catch(() => false);
-    addCheck(checks, "demo-deep-link", deepLinked, deepLinked ? "#t=25 seeks the demo and marks its chapter current" : "Deep link did not seek the demo");
+    addCheck(checks, "demo-deep-link", deepLinked, deepLinked ? `#t=${deepStart} seeks the demo and marks its chapter current` : `Deep link #t=${deepStart} did not seek the demo`);
     await deepContext.close();
 
     addCheck(checks, "runtime-errors", errors.length === 0, errors.length ? errors.join("; ") : "No page errors");

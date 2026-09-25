@@ -292,6 +292,17 @@ async function main() {
     await assertRejectedApply(baseUrl, "/api/transfer", { ...ancestorBody, expectedPlanDigest: ancestorPlan.planDigest });
     assert((await fs.readFile(path.join(ancestorRoot, "a", "keep.txt"), "utf8")) === "keep\n", "Blocked ancestor overwrite must leave the ancestor intact.");
 
+    // Large selections must be planned in full, never silently truncated.
+    const manyRoot = path.join(fixtureRoot, "many");
+    await fs.mkdir(path.join(manyRoot, "src"), { recursive: true });
+    await fs.mkdir(path.join(manyRoot, "dest"), { recursive: true });
+    const manyPaths = Array.from({ length: 900 }, (_, index) => path.join(manyRoot, "src", `item-${String(index).padStart(4, "0")}.txt`));
+    await Promise.all(manyPaths.map((item) => fs.writeFile(item, "x")));
+    const manyPlan = await requestJson(baseUrl, "/api/transfer/preview", { method: "POST", body: JSON.stringify({ paths: manyPaths, targetDir: path.join(manyRoot, "dest"), mode: "copy", conflictMode: "unique" }) });
+    assert(manyPlan.items.length === 900 && manyPlan.counts.ready === 900, `A 900-item transfer must plan every item (planned ${manyPlan.items.length}).`);
+    const oversized = await requestJson(baseUrl, "/api/transfer/preview", { method: "POST", body: JSON.stringify({ paths: Array.from({ length: 20_001 }, (_, index) => `${manyPaths[0]}.${index}`), targetDir: path.join(manyRoot, "dest"), mode: "copy" }) }).then(() => null, (error) => error);
+    assert(oversized?.status === 413 && /up to 20,000 items/.test(oversized.message), `Oversized transfers must be refused clearly (got ${oversized?.status} ${oversized?.message}).`);
+
     const bulkLeft = path.join(fixtureRoot, "bulk-left");
     const bulkRight = path.join(fixtureRoot, "bulk-right");
     await fs.mkdir(bulkLeft, { recursive: true });
