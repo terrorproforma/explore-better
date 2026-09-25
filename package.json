@@ -122,6 +122,7 @@
     "verify:shell-rehearsal": "node scripts/shell-replacement-rehearsal-smoke.mjs",
     "verify:shell-current-user": "node scripts/shell-current-user-smoke.mjs",
     "verify:packaged-integration-launch": "node scripts/packaged-integration-launch-smoke.mjs",
+    "verify:shell-registry": "node --test scripts/shell-registry.test.mjs",
     "verify:shell-verbs": "node scripts/shell-verbs-smoke.mjs",
     "verify:shell-namespace": "node scripts/shell-namespace-smoke.mjs",
     "verify:shell-devices": "node scripts/shell-devices-smoke.mjs",
