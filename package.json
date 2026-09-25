@@ -164,6 +164,7 @@
     "verify:accessibility": "node scripts/accessibility-verify.mjs",
     "verify:terminal": "node scripts/terminal-verify.mjs",
     "verify:terminal-service": "node --test scripts/terminal-service.test.mjs",
+    "verify:shell-quoting": "node --test scripts/shell-quoting.test.mjs",
     "verify:desktop-lifecycle": "node --test scripts/desktop-lifecycle.test.mjs scripts/desktop-startup.test.mjs",
     "verify:desktop-session": "node scripts/desktop-session-smoke.mjs",
     "verify:terminal-native-lifecycle": "node scripts/terminal-native-lifecycle-smoke.mjs",
