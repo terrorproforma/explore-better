@@ -173,21 +173,25 @@ const cacheMaintenanceFileLimit = 2000;
 const cancellableOperationTypes = new Set(["copy", "move", "delete", "recycle", "transfer", "sync", "script"]);
 const interruptedOperationStatuses = new Set(["queued", "running", "paused"]);
 const operationStatuses = new Set(["queued", "running", "paused", "completed", "failed", "canceled"]);
+// Failure-injection hooks (EB_TEST_*) are only honoured when the test harness opts in explicitly,
+// so a stray environment variable can never make a production build fail or slow down operations.
+const testHooksEnabled = process.env.EXPLORE_BETTER_TEST_HOOKS === "1";
+const testHookEnv = (name) => (testHooksEnabled ? process.env[name] : undefined);
 const testOperationDelayMs = Math.max(
   0,
-  Math.min(Number(process.env.EB_TEST_OPERATION_DELAY_MS || 0), 30000)
+  Math.min(Number(testHookEnv("EB_TEST_OPERATION_DELAY_MS") || 0), 30000)
 );
 const testOperationDelayAfterItems = Math.max(
   0,
-  Math.min(Number(process.env.EB_TEST_OPERATION_DELAY_AFTER_ITEMS || 0), 100000)
+  Math.min(Number(testHookEnv("EB_TEST_OPERATION_DELAY_AFTER_ITEMS") || 0), 100000)
 );
 const testStateWriteDelayMs = Math.max(
   0,
-  Math.min(Number(process.env.EB_TEST_STATE_WRITE_DELAY_MS || 0), 30000)
+  Math.min(Number(testHookEnv("EB_TEST_STATE_WRITE_DELAY_MS") || 0), 30000)
 );
-const testForceCrossVolumeMove = process.env.EB_TEST_FORCE_CROSS_VOLUME_MOVE === "1";
-const testFailSourceRemoval = process.env.EB_TEST_FAIL_SOURCE_REMOVAL === "1";
-const testFailStagingRename = process.env.EB_TEST_FAIL_STAGING_RENAME === "1";
+const testForceCrossVolumeMove = testHookEnv("EB_TEST_FORCE_CROSS_VOLUME_MOVE") === "1";
+const testFailSourceRemoval = testHookEnv("EB_TEST_FAIL_SOURCE_REMOVAL") === "1";
+const testFailStagingRename = testHookEnv("EB_TEST_FAIL_STAGING_RENAME") === "1";
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -16592,6 +16596,51 @@ async function verifyChecksumManifest(body = {}) {
   };
 }
 
+const driveProbeTimeoutMs = 1500;
+const driveProbesInFlight = new Map();
+
+function probeDriveRoot(root) {
+  // One probe per drive at a time: an offline mapped drive can hold a libuv worker for a full SMB timeout,
+  // so repeated root refreshes must reuse the pending probe instead of stacking more blocked workers.
+  let probe = driveProbesInFlight.get(root);
+  if (!probe) {
+    probe = (async () => {
+      if (!(await pathExists(root))) {
+        return null;
+      }
+      return { name: root, path: root, kind: "drive", space: await driveSpaceForPath(root) };
+    })().finally(() => {
+      driveProbesInFlight.delete(root);
+    });
+    driveProbesInFlight.set(root, probe);
+  }
+  return probe;
+}
+
+async function probeDriveRootWithTimeout(root) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      probeDriveRoot(root),
+      new Promise((resolve) => {
+        timer = setTimeout(
+          () =>
+            resolve({
+              name: root,
+              path: root,
+              kind: "drive",
+              unavailable: true,
+              space: { available: false, timedOut: true, error: "Drive did not respond in time." }
+            }),
+          driveProbeTimeoutMs
+        );
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getRoots() {
   const shortcuts = [
     { name: "Home", path: os.homedir(), kind: "home" },
@@ -16601,24 +16650,16 @@ async function getRoots() {
     { name: workspaceLabel, path: workspaceRoot, kind: "workspace" }
   ];
 
-  const availableShortcuts = [];
-  for (const shortcut of shortcuts) {
-    if (await pathExists(shortcut.path)) {
-      availableShortcuts.push(shortcut);
-    }
-  }
-
-  const drives = [];
-  if (process.platform === "win32") {
-    for (const letter of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
-      const root = `${letter}:\\`;
-      if (await pathExists(root)) {
-        drives.push({ name: root, path: root, kind: "drive", space: await driveSpaceForPath(root) });
-      }
-    }
-  } else {
-    drives.push({ name: "/", path: "/", kind: "drive", space: await driveSpaceForPath("/") });
-  }
+  const drivesPromise =
+    process.platform === "win32"
+      ? Promise.all([..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"].map((letter) => probeDriveRootWithTimeout(`${letter}:\\`)))
+      : driveSpaceForPath("/").then((space) => [{ name: "/", path: "/", kind: "drive", space }]);
+  const [shortcutExists, driveResults] = await Promise.all([
+    Promise.all(shortcuts.map((shortcut) => pathExists(shortcut.path))),
+    drivesPromise
+  ]);
+  const availableShortcuts = shortcuts.filter((_, index) => shortcutExists[index]);
+  const drives = driveResults.filter(Boolean);
 
   return {
     cwd: workspaceRoot,
@@ -16685,13 +16726,11 @@ function specialFolderCandidates() {
 }
 
 async function existingSpecialFolders() {
-  const folders = [];
-  for (const candidate of specialFolderCandidates()) {
-    if (await pathExists(candidate.path)) {
-      folders.push({ ...candidate, detail: candidate.path, supportsPane: true });
-    }
-  }
-  return folders;
+  const candidates = specialFolderCandidates();
+  const exists = await Promise.all(candidates.map((candidate) => pathExists(candidate.path)));
+  return candidates
+    .filter((_, index) => exists[index])
+    .map((candidate) => ({ ...candidate, detail: candidate.path, supportsPane: true }));
 }
 
 function decodeXmlEntities(value) {
@@ -16817,10 +16856,15 @@ function shellNetworkSummary(drives) {
   };
 }
 
-async function getShellLocations() {
-  const roots = await getRoots();
-  const specialFolders = await existingSpecialFolders();
-  const libraries = await discoverWindowsLibraries();
+const shellLocationsOpenCacheTtlMs = 5000;
+let shellLocationsCache = null;
+
+async function getShellLocations({ roots: rootsSource = null } = {}) {
+  const [roots, specialFolders, libraries] = await Promise.all([
+    rootsSource || getRoots(),
+    existingSpecialFolders(),
+    discoverWindowsLibraries()
+  ]);
   const virtualFolders = shellNamespaceItems();
   const navigation = [
     ...virtualFolders,
@@ -16829,7 +16873,7 @@ async function getShellLocations() {
     ),
     ...libraries
   ];
-  return {
+  const locations = {
     platform: process.platform,
     windows: process.platform === "win32",
     generatedAt: new Date().toISOString(),
@@ -16843,6 +16887,8 @@ async function getShellLocations() {
     appTrash: specialFolders.find((item) => item.id === "appTrash") || null,
     navigation
   };
+  shellLocationsCache = { locations, at: Date.now() };
+  return locations;
 }
 
 async function shellOpenItemById(id) {
@@ -16850,13 +16896,21 @@ async function shellOpenItemById(id) {
   if (!cleanId) {
     return null;
   }
-  const locations = await getShellLocations();
-  const items = [
-    ...(locations.virtualFolders || []),
-    ...(locations.libraries || []).filter((item) => item.openTarget),
-    ...(locations.specialFolders || []).filter((item) => item.openTarget)
-  ];
-  return items.find((item) => item.id === cleanId && item.openTarget) || null;
+  const findIn = (locations) =>
+    [
+      ...(locations.virtualFolders || []),
+      ...(locations.libraries || []).filter((item) => item.openTarget),
+      ...(locations.specialFolders || []).filter((item) => item.openTarget)
+    ].find((item) => item.id === cleanId && item.openTarget) || null;
+  // Opening a location should not re-probe every drive letter; a just-built location list is fresh enough.
+  // A miss in the cached list still rebuilds, so a library created moments ago can be opened.
+  if (shellLocationsCache && Date.now() - shellLocationsCache.at < shellLocationsOpenCacheTtlMs) {
+    const cachedItem = findIn(shellLocationsCache.locations);
+    if (cachedItem) {
+      return cachedItem;
+    }
+  }
+  return findIn(await getShellLocations());
 }
 
 function launchShellTarget(openTarget) {
@@ -17372,8 +17426,47 @@ async function recordRelatedOperation(sourceOperationId, relatedOperation, kind,
   await saveOperation(source);
 }
 
-async function windowsDriveInventory() {
+const driveInventoryCacheTtlMs = 60_000;
+const driveInventoryFailureCacheTtlMs = 5_000;
+const driveInventoryMinRefreshAgeMs = 5_000;
+let driveInventoryCache = null;
+let driveInventoryInFlight = null;
+const driveInventoryStats = { loads: 0 };
+
+// The renderer polls devices every 15s and on every focus; reuse one PowerShell result for a minute,
+// coalesce concurrent callers, and let an explicit refresh through only once the cache is a few seconds old.
+async function windowsDriveInventory({ refresh = false } = {}) {
   if (process.platform !== "win32") return [];
+  if (driveInventoryCache) {
+    const age = Date.now() - driveInventoryCache.at;
+    if (age < driveInventoryCache.ttlMs && !(refresh && age >= driveInventoryMinRefreshAgeMs)) {
+      return driveInventoryCache.drives;
+    }
+  }
+  if (!driveInventoryInFlight) {
+    driveInventoryStats.loads += 1;
+    driveInventoryInFlight = loadWindowsDriveInventory()
+      .then(({ drives, ok }) => {
+        driveInventoryCache = {
+          drives,
+          at: Date.now(),
+          ttlMs: ok ? driveInventoryCacheTtlMs : driveInventoryFailureCacheTtlMs
+        };
+        return drives;
+      })
+      .finally(() => {
+        driveInventoryInFlight = null;
+      });
+  }
+  return driveInventoryInFlight;
+}
+
+function driveInventoryMissingDrives(drives = [], inventory = []) {
+  const known = new Set(inventory.map((drive) => String(drive.name || "").toLowerCase()));
+  return drives.some((drive) => !drive.unavailable && !known.has(String(drive.path || drive.name || "").toLowerCase()));
+}
+
+async function loadWindowsDriveInventory() {
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 @([System.IO.DriveInfo]::GetDrives() | ForEach-Object {
@@ -17398,7 +17491,7 @@ $ErrorActionPreference = "Stop"
 }) | ConvertTo-Json -Compress -Depth 5`;
   try {
     const parsed = parsePowerShellJson(await runPowerShellPayload(script, {}, { timeoutMs: 1800 }), []);
-    return (Array.isArray(parsed) ? parsed : parsed ? [parsed] : []).map((item) => ({
+    const drives = (Array.isArray(parsed) ? parsed : parsed ? [parsed] : []).map((item) => ({
       name: String(item.name || ""),
       driveType: String(item.driveType || "Unknown"),
       ready: item.ready === true,
@@ -17406,8 +17499,9 @@ $ErrorActionPreference = "Stop"
       freeBytes: Number.isFinite(Number(item.freeBytes)) ? Number(item.freeBytes) : null,
       label: String(item.label || "")
     }));
+    return { drives, ok: drives.length > 0 };
   } catch {
-    return [];
+    return { drives: [], ok: false };
   }
 }
 
@@ -17449,12 +17543,18 @@ async function getWindowsDevices({ refresh = false, includeNetwork = false } = {
       networkLoaded: false
     };
   }
-  const [roots, locations, thisPc, driveInventory] = await Promise.all([
-    getRoots(),
-    getShellLocations(),
+  const rootsPromise = getRoots();
+  const [roots, locations, thisPc, cachedDriveInventory] = await Promise.all([
+    rootsPromise,
+    getShellLocations({ roots: rootsPromise }),
     listShellNamespace({ target: "thisPc", limit: 200 }),
-    windowsDriveInventory()
+    windowsDriveInventory({ refresh })
   ]);
+  // A drive that appeared since the cached inventory (a USB stick plugged in) would otherwise be shown as a
+  // fixed drive until the cache expires, so a missing letter forces a refresh (still rate-limited).
+  const driveInventory = driveInventoryMissingDrives(roots.drives, cachedDriveInventory)
+    ? await windowsDriveInventory({ refresh: true })
+    : cachedDriveInventory;
   const warnings = [];
   if (thisPc.available === false) warnings.push(thisPc.reason || "Connected device provider is unavailable.");
   const driveByName = new Map(driveInventory.map((drive) => [String(drive.name || "").toLowerCase(), drive]));
@@ -17468,9 +17568,10 @@ async function getWindowsDevices({ refresh = false, includeNetwork = false } = {
       name: detail.label ? `${detail.label} (${drive.name})` : drive.name,
       kind,
       detail: `${String(detail.driveType || "Fixed")} drive`,
-      ready: detail.ready !== false,
-      totalBytes: detail.totalBytes ?? drive.space?.totalBytes,
-      freeBytes: detail.freeBytes ?? drive.space?.freeBytes,
+      // The inventory may be up to a minute old; the root probe just ran, so its answer wins where it has one.
+      ready: !drive.unavailable && (detail.ready !== false || drive.space?.available === true),
+      totalBytes: drive.space?.available ? drive.space.totalBytes : detail.totalBytes,
+      freeBytes: drive.space?.available ? drive.space.freeBytes : detail.freeBytes,
       capabilities: deviceCapabilities({ browseInApp: true, openInExplorer: true })
     });
   });
@@ -19648,9 +19749,51 @@ function scriptPaneContext(source = {}, fallbackPath = workspaceRoot, fallbackSe
   };
 }
 
-async function runTrustedScript(body, hooks = {}) {
+const scriptOutputEntryLimit = 2000;
+const scriptSettleGraceMs = 2000;
+
+async function runTrustedScript(body, outerHooks = {}) {
   const logs = [];
   const events = [];
+  // Every api call after a timeout must fail, otherwise a script that keeps awaiting could keep
+  // moving or trashing files after the operation has already been reported as failed.
+  const scriptController = new AbortController();
+  const scriptSignal = scriptController.signal;
+  const forwardOuterAbort = () => scriptController.abort(outerHooks.signal?.reason || operationCanceledError());
+  if (outerHooks.signal?.aborted) {
+    forwardOuterAbort();
+  } else {
+    outerHooks.signal?.addEventListener?.("abort", forwardOuterAbort, { once: true });
+  }
+  let scriptAbortWait = null;
+  const scriptAborted = () => {
+    scriptAbortWait ||= new Promise((resolve) => {
+      if (scriptSignal.aborted) resolve();
+      else scriptSignal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    return scriptAbortWait;
+  };
+  const throwIfScriptStopped = () => {
+    outerHooks.throwIfCanceled?.();
+    throwIfOperationCanceled(scriptSignal);
+  };
+  const hooks = {
+    ...outerHooks,
+    signal: scriptSignal,
+    throwIfCanceled: throwIfScriptStopped,
+    waitIfPaused: async () => {
+      throwIfScriptStopped();
+      if (outerHooks.waitIfPaused) {
+        // A paused script must not stay parked forever once the timeout has already failed the operation.
+        await Promise.race([outerHooks.waitIfPaused(), scriptAborted()]);
+      }
+      throwIfScriptStopped();
+    },
+    updateProgress: async (progress) => {
+      throwIfScriptStopped();
+      await outerHooks.updateProgress?.(progress);
+    }
+  };
   const mutationPaths = new Map();
   const rememberScriptMutationPath = (itemPath) => addDirectoryListingMutationPath(mutationPaths, itemPath);
   const rememberScriptMutationPaths = (...items) => {
@@ -19678,13 +19821,17 @@ async function runTrustedScript(body, hooks = {}) {
   const selectedPaths = explicitSelectedPaths.length ? explicitSelectedPaths : [...panes[activePane].selectedPaths];
   const timeoutMs = Math.max(1000, Math.min(Number(body.timeoutMs || 30000), 120000));
   const checkpoint = async (progress = null) => {
-    hooks.throwIfCanceled?.();
-    await hooks.waitIfPaused?.();
-    hooks.throwIfCanceled?.();
-    if (progress) {
-      await hooks.updateProgress?.(progress);
+    if (scriptSignal.aborted) {
+      // Yield a macrotask first so a script that swallows these errors in a loop cannot starve the event loop.
+      await new Promise((resolve) => setImmediate(resolve));
     }
-    hooks.throwIfCanceled?.();
+    hooks.throwIfCanceled();
+    await hooks.waitIfPaused();
+    hooks.throwIfCanceled();
+    if (progress) {
+      await hooks.updateProgress(progress);
+    }
+    hooks.throwIfCanceled();
     return true;
   };
 
@@ -19703,7 +19850,9 @@ async function runTrustedScript(body, hooks = {}) {
         detail: boundedJsonValue(detail, 1000),
         at: new Date().toISOString()
       };
-      events.push(event);
+      if (events.length < scriptOutputEntryLimit) {
+        events.push(event);
+      }
       await checkpoint();
       return event;
     },
@@ -19809,7 +19958,12 @@ async function runTrustedScript(body, hooks = {}) {
       timeoutMs
     },
     console: {
-      log: (...args) => logs.push(args.map(formatForScript).join(" "))
+      log: (...args) => {
+        // Only the first lines are ever reported; do not let a chatty script grow memory without bound.
+        if (logs.length < scriptOutputEntryLimit) {
+          logs.push(args.map(formatForScript).join(" "));
+        }
+      }
     },
     path: {
       basename: path.basename,
@@ -19825,22 +19979,47 @@ async function runTrustedScript(body, hooks = {}) {
     filename: "ExploreBetterScript.vm"
   });
 
-  const resultPromise = script.runInNewContext(sandbox, {
-    timeout: 1000,
-    displayErrors: true
-  });
-
   let cacheInvalidation = { reason: "script", invalidated: 0, dirs: [] };
   let backgroundIndexInvalidation = { reason: "script", affected: 0, roots: [] };
   let result;
+  let timeoutTimer = null;
+  let resultPromise = null;
   try {
+    resultPromise = Promise.resolve(
+      script.runInNewContext(sandbox, {
+        timeout: 1000,
+        displayErrors: true
+      })
+    );
     result = await Promise.race([
       resultPromise,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`Script timed out after ${Math.round(timeoutMs / 1000)} seconds.`)), timeoutMs)
-      )
+      new Promise((_, reject) => {
+        timeoutTimer = setTimeout(() => {
+          const error = new Error(`Script timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+          error.code = "SCRIPT_TIMEOUT";
+          scriptController.abort(error);
+          reject(error);
+        }, timeoutMs);
+      }),
+      // Surface a real cancellation even while the script is parked in a non-api await.
+      scriptAborted().then(() => {
+        throw scriptSignal.reason || operationCanceledError();
+      })
     ]);
   } finally {
+    clearTimeout(timeoutTimer);
+    outerHooks.signal?.removeEventListener?.("abort", forwardOuterAbort);
+    if (resultPromise && scriptSignal.aborted) {
+      // Let an in-flight copy/move roll back before the caches are invalidated, but never wait indefinitely.
+      let graceTimer = null;
+      await Promise.race([
+        resultPromise.catch(() => {}),
+        new Promise((resolve) => {
+          graceTimer = setTimeout(resolve, scriptSettleGraceMs);
+        })
+      ]);
+      clearTimeout(graceTimer);
+    }
     if (mutationPaths.size) {
       cacheInvalidation = invalidateDirectoryListingCachesForDirs(mutationPaths, "script");
       backgroundIndexInvalidation = await safelyInvalidateBackgroundIndexesForDirs(mutationPaths, "script", "script");
@@ -19883,7 +20062,8 @@ function healthCacheMetrics() {
     folderIndexBytes: folderIndexCacheStats().bytes,
     sizeAnalyses: sizeAnalysisCache.size,
     searches: advancedSearchCache.size,
-    backgroundSearchStores: backgroundIndexSearchStoreCache.size
+    backgroundSearchStores: backgroundIndexSearchStoreCache.size,
+    driveInventoryLoads: driveInventoryStats.loads
   };
 }
 
