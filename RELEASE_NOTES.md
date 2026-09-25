@@ -1,5 +1,22 @@
 # Explore Better Release Notes
 
+## v0.2.8 - 2026-09-25
+
+### Fixed
+
+- Copying or moving more than 500 selected items no longer silently transfers only the first 500. Transfers now accept up to 20,000 items (bulk rename, attributes and timestamps 2,000; labels and checksums 5,000), and larger selections are refused with a clear message instead of being truncated.
+- A healthy running copy no longer shows a red "Failed" recovery item in Operations; its crash-recovery checkpoint is shown as progress until the run ends.
+
+### Platform
+
+- Updated to Electron 44.4.3. No behaviour changes were needed; desktop, terminal, packaged-app, and update checks pass on the new runtime.
+- Updated the MCP server to go-sdk 1.8.0 while keeping the negotiated protocol on 2025-11-25, so AI clients that share their workspace folders keep working unchanged.
+- Updated esbuild, Three.js, Playwright, lucide icons, and the GitHub Actions toolchain. node-pty stays on its intentional 1.2.0-beta.14 pin.
+
+### Release Signing
+
+- Release builds can now sign the app, installer, uninstaller, native filesystem helper, and MCP sidecar with Microsoft Artifact Signing as soon as signing is configured, and fail if any required file is unsigned. Builds remain unsigned until then. See `docs/CODE_SIGNING.md`.
+
 ## v0.2.7 - 2026-09-25
 
 ### Security
