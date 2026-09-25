@@ -1,0 +1,777 @@
+{
+ "candidate": "D",
+ "name": "Dark techno: club",
+ "sampleRate": 48000,
+ "durationSeconds": 56.033333,
+ "notes": "Times in seconds, rounded to whole samples at 48 kHz. Chapter cuts sit on downbeats. tempoMap entries with bpm null are free-time stops (no beat grid) that end exactly on the next cut.",
+ "tempoMap": [
+  {
+   "time": 0,
+   "bpm": null,
+   "preroll": true
+  },
+  {
+   "time": 0.625,
+   "bpm": 128
+  },
+  {
+   "time": 9.53125,
+   "bpm": null,
+   "stop": true
+  },
+  {
+   "time": 9.833292,
+   "bpm": 128
+  },
+  {
+   "time": 14.989542,
+   "bpm": null,
+   "stop": true
+  },
+  {
+   "time": 15.2,
+   "bpm": 127.612
+  },
+  {
+   "time": 24.133292,
+   "bpm": 130.908
+  },
+  {
+   "time": 31.466708,
+   "bpm": 130.213
+  },
+  {
+   "time": 39.3,
+   "bpm": 125.806
+  },
+  {
+   "time": 45.5,
+   "bpm": 129.73
+  }
+ ],
+ "beats": [
+  0.625,
+  1.09375,
+  1.5625,
+  2.03125,
+  2.5,
+  2.96875,
+  3.4375,
+  3.90625,
+  4.375,
+  4.84375,
+  5.3125,
+  5.78125,
+  6.25,
+  6.71875,
+  7.1875,
+  7.65625,
+  8.125,
+  8.59375,
+  9.0625,
+  9.833292,
+  10.302042,
+  10.770792,
+  11.239542,
+  11.708292,
+  12.177042,
+  12.645792,
+  13.114542,
+  13.583292,
+  14.052042,
+  14.520792,
+  15.2,
+  15.670167,
+  16.140354,
+  16.610521,
+  17.080687,
+  17.550875,
+  18.021042,
+  18.491208,
+  18.961396,
+  19.431562,
+  19.901729,
+  20.371917,
+  20.842083,
+  21.31225,
+  21.782438,
+  22.252604,
+  22.722771,
+  23.192958,
+  23.663125,
+  24.133292,
+  24.591646,
+  25.049979,
+  25.508312,
+  25.966646,
+  26.424979,
+  26.883333,
+  27.341667,
+  27.8,
+  28.258333,
+  28.716667,
+  29.175021,
+  29.633354,
+  30.091687,
+  30.550021,
+  31.008354,
+  31.466708,
+  31.927479,
+  32.388271,
+  32.849042,
+  33.309833,
+  33.770604,
+  34.231396,
+  34.692167,
+  35.152958,
+  35.61375,
+  36.074521,
+  36.535313,
+  36.996083,
+  37.456875,
+  37.917646,
+  38.378437,
+  38.839208,
+  39.3,
+  39.776917,
+  40.253854,
+  40.730771,
+  41.207687,
+  41.684625,
+  42.161542,
+  42.638458,
+  43.115375,
+  43.592312,
+  44.069229,
+  44.546146,
+  45.023083,
+  45.5,
+  45.9625,
+  46.425,
+  46.8875,
+  47.35,
+  47.8125,
+  48.275,
+  48.7375,
+  49.2,
+  49.6625,
+  50.125,
+  50.5875,
+  51.05,
+  51.5125,
+  51.975,
+  52.4375,
+  52.9,
+  53.3625,
+  53.825,
+  54.2875,
+  54.75,
+  55.2125,
+  55.675
+ ],
+ "bars": [
+  0.625,
+  2.5,
+  4.375,
+  6.25,
+  8.125,
+  9.833292,
+  11.708292,
+  13.583292,
+  15.2,
+  17.080687,
+  18.961396,
+  20.842083,
+  22.722771,
+  24.133292,
+  25.966646,
+  27.8,
+  29.633354,
+  31.466708,
+  33.309833,
+  35.152958,
+  36.996083,
+  38.839208,
+  39.3,
+  41.207687,
+  43.115375,
+  45.023083,
+  45.5,
+  47.35,
+  49.2,
+  51.05,
+  52.9,
+  54.75
+ ],
+ "sections": [
+  {
+   "name": "title",
+   "start": 0,
+   "end": 2.5,
+   "energy": 0.3
+  },
+  {
+   "name": "find",
+   "start": 2.5,
+   "end": 9.833292,
+   "energy": 0.8,
+   "bpm": 128,
+   "stopSeconds": 0.302
+  },
+  {
+   "name": "disk",
+   "start": 9.833292,
+   "end": 15.2,
+   "energy": 0.85,
+   "bpm": 128,
+   "stopSeconds": 0.21
+  },
+  {
+   "name": "transfer",
+   "start": 15.2,
+   "end": 24.133292,
+   "energy": 1,
+   "bpm": 127.612
+  },
+  {
+   "name": "safety",
+   "start": 24.133292,
+   "end": 31.466708,
+   "energy": 0.45,
+   "bpm": 130.908
+  },
+  {
+   "name": "terminal",
+   "start": 31.466708,
+   "end": 39.3,
+   "energy": 0.9,
+   "bpm": 130.213
+  },
+  {
+   "name": "ai",
+   "start": 39.3,
+   "end": 45.5,
+   "energy": 1,
+   "bpm": 125.806
+  },
+  {
+   "name": "scope",
+   "start": 45.5,
+   "end": 52.9,
+   "energy": 0.95,
+   "bpm": 129.73
+  },
+  {
+   "name": "end-card",
+   "start": 52.9,
+   "end": 56.033333,
+   "energy": 0.6
+  }
+ ],
+ "hits": [
+  {
+   "time": 0.25,
+   "kind": "riser-start",
+   "strength": 0.4
+  },
+  {
+   "time": 2.5,
+   "kind": "impact",
+   "strength": 1
+  },
+  {
+   "time": 2.5,
+   "kind": "kick-accent",
+   "strength": 0.8
+  },
+  {
+   "time": 2.5,
+   "kind": "riser-end",
+   "strength": 0.9
+  },
+  {
+   "time": 2.5,
+   "kind": "stab",
+   "strength": 0.9
+  },
+  {
+   "time": 2.96875,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 3.90625,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 4.375,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 4.84375,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 5.78125,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 6.25,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 6.71875,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 7.65625,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 8.427042,
+   "kind": "riser-start",
+   "strength": 0.5
+  },
+  {
+   "time": 9.53125,
+   "kind": "stop",
+   "strength": 0.7
+  },
+  {
+   "time": 9.833292,
+   "kind": "drop",
+   "strength": 1
+  },
+  {
+   "time": 9.833292,
+   "kind": "impact",
+   "strength": 0.7
+  },
+  {
+   "time": 9.833292,
+   "kind": "kick-accent",
+   "strength": 0.8
+  },
+  {
+   "time": 9.833292,
+   "kind": "riser-end",
+   "strength": 0.9
+  },
+  {
+   "time": 10.302042,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 11.239542,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 11.708292,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 12.177042,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 13.114542,
+   "kind": "clap",
+   "strength": 0.54
+  },
+  {
+   "time": 13.583292,
+   "kind": "stop",
+   "strength": 0.8
+  },
+  {
+   "time": 15.2,
+   "kind": "drop",
+   "strength": 1
+  },
+  {
+   "time": 15.2,
+   "kind": "impact",
+   "strength": 1
+  },
+  {
+   "time": 15.2,
+   "kind": "kick-accent",
+   "strength": 0.8
+  },
+  {
+   "time": 15.2,
+   "kind": "stab",
+   "strength": 1
+  },
+  {
+   "time": 15.670167,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 16.610521,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 17.080687,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 17.550875,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 18.491208,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 18.726312,
+   "kind": "stab",
+   "strength": 0.7
+  },
+  {
+   "time": 18.961396,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 19.431562,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 20.371917,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 20.842083,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 21.31225,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 21.782438,
+   "kind": "riser-start",
+   "strength": 0.5
+  },
+  {
+   "time": 22.252604,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 22.487687,
+   "kind": "stab",
+   "strength": 0.7
+  },
+  {
+   "time": 24.133292,
+   "kind": "impact",
+   "strength": 0.9
+  },
+  {
+   "time": 24.133292,
+   "kind": "riser-end",
+   "strength": 0.9
+  },
+  {
+   "time": 24.133292,
+   "kind": "stab",
+   "strength": 0.9
+  },
+  {
+   "time": 27.8,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 27.8,
+   "kind": "riser-start",
+   "strength": 0.5
+  },
+  {
+   "time": 29.633354,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 31.466708,
+   "kind": "impact",
+   "strength": 0.9
+  },
+  {
+   "time": 31.466708,
+   "kind": "kick-accent",
+   "strength": 0.8
+  },
+  {
+   "time": 31.466708,
+   "kind": "riser-end",
+   "strength": 0.9
+  },
+  {
+   "time": 31.466708,
+   "kind": "stab",
+   "strength": 0.8
+  },
+  {
+   "time": 31.927479,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 32.849042,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 33.309833,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 33.770604,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 34.692167,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 35.152958,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 35.61375,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 36.535313,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 36.996083,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 37.456875,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 38.378437,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 38.839208,
+   "kind": "stop",
+   "strength": 0.8
+  },
+  {
+   "time": 39.3,
+   "kind": "drop",
+   "strength": 1
+  },
+  {
+   "time": 39.3,
+   "kind": "impact",
+   "strength": 1
+  },
+  {
+   "time": 39.3,
+   "kind": "kick-accent",
+   "strength": 0.8
+  },
+  {
+   "time": 39.3,
+   "kind": "lead-in",
+   "strength": 0.7
+  },
+  {
+   "time": 39.3,
+   "kind": "stab",
+   "strength": 1
+  },
+  {
+   "time": 39.776917,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 40.730771,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 41.207687,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 41.684625,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 42.638458,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 43.115375,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 43.592312,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 44.546146,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 45.023083,
+   "kind": "lead-out",
+   "strength": 0.5
+  },
+  {
+   "time": 45.023083,
+   "kind": "stop",
+   "strength": 0.8
+  },
+  {
+   "time": 45.5,
+   "kind": "drop",
+   "strength": 1
+  },
+  {
+   "time": 45.5,
+   "kind": "impact",
+   "strength": 0.9
+  },
+  {
+   "time": 45.5,
+   "kind": "kick-accent",
+   "strength": 0.8
+  },
+  {
+   "time": 45.5,
+   "kind": "lead-in",
+   "strength": 0.7
+  },
+  {
+   "time": 45.5,
+   "kind": "stab",
+   "strength": 0.9
+  },
+  {
+   "time": 45.9625,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 46.8875,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 47.35,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 47.8125,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 48.7375,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 49.2,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 49.2,
+   "kind": "riser-start",
+   "strength": 0.5
+  },
+  {
+   "time": 49.6625,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 50.5875,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 51.05,
+   "kind": "kick-accent",
+   "strength": 0.5
+  },
+  {
+   "time": 51.05,
+   "kind": "lead-out",
+   "strength": 0.5
+  },
+  {
+   "time": 51.5125,
+   "kind": "clap",
+   "strength": 0.6
+  },
+  {
+   "time": 52.9,
+   "kind": "impact",
+   "strength": 1
+  },
+  {
+   "time": 52.9,
+   "kind": "riser-end",
+   "strength": 0.9
+  },
+  {
+   "time": 52.9,
+   "kind": "stab",
+   "strength": 1
+  }
+ ],
+ "audio": {
+  "wav": "demo-video-v2/output/music-v7/explore-better-music-D.wav",
+  "sha256": "7faab8d275180b79358ecd5b8722a22b3c06acefd3ec09ff24bcec7d4a71450c"
+ }
+}
