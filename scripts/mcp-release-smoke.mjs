@@ -98,6 +98,55 @@ const upload = releaseWorkflow.jobs.publish.steps.find((step) => step.name === "
 assert.equal(protection.shell, "pwsh");
 assert.equal(upload.shell, "pwsh");
 
+// Optional Authenticode signing (docs/CODE_SIGNING.md). Exactly one build job runs: the
+// unsigned one never holds an OIDC token; the tag-only signed one requests Azure
+// credentials only after npm ci and the pre-packaging build, and drops them straight
+// after electron-builder has signed and packaged.
+const unsignedBuild = releaseWorkflow.jobs.build;
+const signedBuild = releaseWorkflow.jobs["build-signed"];
+assert.deepEqual(unsignedBuild.permissions, { contents: "read" }, "The unsigned build must not be able to request an OIDC token.");
+assert.deepEqual(signedBuild.permissions, { contents: "read", "id-token": "write" });
+assert.equal(signedBuild.environment, "release-signing", "Azure must trust only the tag-restricted signing environment.");
+assert.match(signedBuild.if, /^startsWith\(github\.ref, 'refs\/tags\/'\) && \(vars\.AZURE_SIGNING_ENDPOINT != '' \|\| /);
+assert.equal(unsignedBuild.if, `\${{ !(${signedBuild.if}) }}`, "The unsigned and signed build gates must be exact complements.");
+assert(!/\$\{\{\s*secrets\./.test(releaseWorkflowText), "Signing uses OIDC and repository variables; the release workflow needs no secrets.");
+const signedSteps = signedBuild.steps;
+const stepIndex = (predicate, label) => {
+  const index = signedSteps.findIndex(predicate);
+  assert(index >= 0, `Signed build is missing: ${label}`);
+  return index;
+};
+const loginIndex = stepIndex((step) => step.uses?.startsWith("azure/login@"), "azure/login");
+const signOutIndex = stepIndex((step) => step.name === "Sign out of Azure", "Azure sign-out");
+const metadataIndex = stepIndex((step) => step.name === "Build update metadata from the signed output", "release metadata");
+const strictIndex = stepIndex((step) => step.name === "Require trusted, timestamped Authenticode signatures", "strict signature verification");
+assert.deepEqual(Object.keys(signedSteps[loginIndex].with).sort(), ["client-id", "subscription-id", "tenant-id"], "azure/login must use OIDC without a client secret.");
+assert.deepEqual(signedSteps.slice(loginIndex + 1, signOutIndex).map((step) => step.name), ["Obtain the Artifact Signing access token", "Package and sign installer"]);
+assert.equal(signedSteps[signOutIndex].if, "always()");
+signedSteps.forEach((step, index) => {
+  if (/\bnpm (ci|install|audit)\b|prepackage/.test(step.run || "")) assert(index < loginIndex, `${step.name || step.run} must finish before Azure sign-in.`);
+});
+assert(signOutIndex < metadataIndex && metadataIndex < strictIndex, "Signatures are verified after every release file exists.");
+assert.equal(signedSteps[strictIndex].env?.EXPLORE_BETTER_SIGNING_SUBJECT, "${{ vars.AZURE_SIGNING_PUBLISHER_NAME }}", "Signed releases must verify strictly.");
+assert.equal(signedSteps[metadataIndex].env?.EXPLORE_BETTER_MCPB_SIDECAR, "dist/win-unpacked/resources/native/ExploreBetterMcp.exe");
+const packageStep = signedSteps[loginIndex + 2];
+assert.match(packageStep.run, /^node scripts\/run-electron-builder\.mjs --win nsis\s/);
+for (const name of ["ENDPOINT", "ACCOUNT", "PROFILE", "PUBLISHER_NAME"]) {
+  assert.equal(packageStep.env[`EXPLORE_BETTER_AZURE_SIGNING_${name}`], `\${{ vars.AZURE_SIGNING_${name} }}`);
+}
+const unsignedRecord = unsignedBuild.steps.find((step) => step.name === "Record current Authenticode status");
+assert(unsignedRecord && !unsignedRecord.env, "Unsigned builds keep the warn-only Authenticode record.");
+const releaseStepList = (step) => [...step.run.match(/\$releaseSteps = @\(([^)]*)\)/)[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
+const unsignedList = releaseStepList(unsignedBuild.steps.find((step) => step.name === "Build installer and update metadata"));
+assert.equal(unsignedList[0], "package:installer");
+assert.deepEqual(releaseStepList(signedSteps[metadataIndex]), unsignedList.slice(1), "Signed and unsigned builds must run the same release steps.");
+const uploadInputs = (job) => job.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@")).with;
+assert.deepEqual(uploadInputs(signedBuild), uploadInputs(unsignedBuild), "Both builds must hand publish the same artifact.");
+const setupSteps = (job) => job.steps.filter((step) => step.uses?.startsWith("actions/") && !step.uses.startsWith("actions/upload-artifact@"));
+assert.deepEqual(setupSteps(signedBuild), setupSteps(unsignedBuild));
+assert.deepEqual(releaseWorkflow.jobs.publish.needs, ["build", "build-signed"]);
+assert.equal(releaseWorkflow.jobs.publish.if, "${{ !cancelled() && startsWith(github.ref, 'refs/tags/') && contains(needs.*.result, 'success') && !contains(needs.*.result, 'failure') }}");
+
 // Execute the actual workflow blocks with local function stubs. These fixtures cannot
 // contact GitHub or publish anything; the only files created are under the temp root.
 const workflowTemp = await fs.mkdtemp(path.join(os.tmpdir(), "eb-release-workflow-"));
@@ -193,4 +242,4 @@ exit 0
   assert(resolved.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(resolved).startsWith("eb-release-workflow-"));
   await fs.rm(resolved, { recursive: true, force: true });
 }
-console.log(`MCP release smoke passed: immutable published assets, exact tag/version checks, bundle/manifest/sidecar digests, legacy checksums, Registry metadata, read-only Registry workflow, and ${workflowCases} isolated release workflow cases.`);
+console.log(`MCP release smoke passed: immutable published assets, exact tag/version checks, bundle/manifest/sidecar digests, legacy checksums, Registry metadata, read-only Registry workflow, OIDC-isolated optional signed build, and ${workflowCases} isolated release workflow cases.`);

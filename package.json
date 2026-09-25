@@ -116,6 +116,7 @@
     "verify:release-integrity": "node scripts/release-integrity-smoke.mjs",
     "verify:code-signing": "node scripts/code-signing-rehearsal-smoke.mjs",
     "verify:production-signing": "node scripts/production-signing-smoke.mjs",
+    "verify:azure-signing-config": "node scripts/azure-signing-config-smoke.mjs",
     "verify:production-readiness": "node scripts/production-readiness-smoke.mjs",
     "build:update-feed": "node scripts/generate-update-feed.mjs",
     "build:release-checksums": "node scripts/generate-release-checksums.mjs",
@@ -268,12 +269,12 @@
         "to": "app-icon.png"
       },
       {
-        "from": "native/bin/explore-better-fs.exe",
-        "to": "native/explore-better-fs.exe"
-      },
-      {
-        "from": "native/bin/ExploreBetterMcp.exe",
-        "to": "native/ExploreBetterMcp.exe"
+        "from": "native/bin",
+        "to": "native",
+        "filter": [
+          "explore-better-fs.exe",
+          "ExploreBetterMcp.exe"
+        ]
       }
     ],
     "asarUnpack": [

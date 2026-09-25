@@ -15,5 +15,6 @@ assert(result.status === 0, `Packaged MCP sidecar self-test failed: ${result.std
 const report = JSON.parse(result.stdout);
 assert(report.ok && report.tools === 32 && report.resources === 6 && report.mcpProtocolVersion === "2025-11-25", "Packaged MCP contract report is invalid.");
 const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
-assert(packageJson.build.extraResources.some((item) => item.to === "native/ExploreBetterMcp.exe"), "Package metadata does not include the MCP sidecar.");
+// Directory form so electron-builder's signing transformer sees the helpers (single-file entries bypass it).
+assert(packageJson.build.extraResources.some((item) => item.from === "native/bin" && item.to === "native" && item.filter?.includes("ExploreBetterMcp.exe")), "Package metadata does not include the MCP sidecar.");
 console.log(`Packaged MCP smoke passed: ${report.tools} tools, sha256=${await hash(packaged)}.`);
