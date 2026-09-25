@@ -109,6 +109,20 @@ async function main() {
     assert(!(await fs.stat(path.join(targetRoot, "project", "new.txt")).then(() => true).catch(() => false)), "Failed overwrite must not expose staged bytes.");
     assert((await partialPaths(targetRoot)).length === 0, "Failed overwrite must remove sibling staging paths.");
     checks.push({ name: "directory overwrite rollback restores original byte-for-byte", pass: true });
+
+    const stagedCopySource = path.join(sourceRoot, "staged-copy.txt");
+    await fs.writeFile(stagedCopySource, "staged copy\n");
+    await requestJson(baseUrl, "/api/copy", {
+      method: "POST",
+      body: JSON.stringify({ paths: [stagedCopySource], targetDir: targetRoot })
+    }).catch(() => null);
+    const stagedCopyState = await requestJson(baseUrl, "/api/state");
+    const failedStagedCopy = stagedCopyState.operations?.find((operation) => operation.type === "copy");
+    assert(failedStagedCopy?.status === "failed", "Injected staging rename should fail the copy operation.");
+    assert(failedStagedCopy?.result?.transaction?.phase === "staging-failed", "Copy failure must keep the staging transaction record.");
+    assert(failedStagedCopy?.result?.recovery?.remainingCount === 1, "Copy failure must report the remaining item.");
+    assert((await partialPaths(targetRoot)).length === 0, "Failed copy must remove sibling staging paths.");
+    checks.push({ name: "copy staging failure keeps transaction and recovery details", pass: true });
   } finally {
     await stopServer(server);
     server = null;
@@ -146,6 +160,109 @@ async function main() {
     assert((await fs.readFile(moveTarget, "utf8")) === "move once\n", "Resume must not recopy or alter the committed destination.");
     assert((await partialPaths(targetRoot)).length === 0, "Cross-volume move must leave no staging path.");
     checks.push({ name: "cross-volume retry removes source without recopying destination", pass: true });
+  } finally {
+    await stopServer(server);
+    server = null;
+  }
+
+  const batchTarget = path.join(fixture, "copy-batch-target");
+  const batchFirst = path.join(sourceRoot, "batch-first.txt");
+  const batchSecond = path.join(sourceRoot, "batch-second.txt");
+  const batchThird = path.join(sourceRoot, "batch-third.txt");
+  await fs.mkdir(batchTarget, { recursive: true });
+  await fs.writeFile(batchFirst, "first\n");
+  await fs.writeFile(batchSecond, "second\n");
+  await fs.writeFile(batchThird, "third\n");
+  try {
+    server = await startServer({
+      port,
+      appData,
+      env: { EB_TEST_OPERATION_DELAY_MS: "2000", EB_TEST_OPERATION_DELAY_AFTER_ITEMS: "1" }
+    });
+    const copyRequest = requestJson(baseUrl, "/api/copy", {
+      method: "POST",
+      body: JSON.stringify({ paths: [batchFirst, batchSecond, batchThird], targetDir: batchTarget })
+    }).catch(() => null);
+    const firstCopied = path.join(batchTarget, "batch-first.txt");
+    const deadline = Date.now() + 10000;
+    while (!(await fs.stat(firstCopied).then(() => true).catch(() => false))) {
+      assert(Date.now() < deadline, "First batch item was not copied in time.");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await fs.rm(batchSecond);
+    await copyRequest;
+    const batchState = await requestJson(baseUrl, "/api/state");
+    const failedCopy = batchState.operations?.find((operation) => operation.type === "copy" && operation.status === "failed" && operation.result?.recovery?.completedCount === 1);
+    assert(failedCopy, "Mid-batch copy failure must record the completed item.");
+    const recovery = failedCopy.result.recovery;
+    assert(recovery.completed[0]?.dest === firstCopied, "Recovery must list the copied destination.");
+    assert(recovery.failed?.path === batchSecond, "Recovery must name the failed item.");
+    assert(recovery.remainingCount === 2 && recovery.retry?.body?.paths?.length === 2, "Recovery must offer retry for the remaining items.");
+    assert(failedCopy.undo?.items?.[0]?.path === firstCopied, "Undo must cover the completed copy.");
+    checks.push({ name: "mid-batch copy failure keeps completed list, undo, and retry", pass: true });
+  } finally {
+    await stopServer(server);
+    server = null;
+  }
+
+  const crossRoot = path.join(fixture, "cross");
+  const crossTarget = path.join(fixture, "cross-target");
+  await fs.mkdir(path.join(crossRoot, "tree", "sub"), { recursive: true });
+  await fs.mkdir(crossTarget, { recursive: true });
+  await fs.writeFile(path.join(crossRoot, "tree", "a.txt"), "tree a\n");
+  await fs.writeFile(path.join(crossRoot, "tree", "sub", "b.txt"), "tree b\n");
+  await fs.writeFile(path.join(crossRoot, "trash-me.txt"), "trash me\n");
+  await fs.writeFile(path.join(crossRoot, "replace.txt"), "replacement\n");
+  await fs.writeFile(path.join(crossTarget, "replace.txt"), "replaced original\n");
+  try {
+    server = await startServer({ port, appData, env: { EB_TEST_FORCE_CROSS_VOLUME_MOVE: "1" } });
+    const moved = await requestJson(baseUrl, "/api/move", {
+      method: "POST",
+      body: JSON.stringify({ paths: [path.join(crossRoot, "tree")], targetDir: crossTarget })
+    });
+    assert(moved.operation?.status === "completed", "Cross-volume folder move should complete.");
+    assert(!(await fs.stat(path.join(crossRoot, "tree")).then(() => true).catch(() => false)), "Cross-volume move must remove the verified source.");
+    assert((await fs.readFile(path.join(crossTarget, "tree", "sub", "b.txt"), "utf8")) === "tree b\n", "Cross-volume move must keep nested content.");
+    assert((await partialPaths(crossTarget)).length === 0, "Cross-volume folder move must leave no staging path.");
+
+    const trashed = await requestJson(baseUrl, "/api/trash", {
+      method: "POST",
+      body: JSON.stringify({ paths: [path.join(crossRoot, "trash-me.txt")] })
+    });
+    assert(trashed.operation?.status === "completed", "Cross-volume trash should complete.");
+    assert((await fs.readFile(trashed.items[0].dest, "utf8")) === "trash me\n", "Cross-volume trash must keep the trashed bytes.");
+
+    const replaceBody = { paths: [path.join(crossRoot, "replace.txt")], targetDir: crossTarget, mode: "copy", conflictMode: "overwrite" };
+    const replacePreview = await requestJson(baseUrl, "/api/transfer/preview", { method: "POST", body: JSON.stringify(replaceBody) });
+    const replaced = await requestJson(baseUrl, "/api/transfer", {
+      method: "POST",
+      body: JSON.stringify({ ...replaceBody, expectedPlanDigest: replacePreview.planDigest })
+    });
+    const backup = replaced.items?.[0]?.backup;
+    assert(backup && (await fs.readFile(backup, "utf8")) === "replaced original\n", "Overwrite must back up the replaced file.");
+    const appTrash = await requestJson(baseUrl, "/api/app-trash");
+    const backupEntry = appTrash.items?.find((item) => item.path?.toLowerCase() === backup.toLowerCase());
+    assert(backupEntry?.originalPath?.toLowerCase() === path.join(crossTarget, "replace.txt").toLowerCase(), "App Trash must show the original location of overwrite backups.");
+    checks.push({ name: "cross-volume move/trash verify once and App Trash maps backups", pass: true });
+
+    const zipped = await requestJson(baseUrl, "/api/archive/create", {
+      method: "POST",
+      body: JSON.stringify({ paths: [path.join(crossTarget, "tree")], targetDir: crossTarget, name: "tree.zip" })
+    });
+    const extracted = await requestJson(baseUrl, "/api/archive/extract", {
+      method: "POST",
+      body: JSON.stringify({ archive: zipped.archive, targetDir: crossTarget, folderName: "unzipped" })
+    });
+    assert((await fs.readFile(path.join(extracted.extractedDir, "tree", "sub", "b.txt"), "utf8")) === "tree b\n", "Extraction must produce archive contents.");
+    const badZip = path.join(crossTarget, "broken.zip");
+    await fs.writeFile(badZip, "not a zip archive");
+    await requestJson(baseUrl, "/api/archive/extract", {
+      method: "POST",
+      body: JSON.stringify({ archive: badZip, targetDir: crossTarget, folderName: "broken-out" })
+    }).catch(() => null);
+    assert(!(await fs.stat(path.join(crossTarget, "broken-out")).then(() => true).catch(() => false)), "Failed extraction must not leave a partial folder.");
+    assert((await partialPaths(crossTarget)).length === 0, "Failed extraction must remove its staging folder.");
+    checks.push({ name: "archive extraction stages and leaves nothing on failure", pass: true });
   } finally {
     await stopServer(server);
   }
