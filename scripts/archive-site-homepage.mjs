@@ -68,9 +68,22 @@ html = html
     `<link rel="canonical" href="${archiveUrl}" />`
   )
   .replace(
-    '<body class="pitch-home">',
-    `<body class="pitch-home">\n    <aside class="legacy-notice" aria-label="Archived page notice">\n      ${archiveNotice}. All original content is preserved here.\n      <a href="index.html">Return to the current homepage</a>\n    </aside>`
+    /<body[^>]*>/,
+    (body) => `${body}\n    <aside class="legacy-notice" aria-label="Archived page notice">\n      ${archiveNotice}. All original content is preserved here.\n      <a href="index.html">Return to the current homepage</a>\n    </aside>`
   );
+
+// Archives must keep looking the way they did, so the live stylesheet and script are frozen
+// into legacy-assets/ beside the snapshot instead of being shared with the evolving site.
+// (Archives made before site.css existed use the frozen styles.css and script.js.)
+const archiveBase = archiveName.replace(/\.html$/, "");
+const frozenAssets = [];
+for (const [live, extension] of [["site.css", "css"], ["site.js", "js"]]) {
+  const reference = extension === "css" ? `href="${live}"` : `src="${live}"`;
+  if (!html.includes(reference)) continue;
+  const frozen = `legacy-assets/${archiveBase}.${extension}`;
+  frozenAssets.push([path.join(root, "site", live), path.join(root, "site", ...frozen.split("/"))]);
+  html = html.replace(reference, extension === "css" ? `href="${frozen}"` : `src="${frozen}"`);
+}
 
 if (
   !html.includes(archiveNotice) ||
@@ -88,6 +101,10 @@ const previousLink = /<a href="legacy-[^"]+\.html">Previous Homepage<\/a>/;
 if (!previousLink.test(source)) throw new Error("site/index.html has no Previous Homepage footer link to update.");
 const homepage = source.replace(previousLink, `<a href="${archiveName}">Previous Homepage</a>`);
 
+for (const [source, target] of frozenAssets) {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.copyFile(source, target);
+}
 await fs.writeFile(archivePath, html, "utf8");
 if (homepage !== source) await fs.writeFile(sourcePath, homepage, "utf8");
 console.log(`Archived site/index.html as site/${archiveName} and linked it as the Previous Homepage.`);
