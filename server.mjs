@@ -2662,21 +2662,28 @@ function operationLabel(type, body) {
   return type;
 }
 
-function retryString(value, maxLength = 1200) {
+const retryPathMaxLength = 32767;
+const retryMaxItems = 100_000;
+
+function retryString(value, maxLength = retryPathMaxLength) {
   return String(value || "").trim().slice(0, maxLength);
 }
 
-function retryStringArray(value, maxItems = 500, maxLength = 1200) {
+function retryStringArray(value, maxItems = retryMaxItems, maxLength = retryPathMaxLength) {
   return (Array.isArray(value) ? value : [])
     .map((item) => retryString(item, maxLength))
     .filter(Boolean)
     .slice(0, maxItems);
 }
 
+function retryListTooLarge(value) {
+  return Array.isArray(value) && value.length > retryMaxItems;
+}
+
 function retryItemPolicies(value) {
   const source = value && typeof value === "object" ? value : {};
   const policies = {};
-  for (const [itemPath, policy] of Object.entries(source).slice(0, 500)) {
+  for (const [itemPath, policy] of Object.entries(source).slice(0, retryMaxItems)) {
     if (conflictModes.has(policy)) {
       const cleanPath = retryString(itemPath);
       if (cleanPath) {
@@ -2710,6 +2717,9 @@ function retryBodyForOperation(type, body = {}) {
     return null;
   }
   const source = body && typeof body === "object" ? body : {};
+  if (retryListTooLarge(source.paths) || retryListTooLarge(source.items)) {
+    return null;
+  }
   const paths = retryStringArray(source.paths);
 
   if (type === "copy" || type === "move") {
@@ -2747,7 +2757,7 @@ function retryBodyForOperation(type, body = {}) {
   if (type === "sync") {
     const leftPath = retryString(source.leftPath);
     const rightPath = retryString(source.rightPath);
-    const items = retryStringArray(source.items, 1000);
+    const items = retryStringArray(source.items);
     return leftPath && rightPath && items.length
       ? {
           leftPath,
@@ -3208,6 +3218,32 @@ async function enqueueRetryableOperation(type, body, runner, options = {}) {
   });
 }
 
+function renameComparableName(itemPath) {
+  const name = path.basename(itemPath);
+  return process.platform === "win32" ? name.replace(/[. ]+$/, "").toLowerCase() : name;
+}
+
+async function renameTargetTaken(src, dest) {
+  const existing = await fs.lstat(dest, { bigint: true }).catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)));
+  if (!existing) {
+    return false;
+  }
+  const source = await fs.lstat(src, { bigint: true });
+  const sameName = renameComparableName(src) === renameComparableName(dest);
+  if (!existing.ino) {
+    return !sameName;
+  }
+  return !(sameFileIdentity(source, existing) && (existing.nlink <= 1n || sameName));
+}
+
+async function assertRenameTargetAvailable(src, dest) {
+  if (await renameTargetTaken(src, dest)) {
+    const error = new Error("A file or folder with that name already exists.");
+    error.code = "EEXIST";
+    throw error;
+  }
+}
+
 async function runRetryableOperation(type, body, options = {}) {
   if (type === "copy") {
     const sources = Array.isArray(body.paths) ? body.paths : [];
@@ -3335,6 +3371,7 @@ async function runRetryableOperation(type, body, options = {}) {
     const dest = path.join(path.dirname(src), cleanEntryName(body.name));
     return enqueueRetryableOperation(type, body, async (hooks) => {
       await hooks.updateProgress?.({ unit: "items", total: 1, completed: 0, phase: "Renaming", currentPath: src });
+      await assertRenameTargetAvailable(src, dest);
       await fs.rename(src, dest);
       await hooks.updateProgress?.({ unit: "items", total: 1, completed: 1, phase: "Updating labels", currentPath: dest });
       await checkpointRecovery(hooks, {
@@ -3374,11 +3411,44 @@ async function runRetryableOperation(type, body, options = {}) {
   throw new Error("This operation cannot be retried.");
 }
 
+const pendingOperationRetries = new Map();
+
+function claimOperationRetry(id, kind, indexes = []) {
+  const claims = pendingOperationRetries.get(id) || [];
+  const conflict = claims.some((claim) =>
+    claim.kind === kind
+      ? kind !== "selected" || claim.indexes.some((index) => indexes.includes(index))
+      : kind !== "retry" && claim.kind !== "retry"
+  );
+  if (conflict) {
+    throw new Error("A retry of this operation is already in progress.");
+  }
+  const claim = { kind, indexes };
+  pendingOperationRetries.set(id, [...claims, claim]);
+  return () => {
+    const remaining = (pendingOperationRetries.get(id) || []).filter((item) => item !== claim);
+    if (remaining.length) {
+      pendingOperationRetries.set(id, remaining);
+    } else {
+      pendingOperationRetries.delete(id);
+    }
+  };
+}
+
 async function retryRecordedOperation(operationId, options = {}) {
   const id = String(operationId || "");
   if (!id) {
     throw new Error("Operation id is required.");
   }
+  const release = claimOperationRetry(id, "retry");
+  try {
+    return await retryRecordedOperationClaimed(id, options);
+  } finally {
+    release();
+  }
+}
+
+async function retryRecordedOperationClaimed(id, options) {
   const state = await readState();
   const original = state.operations.find((item) => item.id === id);
   if (!original) {
@@ -3416,6 +3486,15 @@ async function retryRemainingRecordedOperation(operationId) {
   if (!id) {
     throw new Error("Operation id is required.");
   }
+  const release = claimOperationRetry(id, "remaining");
+  try {
+    return await retryRemainingRecordedOperationClaimed(id);
+  } finally {
+    release();
+  }
+}
+
+async function retryRemainingRecordedOperationClaimed(id) {
   const state = await readState();
   const original = state.operations.find((item) => item.id === id);
   if (!original) {
@@ -3461,7 +3540,7 @@ function selectedRecoveryIndexes(value) {
       indexes
         .map((item) => Number(item))
         .filter((item) => Number.isInteger(item) && item >= 0)
-        .slice(0, 500)
+        .slice(0, retryMaxItems)
     )
   ];
 }
@@ -3491,6 +3570,15 @@ async function retrySelectedRemainingRecordedOperation(operationId, indexes) {
   if (!selectedIndexes.length) {
     throw new Error("Select at least one remaining item to retry.");
   }
+  const release = claimOperationRetry(id, "selected", selectedIndexes);
+  try {
+    return await retrySelectedRemainingRecordedOperationClaimed(id, selectedIndexes);
+  } finally {
+    release();
+  }
+}
+
+async function retrySelectedRemainingRecordedOperationClaimed(id, selectedIndexes) {
   const state = await readState();
   const original = state.operations.find((item) => item.id === id);
   if (!original) {
@@ -3666,20 +3754,48 @@ function elevatedRetryWarnings(type) {
 function elevatedHelperScriptContent() {
   return `param(
   [Parameter(Mandatory = $true)]
-  [string]$PayloadPath
+  [string]$PayloadPath,
+  [string]$PayloadSha256 = ""
 )
 $ErrorActionPreference = "Stop"
 $runDir = Split-Path -Parent $PayloadPath
 $manifestPath = Join-Path -Path $runDir -ChildPath "manifest.json"
+$payloadBytes = [IO.File]::ReadAllBytes($PayloadPath)
+$sha256 = [Security.Cryptography.SHA256]::Create()
+$actualHash = ([BitConverter]::ToString($sha256.ComputeHash($payloadBytes)) -replace '-','').ToLowerInvariant()
+$sha256.Dispose()
+if ($PayloadSha256 -and $actualHash -ne $PayloadSha256.ToLowerInvariant()) {
+  throw "Payload hash mismatch. The elevated retry payload may have changed after preparation."
+}
 if (Test-Path -LiteralPath $manifestPath) {
   $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
   $expectedHash = ([string]$manifest.payloadSha256).ToLowerInvariant()
-  $actualHash = (Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($expectedHash -and $actualHash -ne $expectedHash) {
     throw "Payload hash mismatch. The elevated retry payload may have changed after preparation."
   }
 }
-$payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$payload = [Text.Encoding]::UTF8.GetString($payloadBytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
+
+function Remove-ItemTreeNoFollow {
+  param([Parameter(Mandatory = $true)][string]$LiteralPath)
+  $item = Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
+  $attributes = $item.Attributes
+  $isDirectory = [bool]($attributes -band [IO.FileAttributes]::Directory)
+  $isLink = [bool]($attributes -band [IO.FileAttributes]::ReparsePoint)
+  if (-not $isLink -and ($attributes -band [IO.FileAttributes]::ReadOnly)) {
+    $item.Attributes = $attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+  }
+  if ($isDirectory -and -not $isLink) {
+    foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)) {
+      Remove-ItemTreeNoFollow -LiteralPath $child.FullName
+    }
+  }
+  if ($isDirectory) {
+    [IO.Directory]::Delete($item.FullName, $false)
+  } else {
+    [IO.File]::Delete($item.FullName)
+  }
+}
 
 function Get-UniquePath {
   param(
@@ -3713,7 +3829,7 @@ foreach ($item in @($payload.items)) {
   $source = [string]$item.path
   try {
     if ($type -eq "delete") {
-      Remove-Item -LiteralPath $source -Recurse -Force -ErrorAction Stop
+      Remove-ItemTreeNoFollow -LiteralPath $source
       $results += [pscustomobject]@{ path = $source; action = "delete"; ok = $true }
       continue
     }
@@ -3784,7 +3900,8 @@ async function writeElevatedRetryHelper(payload) {
   const launcher = `$ErrorActionPreference = "Stop"
 $script = ${powerShellLiteral(scriptPath)}
 $payload = ${powerShellLiteral(payloadPath)}
-Start-Process -FilePath "powershell.exe" -Verb RunAs -WindowStyle Hidden -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script, "-PayloadPath", $payload)
+$payloadSha256 = '${payloadSha256}'
+Start-Process -FilePath "powershell.exe" -Verb RunAs -WindowStyle Hidden -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"' + $script + '"'), "-PayloadPath", ('"' + $payload + '"'), "-PayloadSha256", $payloadSha256)
 `;
 
   await fs.mkdir(runDir, { recursive: true });
@@ -12710,13 +12827,11 @@ async function buildBulkRenamePlan(body) {
   const options = body.options && typeof body.options === "object" ? body.options : {};
   const items = [];
   const targetCounts = new Map();
-  const sourceKeys = new Set();
 
   for (let index = 0; index < paths.length; index += 1) {
     const source = resolveUserPath(paths[index]);
     const parent = path.dirname(source);
     const originalName = path.basename(source);
-    sourceKeys.add(pathIdentity(source));
     let stats = null;
     let newName = originalName;
     let dest = source;
@@ -12758,6 +12873,7 @@ async function buildBulkRenamePlan(body) {
     });
   }
 
+  const vacatedKeys = new Set(items.filter((item) => item.status === "ready").map((item) => pathIdentity(item.source)));
   for (const item of items) {
     if (item.status !== "ready") {
       continue;
@@ -12773,7 +12889,7 @@ async function buildBulkRenamePlan(body) {
       item.reason = "Another selected item has the same target name.";
       continue;
     }
-    if ((await pathExists(item.dest)) && !sourceKeys.has(targetKey)) {
+    if ((await pathExists(item.dest)) && !vacatedKeys.has(targetKey)) {
       item.status = "collision";
       item.reason = "A file or folder with that name already exists.";
     }
@@ -12834,6 +12950,11 @@ async function applyBulkRename(body, hooks = {}) {
 
     for (const item of staged) {
       hooks.throwIfCanceled?.();
+      if (await lstatIfExists(item.dest)) {
+        const conflict = new Error(`A file or folder with that name already exists: ${item.dest}`);
+        conflict.code = "EEXIST";
+        throw conflict;
+      }
       await fs.rename(item.temp, item.dest);
       item.phase = "applied";
       applied.push({ source: item.source, dest: item.dest, originalName: item.originalName, newName: item.newName });
@@ -12897,6 +13018,9 @@ async function restoreBulkRenameItems(items) {
     }
 
     for (const item of staged) {
+      if (await lstatIfExists(item.to)) {
+        item.to = await uniquePath(path.dirname(item.to), path.basename(item.to));
+      }
       await fs.rename(item.temp, item.to);
       restored.push({ from: item.from, dest: item.to });
     }
@@ -13082,6 +13206,19 @@ async function recoverOperationBackups(operation, body = {}, hooks = {}) {
   };
 }
 
+async function lstatIfExists(itemPath) {
+  return fs.lstat(resolveUserPath(itemPath)).catch((error) => (error.code === "ENOENT" || error.code === "ENOTDIR" ? null : Promise.reject(error)));
+}
+
+async function persistUndoProgress(operation) {
+  await mutateState((nextState) => {
+    const index = nextState.operations.findIndex((item) => item.id === operation.id);
+    if (index !== -1) {
+      nextState.operations[index] = { ...nextState.operations[index], undo: operation.undo };
+    }
+  });
+}
+
 async function undoRecordedOperation(operation) {
   if (!operation || !operation.undo) {
     throw new Error("That operation does not have an undo action.");
@@ -13116,17 +13253,39 @@ async function undoRecordedOperation(operation) {
   }
 
   if (undo.type === "trash-created") {
-    const paths = undo.items.map((item) => item.path);
-    const trashed = await trashPaths(paths);
+    const paths = [];
+    const alreadyGone = [];
+    for (const item of undo.items) {
+      ((await lstatIfExists(item.path)) ? paths : alreadyGone).push(item.path);
+    }
+    const trashed = paths.length ? await trashPaths(paths) : { result: { moved: [], items: [] } };
+    const result = alreadyGone.length ? { ...trashed.result, alreadyGone } : trashed.result;
     operation.undo.appliedAt = new Date().toISOString();
-    operation.undo.result = trashed.result;
-    return { result: { undone: operation.id, trashed: trashed.result }, undo: null };
+    operation.undo.result = result;
+    return { result: { undone: operation.id, trashed: result }, undo: null };
   }
 
   if (undo.type === "move-back" || undo.type === "restore-trash") {
-    for (const item of undo.items) {
-      const dest = await moveToExactOrUnique(item.from, item.to);
-      restored.push({ from: item.from, dest });
+    try {
+      for (const item of undo.items) {
+        if (item.restoredTo) {
+          continue;
+        }
+        if (!(await lstatIfExists(item.from))) {
+          item.alreadyApplied = true;
+          continue;
+        }
+        const dest = await moveToExactOrUnique(item.from, item.to);
+        item.restoredTo = dest;
+        restored.push({ from: item.from, dest });
+      }
+    } catch (error) {
+      await updateLabelsForTransfers(restored.map((item) => ({ source: item.from, dest: item.dest })), "move").catch(() => {});
+      await persistUndoProgress(operation).catch(() => {});
+      throw error;
+    }
+    if (undo.items.length && undo.items.every((item) => item.alreadyApplied)) {
+      throw new Error("The items for this undo are no longer at their moved locations.");
     }
     await updateLabelsForTransfers(
       restored.map((item) => ({ source: item.from, dest: item.dest })),
@@ -13138,7 +13297,14 @@ async function undoRecordedOperation(operation) {
   }
 
   if (undo.type === "rename-back") {
-    const dest = await moveToExactOrUnique(undo.from, undo.to);
+    const from = resolveUserPath(undo.from);
+    const to = resolveUserPath(undo.to);
+    let dest = to;
+    if ((await pathExists(to)) && !(await renameTargetTaken(from, to))) {
+      await fs.rename(from, to);
+    } else {
+      dest = await moveToExactOrUnique(from, to);
+    }
     await updateLabelsForTransfers([{ source: undo.from, dest }], "move");
     operation.undo.appliedAt = new Date().toISOString();
     operation.undo.result = { dest };
