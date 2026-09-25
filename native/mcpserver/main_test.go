@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -371,6 +372,17 @@ func TestSessionIdentityIsStableWithoutTransportSessionID(t *testing.T) {
 	}
 	if stableSessionID("http-session") != "http-session" {
 		t.Fatal("a transport session ID was replaced")
+	}
+}
+
+func TestServedProtocolVersionsMatchContractAndSDK(t *testing.T) {
+	if _, _, err := loadContract(); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range handshakeProtocolVersions {
+		if !slices.Contains(mcp.SupportedProtocolVersions(), v) || v >= "2026-07-28" {
+			t.Fatalf("protocol version %q is not a handshake version supported by the SDK", v)
+		}
 	}
 }
 
