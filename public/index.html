@@ -149,7 +149,7 @@
             <button class="pane-command" data-action="recycle" data-pane="left" data-requires-selection disabled><span class="lucide-icon icon-recycle" aria-hidden="true"></span><span class="command-label">Recycle</span></button>
             <details class="pane-more">
               <summary title="More actions for the left pane" aria-label="More actions for the left pane"><span class="lucide-icon icon-more" aria-hidden="true"></span><span class="command-label">More</span></summary>
-              <div class="pane-more-menu" role="menu" aria-label="More left pane actions">
+              <div class="pane-more-menu" role="group" aria-label="More left pane actions">
                 <label><span>Kind</span><select class="kind-filter" data-kind-filter="left" aria-label="Kind filter left pane"></select></label>
                 <label><span>Label</span><select class="label-filter" data-label-filter="left" aria-label="Label filter left pane"></select></label>
                 <button data-action="new-file" data-pane="left">New File</button>
@@ -240,7 +240,7 @@
             <button class="pane-command" data-action="recycle" data-pane="right" data-requires-selection disabled><span class="lucide-icon icon-recycle" aria-hidden="true"></span><span class="command-label">Recycle</span></button>
             <details class="pane-more">
               <summary title="More actions for the right pane" aria-label="More actions for the right pane"><span class="lucide-icon icon-more" aria-hidden="true"></span><span class="command-label">More</span></summary>
-              <div class="pane-more-menu" role="menu" aria-label="More right pane actions">
+              <div class="pane-more-menu" role="group" aria-label="More right pane actions">
                 <label><span>Kind</span><select class="kind-filter" data-kind-filter="right" aria-label="Kind filter right pane"></select></label>
                 <label><span>Label</span><select class="label-filter" data-label-filter="right" aria-label="Label filter right pane"></select></label>
                 <button data-action="new-file" data-pane="right">New File</button>
@@ -412,10 +412,10 @@
       <div id="dock-overflow-menu" class="dock-overflow-menu" role="menu" aria-label="More shelf actions" hidden></div>
     </div>
 
-    <dialog class="command-dialog" id="command-dialog">
+    <dialog class="command-dialog" id="command-dialog" aria-labelledby="command-dialog-title">
       <div class="dialog-head">
         <div class="dialog-title-block">
-          <strong>Command Center</strong>
+          <strong id="command-dialog-title">Command Center</strong>
           <span id="command-context">Active pane commands</span>
         </div>
         <button class="icon-button" data-close-dialog="command-dialog" title="Close">X</button>
@@ -434,10 +434,10 @@
       <div id="command-results" class="command-results" role="listbox" aria-label="Available commands"></div>
     </dialog>
 
-    <dialog class="manual-dialog" id="manual-dialog">
+    <dialog class="manual-dialog" id="manual-dialog" aria-labelledby="manual-dialog-title">
       <div class="dialog-head">
         <div class="dialog-title-block">
-          <strong>Manual</strong>
+          <strong id="manual-dialog-title">Manual</strong>
           <span id="manual-summary">USER_MANUAL.md</span>
         </div>
         <div class="dialog-actions">
@@ -450,10 +450,10 @@
       <article id="manual-body" class="manual-body"></article>
     </dialog>
 
-    <dialog class="speed-dialog" id="speed-dialog">
+    <dialog class="speed-dialog" id="speed-dialog" aria-labelledby="speed-dialog-title">
       <div class="dialog-head">
         <div class="dialog-title-block">
-          <strong>Speed Index</strong>
+          <strong id="speed-dialog-title">Speed Index</strong>
           <span id="speed-path">Active folder</span>
         </div>
         <div class="dialog-actions">
@@ -513,10 +513,10 @@
       </div>
     </dialog>
 
-    <dialog class="size-analysis-dialog" id="size-analysis-dialog">
+    <dialog class="size-analysis-dialog" id="size-analysis-dialog" aria-labelledby="size-analysis-dialog-title">
       <div class="dialog-head">
         <div class="dialog-title-block">
-          <strong>Size Analyzer</strong>
+          <strong id="size-analysis-dialog-title">Size Analyzer</strong>
           <span id="size-analysis-summary">Ready</span>
         </div>
         <div class="dialog-actions">
@@ -543,8 +543,8 @@
         </div>
         <div class="size-analysis-viewbar">
           <div class="size-analysis-view-tabs" role="tablist" aria-label="Analyzer view">
-            <button type="button" role="tab" data-size-analysis-view="overview" data-size-analysis-action="view-overview" aria-selected="true">Overview</button>
-            <button type="button" role="tab" data-size-analysis-view="map" data-size-analysis-action="view-map" aria-selected="false">Map</button>
+            <button type="button" role="tab" id="size-analysis-tab-overview" data-size-analysis-view="overview" data-size-analysis-action="view-overview" aria-selected="true" aria-controls="size-analysis-overview-panel">Overview</button>
+            <button type="button" role="tab" id="size-analysis-tab-map" data-size-analysis-view="map" data-size-analysis-action="view-map" aria-selected="false" aria-controls="size-analysis-map-panel">Map</button>
           </div>
           <label class="size-analysis-map-option">
             <span>Size by</span>
@@ -566,7 +566,7 @@
         </div>
         <div id="size-analysis-scan-strip" class="size-analysis-scan-strip"></div>
         <div id="size-analysis-metrics" class="size-analysis-metrics"></div>
-        <div class="size-analysis-main">
+        <div class="size-analysis-main" id="size-analysis-overview-panel" role="tabpanel" aria-labelledby="size-analysis-tab-overview">
           <section class="size-analysis-table-panel size-analysis-folder-panel">
             <div class="size-analysis-section-head">
               <strong>Folder Tree</strong>
@@ -604,7 +604,7 @@
             </div>
           </section>
         </div>
-        <div class="size-analysis-map-row">
+        <div class="size-analysis-map-row" id="size-analysis-map-panel" role="tabpanel" aria-labelledby="size-analysis-tab-map">
           <section class="size-analysis-treemap-panel">
             <div class="size-analysis-section-head size-analysis-map-head">
               <div class="size-analysis-map-title">
@@ -647,10 +647,10 @@
       </div>
     </dialog>
 
-    <dialog class="history-dialog" id="history-dialog">
+    <dialog class="history-dialog" id="history-dialog" aria-labelledby="history-dialog-title">
       <div class="dialog-head">
         <div class="dialog-title-block">
-          <strong>Pane History</strong>
+          <strong id="history-dialog-title">Pane History</strong>
           <span id="history-summary">No history yet</span>
         </div>
         <div class="dialog-actions">
@@ -662,9 +662,9 @@
       <div id="history-list" class="history-list"></div>
     </dialog>
 
-    <dialog class="favorites-dialog" id="favorites-dialog">
+    <dialog class="favorites-dialog" id="favorites-dialog" aria-labelledby="favorites-dialog-title">
       <div class="dialog-head">
-        <strong>Favorites</strong>
+        <strong id="favorites-dialog-title">Favorites</strong>
         <div class="dialog-actions">
           <span id="favorite-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="favorites-dialog" title="Close">X</button>
@@ -729,9 +729,9 @@
       </div>
     </dialog>
 
-    <dialog class="hotkeys-dialog" id="hotkeys-dialog">
+    <dialog class="hotkeys-dialog" id="hotkeys-dialog" aria-labelledby="hotkeys-dialog-title">
       <div class="dialog-head">
-        <strong>Hotkeys</strong>
+        <strong id="hotkeys-dialog-title">Hotkeys</strong>
         <div class="dialog-actions">
           <span id="hotkey-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="hotkeys-dialog" title="Close">X</button>
@@ -761,9 +761,9 @@
       </div>
     </dialog>
 
-    <dialog class="backup-dialog" id="backup-dialog">
+    <dialog class="backup-dialog" id="backup-dialog" aria-labelledby="backup-dialog-title">
       <div class="dialog-head">
-        <strong>Config Backup</strong>
+        <strong id="backup-dialog-title">Config Backup</strong>
         <div class="dialog-actions">
           <span id="backup-summary">Ready</span>
           <button class="icon-button" data-close-dialog="backup-dialog" title="Close">X</button>
@@ -796,9 +796,9 @@
       </div>
     </dialog>
 
-    <dialog class="preferences-dialog" id="preferences-dialog">
+    <dialog class="preferences-dialog" id="preferences-dialog" aria-labelledby="preferences-dialog-title">
       <div class="dialog-head">
-        <strong>Preferences</strong>
+        <strong id="preferences-dialog-title">Preferences</strong>
         <div class="dialog-actions">
           <span id="preferences-summary">Ready</span>
           <button class="icon-button" data-close-dialog="preferences-dialog" title="Close">X</button>
@@ -972,9 +972,9 @@
       </form>
     </dialog>
 
-    <dialog class="toolbar-dialog" id="toolbar-dialog">
+    <dialog class="toolbar-dialog" id="toolbar-dialog" aria-labelledby="toolbar-dialog-title">
       <div class="dialog-head">
-        <strong>Toolbar</strong>
+        <strong id="toolbar-dialog-title">Toolbar</strong>
         <div class="dialog-actions">
           <span id="toolbar-summary">All buttons visible</span>
           <button class="icon-button" data-close-dialog="toolbar-dialog" title="Close">X</button>
@@ -993,9 +993,9 @@
       </div>
     </dialog>
 
-    <dialog class="select-dialog" id="select-dialog">
+    <dialog class="select-dialog" id="select-dialog" aria-labelledby="select-dialog-title">
       <div class="dialog-head">
-        <strong>Advanced Select</strong>
+        <strong id="select-dialog-title">Advanced Select</strong>
         <button class="icon-button" data-close-dialog="select-dialog" title="Close">X</button>
       </div>
       <form id="select-form" class="select-form">
@@ -1087,9 +1087,9 @@
       <div id="select-preview" class="select-preview"></div>
     </dialog>
 
-    <dialog class="selection-sets-dialog" id="selection-sets-dialog">
+    <dialog class="selection-sets-dialog" id="selection-sets-dialog" aria-labelledby="selection-sets-dialog-title">
       <div class="dialog-head">
-        <strong>Selection Sets</strong>
+        <strong id="selection-sets-dialog-title">Selection Sets</strong>
         <div class="dialog-actions">
           <span id="selection-set-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="selection-sets-dialog" title="Close">X</button>
@@ -1131,9 +1131,9 @@
       </div>
     </dialog>
 
-    <dialog class="copy-names-dialog" id="copy-names-dialog">
+    <dialog class="copy-names-dialog" id="copy-names-dialog" aria-labelledby="copy-names-dialog-title">
       <div class="dialog-head">
-        <strong>Copy Names</strong>
+        <strong id="copy-names-dialog-title">Copy Names</strong>
         <div class="dialog-actions">
           <span id="copy-names-summary">No target</span>
           <button class="icon-button" data-close-dialog="copy-names-dialog" title="Close">X</button>
@@ -1187,9 +1187,9 @@
       </div>
     </dialog>
 
-    <dialog class="checksums-dialog" id="checksums-dialog">
+    <dialog class="checksums-dialog" id="checksums-dialog" aria-labelledby="checksums-dialog-title">
       <div class="dialog-head">
-        <strong>Checksums</strong>
+        <strong id="checksums-dialog-title">Checksums</strong>
         <div class="dialog-actions">
           <span id="checksums-summary">No target</span>
           <button class="icon-button" data-close-dialog="checksums-dialog" title="Close">X</button>
@@ -1238,9 +1238,9 @@
       </div>
     </dialog>
 
-    <dialog class="script-dialog" id="script-dialog">
+    <dialog class="script-dialog" id="script-dialog" aria-labelledby="script-dialog-title">
       <div class="dialog-head">
-        <strong>Script</strong>
+        <strong id="script-dialog-title">Script</strong>
         <div class="dialog-actions">
           <span id="script-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="script-dialog" title="Close">X</button>
@@ -1293,9 +1293,9 @@
       </div>
     </dialog>
 
-    <dialog class="tools-dialog" id="tools-dialog">
+    <dialog class="tools-dialog" id="tools-dialog" aria-labelledby="tools-dialog-title">
       <div class="dialog-head">
-        <strong>Tools</strong>
+        <strong id="tools-dialog-title">Tools</strong>
         <button class="icon-button" data-close-dialog="tools-dialog" title="Close">X</button>
       </div>
       <div class="tools-grid">
@@ -1357,9 +1357,9 @@
       </div>
     </dialog>
 
-    <dialog class="layouts-dialog" id="layouts-dialog">
+    <dialog class="layouts-dialog" id="layouts-dialog" aria-labelledby="layouts-dialog-title">
       <div class="dialog-head">
-        <strong>Layouts</strong>
+        <strong id="layouts-dialog-title">Layouts</strong>
         <div class="dialog-actions">
           <span id="layout-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="layouts-dialog" title="Close">X</button>
@@ -1383,9 +1383,9 @@
       <div id="layout-list" class="layout-list"></div>
     </dialog>
 
-    <dialog class="tab-groups-dialog" id="tab-groups-dialog">
+    <dialog class="tab-groups-dialog" id="tab-groups-dialog" aria-labelledby="tab-groups-dialog-title">
       <div class="dialog-head">
-        <strong>Tab Groups</strong>
+        <strong id="tab-groups-dialog-title">Tab Groups</strong>
         <div class="dialog-actions">
           <span id="tab-group-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="tab-groups-dialog" title="Close">X</button>
@@ -1409,9 +1409,9 @@
       <div id="tab-group-list" class="tab-group-list"></div>
     </dialog>
 
-    <dialog class="aliases-dialog" id="aliases-dialog">
+    <dialog class="aliases-dialog" id="aliases-dialog" aria-labelledby="aliases-dialog-title">
       <div class="dialog-head">
-        <strong>Folder Aliases</strong>
+        <strong id="aliases-dialog-title">Folder Aliases</strong>
         <div class="dialog-actions">
           <span id="alias-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="aliases-dialog" title="Close">X</button>
@@ -1445,9 +1445,9 @@
       </div>
     </dialog>
 
-    <dialog class="collections-dialog" id="collections-dialog">
+    <dialog class="collections-dialog" id="collections-dialog" aria-labelledby="collections-dialog-title">
       <div class="dialog-head">
-        <strong>Collections</strong>
+        <strong id="collections-dialog-title">Collections</strong>
         <div class="dialog-actions">
           <span id="collection-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="collections-dialog" title="Close">X</button>
@@ -1479,9 +1479,9 @@
       </div>
     </dialog>
 
-    <dialog class="basket-dialog" id="basket-dialog">
+    <dialog class="basket-dialog" id="basket-dialog" aria-labelledby="basket-dialog-title">
       <div class="dialog-head">
-        <strong>File Basket</strong>
+        <strong id="basket-dialog-title">File Basket</strong>
         <div class="dialog-actions">
           <span id="basket-summary">0 items</span>
           <button class="icon-button" data-close-dialog="basket-dialog" title="Close">X</button>
@@ -1499,9 +1499,9 @@
       <div id="basket-results" class="basket-results"></div>
     </dialog>
 
-    <dialog class="snapshots-dialog" id="snapshots-dialog">
+    <dialog class="snapshots-dialog" id="snapshots-dialog" aria-labelledby="snapshots-dialog-title">
       <div class="dialog-head">
-        <strong>Pane Snapshots</strong>
+        <strong id="snapshots-dialog-title">Pane Snapshots</strong>
         <div class="dialog-actions">
           <span id="snapshot-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="snapshots-dialog" title="Close">X</button>
@@ -1533,9 +1533,9 @@
       </div>
     </dialog>
 
-    <dialog class="labels-dialog" id="labels-dialog">
+    <dialog class="labels-dialog" id="labels-dialog" aria-labelledby="labels-dialog-title">
       <div class="dialog-head">
-        <strong>Labels</strong>
+        <strong id="labels-dialog-title">Labels</strong>
         <div class="dialog-actions">
           <span id="label-summary">0 labeled</span>
           <button class="icon-button" data-close-dialog="labels-dialog" title="Close">X</button>
@@ -1585,9 +1585,9 @@
       <div id="label-existing-list" class="label-existing-list"></div>
     </dialog>
 
-    <dialog class="filters-dialog" id="filters-dialog">
+    <dialog class="filters-dialog" id="filters-dialog" aria-labelledby="filters-dialog-title">
       <div class="dialog-head">
-        <strong>Filter Presets</strong>
+        <strong id="filters-dialog-title">Filter Presets</strong>
         <div class="dialog-actions">
           <span id="filter-preset-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="filters-dialog" title="Close">X</button>
@@ -1630,9 +1630,9 @@
       </div>
     </dialog>
 
-    <dialog class="columns-dialog" id="columns-dialog">
+    <dialog class="columns-dialog" id="columns-dialog" aria-labelledby="columns-dialog-title">
       <div class="dialog-head">
-        <strong>Columns</strong>
+        <strong id="columns-dialog-title">Columns</strong>
         <div class="dialog-actions">
           <span id="column-summary">4 columns</span>
           <button class="icon-button" data-close-dialog="columns-dialog" title="Close">X</button>
@@ -1651,9 +1651,9 @@
       </form>
     </dialog>
 
-    <dialog class="formats-dialog" id="formats-dialog">
+    <dialog class="formats-dialog" id="formats-dialog" aria-labelledby="formats-dialog-title">
       <div class="dialog-head">
-        <strong>Folder Formats</strong>
+        <strong id="formats-dialog-title">Folder Formats</strong>
         <div class="dialog-actions">
           <span id="format-summary">0 saved</span>
           <button class="icon-button" data-close-dialog="formats-dialog" title="Close">X</button>
@@ -1723,7 +1723,7 @@
       </section>
     </dialog>
 
-    <dialog class="viewer-dialog" id="viewer-dialog">
+    <dialog class="viewer-dialog" id="viewer-dialog" aria-labelledby="viewer-title">
       <div class="viewer-shell">
         <div class="viewer-head">
           <div class="viewer-title-block">
@@ -1746,7 +1746,7 @@
       </div>
     </dialog>
 
-    <dialog class="text-editor-dialog" id="text-editor-dialog">
+    <dialog class="text-editor-dialog" id="text-editor-dialog" aria-labelledby="text-editor-title">
       <div class="dialog-head">
         <strong id="text-editor-title">Quick Edit</strong>
         <button class="icon-button" data-close-dialog="text-editor-dialog" title="Close">X</button>
@@ -1767,9 +1767,9 @@
       </form>
     </dialog>
 
-    <dialog class="new-file-dialog" id="new-file-dialog">
+    <dialog class="new-file-dialog" id="new-file-dialog" aria-labelledby="new-file-dialog-title">
       <div class="dialog-head">
-        <strong>New File</strong>
+        <strong id="new-file-dialog-title">New File</strong>
         <div class="dialog-actions">
           <span id="new-file-summary">Ready</span>
           <button class="icon-button" data-close-dialog="new-file-dialog" title="Close">X</button>
@@ -1814,9 +1814,9 @@
       </form>
     </dialog>
 
-    <dialog class="link-dialog" id="link-dialog">
+    <dialog class="link-dialog" id="link-dialog" aria-labelledby="link-dialog-title">
       <div class="dialog-head">
-        <strong>Link</strong>
+        <strong id="link-dialog-title">Link</strong>
         <div class="dialog-actions">
           <span id="link-selection">0 selected</span>
           <button class="icon-button" data-close-dialog="link-dialog" title="Close">X</button>
@@ -1850,9 +1850,9 @@
       <div id="link-summary" class="link-summary">Ready</div>
     </dialog>
 
-    <dialog class="attributes-dialog" id="attributes-dialog">
+    <dialog class="attributes-dialog" id="attributes-dialog" aria-labelledby="attributes-dialog-title">
       <div class="dialog-head">
-        <strong>Attributes</strong>
+        <strong id="attributes-dialog-title">Attributes</strong>
         <div class="dialog-actions">
           <span id="attributes-selection">0 selected</span>
           <button class="icon-button" data-close-dialog="attributes-dialog" title="Close">X</button>
@@ -1904,9 +1904,9 @@
       <div id="attributes-summary" class="attributes-summary">Ready</div>
     </dialog>
 
-    <dialog class="timestamps-dialog" id="timestamps-dialog">
+    <dialog class="timestamps-dialog" id="timestamps-dialog" aria-labelledby="timestamps-dialog-title">
       <div class="dialog-head">
-        <strong>Timestamps</strong>
+        <strong id="timestamps-dialog-title">Timestamps</strong>
         <div class="dialog-actions">
           <span id="timestamps-selection">0 selected</span>
           <button class="icon-button" data-close-dialog="timestamps-dialog" title="Close">X</button>
@@ -1947,9 +1947,9 @@
       <div id="timestamps-summary" class="timestamps-summary">Ready</div>
     </dialog>
 
-    <dialog class="properties-dialog" id="properties-dialog">
+    <dialog class="properties-dialog" id="properties-dialog" aria-labelledby="properties-dialog-title">
       <div class="dialog-head">
-        <strong>Properties</strong>
+        <strong id="properties-dialog-title">Properties</strong>
         <button class="icon-button" data-close-dialog="properties-dialog" title="Close">X</button>
       </div>
       <form id="properties-form" class="properties-form">
@@ -1987,9 +1987,9 @@
       <div id="properties-results" class="properties-results"></div>
     </dialog>
 
-    <dialog class="open-with-dialog" id="open-with-dialog">
+    <dialog class="open-with-dialog" id="open-with-dialog" aria-labelledby="open-with-dialog-title">
       <div class="dialog-head">
-        <strong>Open With</strong>
+        <strong id="open-with-dialog-title">Open With</strong>
         <div class="dialog-actions">
           <span id="open-with-summary">No target</span>
           <button class="icon-button" data-close-dialog="open-with-dialog" title="Close">X</button>
@@ -2057,9 +2057,9 @@
       </div>
     </dialog>
 
-    <dialog class="shell-verbs-dialog" id="shell-verbs-dialog">
+    <dialog class="shell-verbs-dialog" id="shell-verbs-dialog" aria-labelledby="shell-verbs-dialog-title">
       <div class="dialog-head">
-        <strong>Shell Verbs</strong>
+        <strong id="shell-verbs-dialog-title">Shell Verbs</strong>
         <div class="dialog-actions">
           <span id="shell-verbs-summary">No target</span>
           <button class="icon-button" data-close-dialog="shell-verbs-dialog" title="Close">X</button>
@@ -2083,9 +2083,9 @@
       </div>
     </dialog>
 
-    <dialog class="shell-namespace-dialog" id="shell-namespace-dialog">
+    <dialog class="shell-namespace-dialog" id="shell-namespace-dialog" aria-labelledby="shell-namespace-dialog-title">
       <div class="dialog-head">
-        <strong>Windows locations</strong>
+        <strong id="shell-namespace-dialog-title">Windows locations</strong>
         <div class="dialog-actions">
           <span id="shell-namespace-summary">No namespace loaded</span>
           <button class="icon-button" data-close-dialog="shell-namespace-dialog" title="Close">X</button>
@@ -2114,10 +2114,10 @@
       </div>
     </dialog>
 
-    <dialog class="devices-dialog" id="devices-dialog">
+    <dialog class="devices-dialog" id="devices-dialog" aria-labelledby="devices-dialog-title">
       <div class="dialog-head">
         <div>
-          <strong>Devices &amp; Windows locations</strong>
+          <strong id="devices-dialog-title">Devices &amp; Windows locations</strong>
           <small id="devices-summary">Ready to inspect connected devices</small>
         </div>
         <div class="dialog-actions">
@@ -2136,10 +2136,10 @@
       </div>
     </dialog>
 
-    <dialog class="health-dialog" id="health-dialog">
+    <dialog class="health-dialog" id="health-dialog" aria-labelledby="health-dialog-title">
       <div class="dialog-head">
         <div>
-          <strong>Health &amp; diagnostics</strong>
+          <strong id="health-dialog-title">Health &amp; diagnostics</strong>
           <small id="health-summary">Ready for local checks</small>
         </div>
         <div class="dialog-actions">
@@ -2158,9 +2158,9 @@
       </div>
     </dialog>
 
-    <dialog class="transfer-dialog" id="transfer-dialog">
+    <dialog class="transfer-dialog" id="transfer-dialog" aria-labelledby="transfer-dialog-title">
       <div class="dialog-head">
-        <strong>Transfer</strong>
+        <strong id="transfer-dialog-title">Transfer</strong>
         <button class="icon-button" data-close-dialog="transfer-dialog" title="Close">X</button>
       </div>
       <form id="transfer-form" class="transfer-form">
@@ -2193,10 +2193,10 @@
       <div id="transfer-results" class="transfer-results"></div>
     </dialog>
 
-    <dialog class="destination-dialog" id="destination-dialog">
+    <dialog class="destination-dialog" id="destination-dialog" aria-labelledby="destination-dialog-title">
       <div class="dialog-head">
         <div class="dialog-title-block">
-          <strong>Send To</strong>
+          <strong id="destination-dialog-title">Send To</strong>
           <small id="destination-heading">No selection</small>
         </div>
         <button class="icon-button" data-close-dialog="destination-dialog" title="Close">X</button>
@@ -2246,9 +2246,9 @@
       </div>
     </dialog>
 
-    <dialog class="archive-dialog" id="archive-dialog">
+    <dialog class="archive-dialog" id="archive-dialog" aria-labelledby="archive-dialog-title">
       <div class="dialog-head">
-        <strong>Archive</strong>
+        <strong id="archive-dialog-title">Archive</strong>
         <button class="icon-button" data-close-dialog="archive-dialog" title="Close">X</button>
       </div>
       <div class="archive-grid">
@@ -2294,9 +2294,9 @@
       </div>
     </dialog>
 
-    <dialog class="bulk-dialog" id="bulk-dialog">
+    <dialog class="bulk-dialog" id="bulk-dialog" aria-labelledby="bulk-dialog-title">
       <div class="dialog-head">
-        <strong>Bulk Rename</strong>
+        <strong id="bulk-dialog-title">Bulk Rename</strong>
         <button class="icon-button" data-close-dialog="bulk-dialog" title="Close">X</button>
       </div>
       <form id="bulk-form" class="bulk-form">
@@ -2375,9 +2375,9 @@
       <div id="bulk-results" class="bulk-results"></div>
     </dialog>
 
-    <dialog class="search-dialog" id="search-dialog">
+    <dialog class="search-dialog" id="search-dialog" aria-labelledby="search-dialog-title">
       <div class="dialog-head">
-        <strong>Search</strong>
+        <strong id="search-dialog-title">Search</strong>
         <button class="icon-button" data-close-dialog="search-dialog" title="Close">X</button>
       </div>
       <form id="search-form" class="search-form">
@@ -2488,9 +2488,9 @@
       <div id="search-results" class="search-results"></div>
     </dialog>
 
-    <dialog class="flat-dialog" id="flat-dialog">
+    <dialog class="flat-dialog" id="flat-dialog" aria-labelledby="flat-dialog-title">
       <div class="dialog-head">
-        <strong>Flat View</strong>
+        <strong id="flat-dialog-title">Flat View</strong>
         <button class="icon-button" data-close-dialog="flat-dialog" title="Close">X</button>
       </div>
       <form id="flat-form" class="flat-form">
@@ -2532,9 +2532,9 @@
       <div id="flat-results" class="flat-results"></div>
     </dialog>
 
-    <dialog class="duplicates-dialog" id="duplicates-dialog">
+    <dialog class="duplicates-dialog" id="duplicates-dialog" aria-labelledby="duplicates-dialog-title">
       <div class="dialog-head">
-        <strong>Duplicate Finder</strong>
+        <strong id="duplicates-dialog-title">Duplicate Finder</strong>
         <button class="icon-button" data-close-dialog="duplicates-dialog" title="Close">X</button>
       </div>
       <form id="duplicates-form" class="duplicates-form">
@@ -2580,9 +2580,9 @@
       <div id="duplicates-results" class="duplicates-results"></div>
     </dialog>
 
-    <dialog class="compare-dialog" id="compare-dialog">
+    <dialog class="compare-dialog" id="compare-dialog" aria-labelledby="compare-dialog-title">
       <div class="dialog-head">
-        <strong>Compare</strong>
+        <strong id="compare-dialog-title">Compare</strong>
         <button class="icon-button" data-close-dialog="compare-dialog" title="Close">X</button>
       </div>
       <form id="compare-form" class="compare-form">
@@ -2636,9 +2636,9 @@
       <div id="compare-results" class="compare-results"></div>
     </dialog>
 
-    <dialog class="ops-dialog" id="ops-dialog">
+    <dialog class="ops-dialog" id="ops-dialog" aria-labelledby="ops-dialog-title">
       <div class="dialog-head">
-        <strong>Operations</strong>
+        <strong id="ops-dialog-title">Operations</strong>
         <div class="dialog-actions">
           <button data-clear-operations="true">Clear</button>
           <button class="icon-button" data-close-dialog="ops-dialog" title="Close">X</button>
@@ -2647,7 +2647,7 @@
       <div id="operation-list" class="operation-list"></div>
     </dialog>
 
-    <dialog class="operation-details-dialog" id="operation-details-dialog">
+    <dialog class="operation-details-dialog" id="operation-details-dialog" aria-labelledby="operation-details-title">
       <div class="dialog-head">
         <div>
           <strong id="operation-details-title">Operation Details</strong>
@@ -2661,7 +2661,7 @@
       <div id="operation-details-body" class="operation-details-body"></div>
     </dialog>
 
-    <dialog class="trash-dialog" id="trash-dialog">
+    <dialog class="trash-dialog" id="trash-dialog" aria-labelledby="trash-dialog-title">
       <div class="dialog-head">
         <strong id="trash-dialog-title">App Trash</strong>
         <div class="dialog-actions">
@@ -2714,9 +2714,9 @@
       </div>
     </dialog>
 
-    <dialog class="integration-dialog" id="integration-dialog">
+    <dialog class="integration-dialog" id="integration-dialog" aria-labelledby="integration-dialog-title">
       <div class="dialog-head">
-        <strong>Explorer Integration</strong>
+        <strong id="integration-dialog-title">Explorer Integration</strong>
         <button class="icon-button" data-close-dialog="integration-dialog" title="Close">X</button>
       </div>
       <div class="integration-summary" id="integration-summary">

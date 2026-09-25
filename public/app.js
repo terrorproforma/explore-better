@@ -19204,6 +19204,8 @@ function contextMenuItems(menu = app.contextMenu) {
   return items;
 }
 
+let contextMenuReturnFocus = null;
+
 function renderContextMenu() {
   const menuEl = document.getElementById("context-menu");
   if (!menuEl || !app.contextMenu) {
@@ -19216,14 +19218,18 @@ function renderContextMenu() {
         ? labelForPath(app.contextMenu.entryPath)
         : labelForPath(tabOf(app.contextMenu.paneName).path);
   const items = contextMenuItems(app.contextMenu);
+  if (!menuEl.contains(document.activeElement)) {
+    contextMenuReturnFocus = document.activeElement;
+  }
+  menuEl.setAttribute("aria-label", header);
   menuEl.innerHTML = `
-    <div class="context-menu-title">${escapeHtml(header)}</div>
+    <div class="context-menu-title" aria-hidden="true">${escapeHtml(header)}</div>
     ${items
       .map((item) => {
         if (item.separator) {
-          return `<div class="context-menu-separator"></div>`;
+          return `<div class="context-menu-separator" role="separator"></div>`;
         }
-        return `<button class="${item.danger ? "danger" : ""}" data-context-action="${escapeHtml(
+        return `<button type="button" role="menuitem" tabindex="-1" class="${item.danger ? "danger" : ""}" data-context-action="${escapeHtml(
           item.action
         )}" ${item.disabled ? "disabled" : ""}>
           <span>${escapeHtml(item.label)}</span>
@@ -19232,6 +19238,7 @@ function renderContextMenu() {
       })
       .join("")}
   `;
+  menuEl.onkeydown = handleContextMenuKeydown;
   menuEl.hidden = false;
   menuEl.style.left = `${app.contextMenu.x}px`;
   menuEl.style.top = `${app.contextMenu.y}px`;
@@ -19240,15 +19247,71 @@ function renderContextMenu() {
   const top = Math.max(8, Math.min(app.contextMenu.y, window.innerHeight - rect.height - 8));
   menuEl.style.left = `${left}px`;
   menuEl.style.top = `${top}px`;
+  contextMenuFocusableItems(menuEl)[0]?.focus({ preventScroll: true });
 }
 
-function hideContextMenu() {
+function contextMenuFocusableItems(menuEl = document.getElementById("context-menu")) {
+  return menuEl ? [...menuEl.querySelectorAll("[role='menuitem']:not(:disabled)")] : [];
+}
+
+function handleContextMenuKeydown(event) {
+  const menuEl = event.currentTarget;
+  const items = contextMenuFocusableItems(menuEl);
+  const index = items.indexOf(document.activeElement);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    const offset = event.key === "ArrowDown" ? 1 : -1;
+    const start = index === -1 ? (offset > 0 ? -1 : 0) : index;
+    items[(start + offset + items.length) % items.length]?.focus();
+  } else if (event.key === "Home" || event.key === "End") {
+    items[event.key === "Home" ? 0 : items.length - 1]?.focus();
+  } else if (event.key === "Escape" || event.key === "Tab") {
+    hideContextMenu({ restoreFocus: true });
+  } else if (event.key === "Enter" || event.key === " ") {
+    // Buttons activate natively; keep list and global shortcuts from also handling the key.
+    event.stopPropagation();
+    return;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function hideContextMenu({ restoreFocus = false } = {}) {
   const menuEl = document.getElementById("context-menu");
+  const returnFocus = contextMenuReturnFocus;
+  contextMenuReturnFocus = null;
   app.contextMenu = null;
   if (menuEl) {
+    // Hand focus back before the focused item is removed so keyboard users are not dropped on <body>.
+    const hadFocus = menuEl.contains(document.activeElement);
     menuEl.hidden = true;
     menuEl.innerHTML = "";
+    if ((restoreFocus || hadFocus) && returnFocus?.isConnected) {
+      returnFocus.focus({ preventScroll: true });
+    }
   }
+}
+
+function keyboardContextMenuPoint(element) {
+  const rect = element?.getBoundingClientRect?.();
+  if (!rect || (!rect.width && !rect.height)) {
+    return null;
+  }
+  return {
+    x: Math.round(rect.left + Math.min(24, rect.width / 2)),
+    y: Math.round(Math.min(rect.bottom, rect.top + 32))
+  };
+}
+
+function keyboardContextEntryPath(paneName) {
+  const tab = tabOf(paneName);
+  const available = (entryPath) =>
+    Boolean(entryPath) && tab.entries.some((entry) => samePath(entry.path, entryPath));
+  if (available(tab.focusedPath) && tab.selected.has(tab.focusedPath)) {
+    return tab.focusedPath;
+  }
+  return [...tab.selected].find(available) || (available(tab.focusedPath) ? tab.focusedPath : null);
 }
 
 function prepareContextSelection(paneName, entryPath) {
@@ -19277,6 +19340,8 @@ function openContextMenu(event) {
   if (document.querySelector("dialog[open]")) {
     return false;
   }
+  // Shift+F10 / the Menu key report button -1 (0 in older engines); a right click reports 2.
+  const fromKeyboard = event.button !== 2;
   const columnButton = event.target.closest?.("[data-column-id]");
   const columnHead = event.target.closest?.(".file-head");
   if (columnButton || columnHead) {
@@ -19288,12 +19353,16 @@ function openContextMenu(event) {
     event.preventDefault();
     app.activePane = paneName;
     updateActivePaneChrome();
+    const point = (fromKeyboard && keyboardContextMenuPoint(columnButton || columnHead)) || {
+      x: event.clientX,
+      y: event.clientY
+    };
     app.contextMenu = {
       type: "columns",
       paneName,
       columnId: columnButton?.dataset.columnId || columnsForTab(tabOf(paneName))[0]?.id || "name",
-      x: event.clientX,
-      y: event.clientY
+      x: point.x,
+      y: point.y
     };
     renderContextMenu();
     return true;
@@ -19306,12 +19375,26 @@ function openContextMenu(event) {
     return false;
   }
   event.preventDefault();
-  prepareContextSelection(paneName, row?.dataset.entryPath || null);
+  // A keyboard-invoked menu targets the focused list, not a row: act on the
+  // focused/selected entry instead of clearing the selection.
+  const entryPath =
+    row?.dataset.entryPath || (fromKeyboard && fileList ? keyboardContextEntryPath(paneName) : null) || null;
+  prepareContextSelection(paneName, entryPath);
+  let point = { x: event.clientX, y: event.clientY };
+  if (fromKeyboard) {
+    if (entryPath && !row) {
+      scrollFocusedEntryIntoView(paneName);
+    }
+    point =
+      keyboardContextMenuPoint(row || entryElementForPath(paneName, entryPath)) ||
+      keyboardContextMenuPoint(fileList || pane) ||
+      point;
+  }
   app.contextMenu = {
     paneName,
-    entryPath: row?.dataset.entryPath || null,
-    x: event.clientX,
-    y: event.clientY
+    entryPath,
+    x: point.x,
+    y: point.y
   };
   renderContextMenu();
   return true;
@@ -26307,16 +26390,8 @@ async function handleAction(action, paneName) {
 }
 
 function wireEvents() {
-  for (const dialog of document.querySelectorAll("dialog")) {
-    const title = dialog.querySelector(".dialog-head strong, .dialog-head h1, .dialog-head h2");
-    if (title && !dialog.hasAttribute("aria-labelledby") && !dialog.hasAttribute("aria-label")) {
-      title.id ||= `${dialog.id}-title`;
-      dialog.setAttribute("aria-labelledby", title.id);
-    }
-    for (const button of dialog.querySelectorAll("[data-close-dialog]")) {
-      if (!button.hasAttribute("aria-label")) button.setAttribute("aria-label", `Close ${title?.textContent?.trim() || "dialog"}`);
-    }
-  }
+  // Dialog names and close-button labels come from index.html markup, with
+  // enhanceDialogAccessibility() filling any gaps before wiring starts.
   for (const name of ["search", "flat", "duplicates", "compare", "bulk", "transfer"]) {
     const dialog = document.getElementById(`${name}-dialog`);
     dialog.addEventListener("close", () => { if (!dialog.open) cancelAsyncDialogTask(dialog.id); });
