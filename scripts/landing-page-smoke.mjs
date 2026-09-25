@@ -202,6 +202,180 @@ function markdownReport(report) {
   return `${lines.join("\n")}\n`;
 }
 
+// Feature clips (site/assets/features/features.json): markup, file sizes, and playback.
+// Everything is read from the manifest, so re-recorded clips are covered without edits.
+const clipByteLimit = 2.5 * 1024 * 1024;
+
+async function featureClipChecks(browser, baseUrl, checks, errors) {
+  let manifest;
+  try {
+    manifest = JSON.parse(await fs.readFile(path.join(siteRoot, "assets", "features", "features.json"), "utf8"));
+  } catch (error) {
+    addCheck(checks, "feature-clips-manifest", false, `site/assets/features/features.json: ${error.message}`);
+    return;
+  }
+  const clips = Array.isArray(manifest.clips) ? manifest.clips : [];
+  addCheck(
+    checks,
+    "feature-clips-manifest",
+    manifest.version === 1 && clips.length > 0 && clips.every((clip) => clip.id && clip.title && clip.src && clip.poster && clip.alt && Number(clip.durationSeconds) > 0),
+    `${clips.length} clips in features.json v${manifest.version}`
+  );
+
+  const fileProblems = [];
+  for (const clip of clips) {
+    for (const file of [clip.src, clip.poster]) {
+      const stat = await fs.stat(path.join(siteRoot, file || "missing")).catch(() => null);
+      if (!stat?.size) fileProblems.push(`${file} is missing`);
+      else if (stat.size > clipByteLimit) fileProblems.push(`${file} is ${(stat.size / 1048576).toFixed(2)} MB`);
+    }
+  }
+  addCheck(checks, "feature-clip-files", fileProblems.length === 0, fileProblems.join("; ") || `${clips.length} videos and posters exist, each at most 2.5 MB`);
+
+  // The static markup, read with JavaScript off: what crawlers and no-JS visitors get.
+  const staticContext = await browser.newContext({ viewport: viewports[0], javaScriptEnabled: false });
+  const staticPage = await staticContext.newPage();
+  await staticPage.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  const markup = await staticPage.evaluate((list) => list.map((clip) => {
+    const figure = document.getElementById(`clip-${clip.id}`);
+    const video = figure?.querySelector("video[data-clip-video]");
+    const poster = figure?.querySelector("img.clip__poster");
+    const problems = [];
+    if (!figure?.matches("figure[data-clip]")) problems.push("no figure[data-clip]");
+    if (!video) problems.push("no video");
+    else {
+      for (const attribute of ["muted", "playsinline", "loop", "controls"]) if (!video.hasAttribute(attribute)) problems.push(`no ${attribute}`);
+      if (video.hasAttribute("autoplay")) problems.push("autoplay attribute");
+      if (video.getAttribute("preload") !== "none") problems.push(`preload=${video.getAttribute("preload")}`);
+      if (video.getAttribute("width") !== String(clip.width) || video.getAttribute("height") !== String(clip.height)) problems.push("video size");
+      if (video.getAttribute("aria-label") !== clip.alt) problems.push("aria-label is not the clip alt text");
+      const source = video.querySelector("source");
+      if (source?.getAttribute("src") !== clip.src || source?.getAttribute("type") !== "video/mp4") problems.push("source");
+    }
+    if (poster?.getAttribute("src") !== clip.poster) problems.push("poster src");
+    else if (poster.getAttribute("loading") !== "lazy" || poster.getAttribute("width") !== String(clip.width) || poster.getAttribute("height") !== String(clip.height)) problems.push("poster not lazy or unsized");
+    return { id: clip.id, problems };
+  }), clips);
+  const badMarkup = markup.filter((item) => item.problems.length);
+  addCheck(
+    checks,
+    "feature-clips-markup",
+    badMarkup.length === 0,
+    badMarkup.map((item) => `${item.id}: ${item.problems.join(", ")}`).join("; ") ||
+      `${markup.length} clips embedded with a sized lazy poster, muted, playsinline, preload=none, and no autoplay attribute`
+  );
+  await staticContext.close();
+
+  const playingIds = (page) => page.evaluate(() => [...document.querySelectorAll("video[data-clip-video]")].filter((video) => !video.paused).map((video) => video.closest("[data-clip]").id));
+  const clipPaused = (page, id, paused) => page
+    .waitForFunction(({ id: clipId, paused: wanted }) => document.querySelector(`#${clipId} video`)?.paused === wanted, { id, paused }, { timeout: 10_000 })
+    .then(() => true)
+    .catch(() => false);
+  const center = (page, id) => page.evaluate((clipId) => document.getElementById(clipId).scrollIntoView({ block: "center", behavior: "instant" }), id);
+  // Scrolls the whole page and returns the most clips seen playing at once.
+  const sweep = async (page) => {
+    let most = 0;
+    const height = await page.evaluate(() => document.documentElement.scrollHeight);
+    for (let top = 0; top < height; top += 450) {
+      await page.evaluate((y) => window.scrollTo({ top: y, behavior: "instant" }), top);
+      await page.waitForTimeout(250);
+      most = Math.max(most, (await playingIds(page)).length);
+    }
+    return most;
+  };
+  const firstId = `clip-${clips[0]?.id}`;
+
+  // Motion allowed: clips play on screen, pause off screen, two at most, keyboard toggle.
+  const context = await browser.newContext({ viewport: viewports[0], reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  page.on("pageerror", (error) => errors.push(`clips: ${error.message}`));
+  const requests = [];
+  page.on("request", (request) => requests.push(new URL(request.url()).pathname));
+  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  const earlyVideo = requests.filter((pathname) => pathname.endsWith(".mp4"));
+  const earlyPosters = requests.filter((pathname) => pathname.startsWith("/assets/features/") && !pathname.endsWith(".mp4"));
+  addCheck(checks, "feature-clips-initial-load", earlyVideo.length === 0,
+    earlyVideo.length ? `Loaded before scrolling: ${earlyVideo.join(", ")}` : `No video loaded at the top of the page; ${earlyPosters.length} lazy poster(s) prefetched by the browser`);
+
+  // The first tile row: three clips in view at 1440 px, so the third must wait its turn.
+  const [target, third] = await page.evaluate(() => [1, 3].map((n) => document.querySelector(`.more-features li:nth-child(${n}) [data-clip]`)?.id));
+  await center(page, target);
+  const started = await clipPaused(page, target, false);
+  const advanced = started && await page.waitForFunction((id) => document.querySelector(`#${id} video`).currentTime > 0.2, target, { timeout: 10_000 }).then(() => true).catch(() => false);
+  await page.waitForTimeout(800);
+  const inGrid = await playingIds(page);
+  // Playing the waiting clip by hand pauses one of the others instead of exceeding two.
+  await page.locator(`#${third} .clip__toggle`).click();
+  const thirdPlays = await clipPaused(page, third, false);
+  await page.waitForTimeout(500);
+  const afterManual = await playingIds(page);
+  await page.locator(`#${third} .clip__toggle`).click();
+  await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+  const stopped = await clipPaused(page, target, true);
+  addCheck(checks, "feature-clips-autoplay-in-view", started && advanced && stopped,
+    `${target}: ${started ? "plays" : "did not play"} in view${advanced ? " and advances" : ""}, ${stopped ? "pauses" : "keeps playing"} off screen`);
+  addCheck(checks, "feature-clips-play-limit-grid",
+    inGrid.length === 2 && !inGrid.includes(third) && thirdPlays && afterManual.length === 2 && afterManual.includes(third),
+    `Three tiles in view: ${inGrid.join(", ") || "none"} play; after playing ${third} by hand: ${afterManual.join(", ")}`);
+  const most = await sweep(page);
+  addCheck(checks, "feature-clips-play-limit", most >= 1 && most <= 2, `At most ${most} clip(s) played at once while scrolling the page`);
+
+  await center(page, target);
+  await clipPaused(page, target, false);
+  const toggle = page.locator(`#${target} .clip__toggle`);
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  const pausedByKey = await clipPaused(page, target, true);
+  await page.waitForTimeout(700);
+  const staysPaused = await page.evaluate((id) => document.querySelector(`#${id} video`).paused, target);
+  const pressedOff = await toggle.getAttribute("aria-pressed");
+  await page.keyboard.press("Space");
+  const playedByKey = await clipPaused(page, target, false);
+  await page.waitForFunction((id) => document.querySelector(`#${id} .clip__toggle`).getAttribute("aria-pressed") === "true", target, { timeout: 5_000 }).catch(() => {});
+  const pressedOn = await toggle.getAttribute("aria-pressed");
+  const label = (await toggle.getAttribute("aria-label")) || "";
+  addCheck(checks, "feature-clips-keyboard-toggle", pausedByKey && staysPaused && pressedOff === "false" && playedByKey && pressedOn === "true" && label.length > 5,
+    `Enter ${pausedByKey ? "paused" : "did not pause"} (${staysPaused ? "stays paused" : "restarted"}, aria-pressed=${pressedOff}); Space ${playedByKey ? "played" : "did not play"} (aria-pressed=${pressedOn}); label "${label}"`);
+
+  const overflow = [];
+  for (const width of [360, 390, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForTimeout(200);
+    const { scroll, client } = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth }));
+    if (scroll > client + 1) overflow.push(`${width}px: ${scroll}/${client}`);
+  }
+  addCheck(checks, "feature-clips-no-horizontal-overflow", overflow.length === 0, overflow.join("; ") || "No horizontal scroll at 360, 390, 1024 or 1440 px");
+  await context.close();
+
+  // Reduced motion, then Save-Data: nothing plays by itself, and every toggle still works.
+  for (const mode of ["reduced-motion", "save-data"]) {
+    const quietContext = await browser.newContext({ viewport: viewports[1], reducedMotion: mode === "reduced-motion" ? "reduce" : "no-preference" });
+    if (mode === "save-data") {
+      await quietContext.addInitScript(() => Object.defineProperty(navigator, "connection", { configurable: true, value: { saveData: true } }));
+    }
+    const quiet = await quietContext.newPage();
+    quiet.on("pageerror", (error) => errors.push(`clips/${mode}: ${error.message}`));
+    await quiet.goto(baseUrl, { waitUntil: "load" });
+    const quietMost = await sweep(quiet);
+    const toggles = await quiet.evaluate(() => ({
+      manual: document.documentElement.classList.contains("clips-manual"),
+      videos: document.querySelectorAll("video[data-clip-video]").length,
+      toggles: [...document.querySelectorAll("[data-clip] .clip__toggle")].filter((button) => button.getBoundingClientRect().width >= 24 && button.getAttribute("aria-pressed") === "false").length,
+      controls: document.querySelectorAll("video[data-clip-video][controls]").length
+    }));
+    await center(quiet, firstId);
+    await quiet.locator(`#${firstId} .clip__toggle`).focus();
+    await quiet.keyboard.press("Enter");
+    const manualPlay = await clipPaused(quiet, firstId, false);
+    await quiet.keyboard.press("Enter");
+    const manualPause = await clipPaused(quiet, firstId, true);
+    addCheck(checks, `feature-clips-${mode}`,
+      quietMost === 0 && toggles.manual && toggles.videos > 0 && toggles.toggles === toggles.videos && toggles.controls === 0 && manualPlay && manualPause,
+      `${quietMost} played by themselves; ${toggles.toggles}/${toggles.videos} visible toggles; toggle ${manualPlay ? "plays" : "did not play"} and ${manualPause ? "pauses" : "did not pause"} ${firstId}`);
+    await quietContext.close();
+  }
+}
+
 async function main() {
   await fs.mkdir(artifactsDir, { recursive: true });
   const checks = [];
@@ -436,7 +610,7 @@ async function main() {
       const chapterState = await page.evaluate(() => {
         const graph = [...document.querySelectorAll('script[type="application/ld+json"]')]
           .flatMap((script) => JSON.parse(script.textContent)["@graph"] || []);
-        const clips = graph.find((node) => node["@type"] === "VideoObject")?.hasPart || [];
+        const clips = graph.find((node) => node["@type"] === "VideoObject" && node.hasPart)?.hasPart || [];
         const buttons = [...document.querySelectorAll("[data-chapter-list] button[data-demo-time]")];
         return {
           clips: clips.map((clip) => `${clip.startOffset}:${clip.name}`),
@@ -647,6 +821,8 @@ async function main() {
       .catch(() => false);
     addCheck(checks, "demo-deep-link", deepLinked, deepLinked ? `#t=${deepStart} seeks the demo and marks its chapter current` : `Deep link #t=${deepStart} did not seek the demo`);
     await deepContext.close();
+
+    await featureClipChecks(browser, baseUrl, checks, errors);
 
     addCheck(checks, "runtime-errors", errors.length === 0, errors.length ? errors.join("; ") : "No page errors");
   } finally {

@@ -98,6 +98,17 @@
         ]
       }
     </script>
+    <!-- feature-videos:jsonld -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {"@type":"VideoObject","@id":"https://terrorproforma.github.io/explore-better/mcp/#clip-ai-handoff","name":"Live AI context over MCP","description":"An AI client sees your active pane and can reveal files in it, through a local read-only MCP profile.","thumbnailUrl":"https://terrorproforma.github.io/explore-better/assets/features/ai-handoff.webp","contentUrl":"https://terrorproforma.github.io/explore-better/assets/features/ai-handoff.mp4","uploadDate":"2026-09-25T00:00:00Z","duration":"PT7.9S","about":{"@id":"https://terrorproforma.github.io/explore-better/#software"}},
+          {"@type":"VideoObject","@id":"https://terrorproforma.github.io/explore-better/mcp/#clip-ai-profile","name":"Scoped AI access","description":"Each AI client gets a profile: its folders, its tools, and an audit log of every call.","thumbnailUrl":"https://terrorproforma.github.io/explore-better/assets/features/ai-profile.webp","contentUrl":"https://terrorproforma.github.io/explore-better/assets/features/ai-profile.mp4","uploadDate":"2026-09-25T00:00:00Z","duration":"PT9.73S","about":{"@id":"https://terrorproforma.github.io/explore-better/#software"}}
+        ]
+      }
+    </script>
+    <!-- /feature-videos:jsonld -->
   </head>
   <body class="detail mcp-page">
     <svg class="sprite" aria-hidden="true" focusable="false">
@@ -159,6 +170,9 @@
               </dl>
             </aside>
           </div>
+          <figure class="page-figure clip" id="clip-ai-handoff" data-clip>
+            <!-- clip:ai-handoff --><img class="clip__poster" src="../assets/features/ai-handoff.webp" alt="" width="1280" height="800" loading="lazy" decoding="async" /><video data-clip-video muted loop playsinline controls preload="none" width="1280" height="800" data-duration="7.9" data-title="Live AI context over MCP" aria-label="A real Codex CLI run through Explore Better's local MCP server with a read-only profile: get_context reads the active pane, search_files finds release-checklist.md, and show_in_explore_better opens 04 Launch in the left pane with the file selected. Model thinking time is trimmed and labelled."><source src="../assets/features/ai-handoff.mp4" type="video/mp4" /></video><!-- /clip:ai-handoff -->
+          </figure>
         </div>
       </section>
 
@@ -262,6 +276,10 @@
             <li><strong>Journal</strong><small>Apply through staging, backup, durable phases, cancellation, recovery, and recorded undo.</small></li>
             <li><strong>Audit</strong><small>Record tool, paths, policy decision, duration, and job or operation IDs without logging file contents or secrets.</small></li>
           </ol>
+          <figure class="clip clip--split" id="clip-ai-profile" data-clip>
+            <!-- clip:ai-profile --><img class="clip__poster" src="../assets/features/ai-profile.webp" alt="" width="1280" height="800" loading="lazy" decoding="async" /><video data-clip-video muted loop playsinline controls preload="none" width="1280" height="800" data-duration="9.73" data-title="Scoped AI access" aria-label="In Preferences, the AI Bridge profile Project files - read only is authorized for C:\Demo\Project files only, its tool permissions show read tools enabled and write tools off, and the audit history lists the get_context, search_files and show_in_explore_better calls."><source src="../assets/features/ai-profile.mp4" type="video/mp4" /></video><!-- /clip:ai-profile -->
+            <figcaption><p><strong>One profile per client.</strong> Pick the exact folders and tools a client may use. New profiles are read-only; writes are a separate permission you can revoke at any time.</p></figcaption>
+          </figure>
         </div>
       </section>
 
