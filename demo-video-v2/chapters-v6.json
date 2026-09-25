@@ -1,0 +1,56 @@
+{
+  "version": 6,
+  "video": "site/assets/explore-better-demo.mp4",
+  "poster": "site/assets/explore-better-demo-poster.webp",
+  "durationSeconds": 56.03,
+  "chapters": [
+    {
+      "id": "open",
+      "title": "Overview",
+      "start": 0,
+      "label": "00:00"
+    },
+    {
+      "id": "find",
+      "title": "Filtered Search",
+      "start": 2.5,
+      "label": "00:02"
+    },
+    {
+      "id": "disk",
+      "title": "Exact Disk Map",
+      "start": 9.83,
+      "label": "00:09"
+    },
+    {
+      "id": "transfer",
+      "title": "Preview + Copy",
+      "start": 15.2,
+      "label": "00:15"
+    },
+    {
+      "id": "safety",
+      "title": "Safe + Keyboard-First",
+      "start": 24.13,
+      "label": "00:24"
+    },
+    {
+      "id": "terminal",
+      "title": "Terminal Follows",
+      "start": 31.47,
+      "label": "00:31"
+    },
+    {
+      "id": "ai",
+      "title": "Live AI Context",
+      "start": 39.3,
+      "label": "00:39"
+    },
+    {
+      "id": "scope",
+      "title": "Scoped AI Access",
+      "start": 45.5,
+      "label": "00:45"
+    }
+  ]
+}
