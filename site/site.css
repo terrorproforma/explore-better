@@ -1022,7 +1022,7 @@ p {
 .more-features {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 28px clamp(24px, 3vw, 44px);
+  gap: clamp(32px, 4vw, 48px) clamp(20px, 2.5vw, 36px);
   margin-top: clamp(28px, 4vw, 48px);
   padding-top: clamp(28px, 4vw, 48px);
   border-top: 1px solid var(--rule);
@@ -1032,6 +1032,10 @@ p {
   display: grid;
   gap: 6px;
   align-content: start;
+}
+
+.more-features .clip {
+  margin-bottom: 10px;
 }
 
 .more-features h3 {
@@ -1070,6 +1074,169 @@ p {
 @media (max-width: 560px) {
   .more-features {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Feature clips: silent loops framed like the screenshots they replace. The toggle that
+   site.js adds shares the video's grid cell and sits in its lower-left corner, like a
+   player control inside the app window; captions take the next row. */
+
+.clip {
+  display: grid;
+  align-content: start;
+}
+
+/* The lazy poster image sits under the video, which stays transparent until it has a frame. */
+.clip > .clip__poster,
+.clip > video {
+  grid-area: 1 / 1;
+  width: 100%;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  object-fit: cover;
+}
+
+.clip > .clip__poster {
+  background: var(--sunk);
+  box-shadow: var(--shadow);
+}
+
+.clip > video {
+  position: relative;
+  background: transparent;
+  cursor: pointer;
+}
+
+.clip > figcaption {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.clip figcaption strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.clip__toggle {
+  grid-area: 1 / 1;
+  align-self: end;
+  justify-self: start;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 36px;
+  height: 32px;
+  margin: 10px;
+  padding: 0 10px;
+  border: 1px solid rgba(228, 234, 229, 0.18);
+  border-radius: var(--radius-sm);
+  background: rgba(24, 32, 29, 0.84);
+  color: #e4eae5;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.2s ease;
+}
+
+/* While a clip plays, its control steps back until the pointer or focus arrives. */
+.clip.is-playing .clip__toggle {
+  opacity: 0.6;
+}
+
+.clip:hover .clip__toggle,
+.clip__toggle:focus-visible {
+  opacity: 1;
+}
+
+.clip__toggle:focus-visible {
+  outline-offset: 2px;
+}
+
+.clip__icon {
+  width: 10px;
+  height: 12px;
+  background: currentColor;
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+  forced-color-adjust: none;
+}
+
+.clip__toggle[aria-pressed="true"] .clip__icon {
+  clip-path: none;
+  background: linear-gradient(90deg, currentColor 0 34%, transparent 34% 66%, currentColor 66%);
+}
+
+/* Nothing plays by itself (reduced motion, Save-Data): make the control read as a button. */
+.clips-manual .clip__toggle {
+  height: 36px;
+  padding-inline: 12px;
+  background: rgba(24, 32, 29, 0.92);
+}
+
+/* A clip beside its caption in the pane split (detail pages). */
+.clip--split {
+  grid-template-columns: var(--split);
+  margin-top: clamp(36px, 5vw, 56px);
+}
+
+.clip--split > :is(video, .clip__poster) {
+  width: calc(100% - var(--pane-pad));
+}
+
+.clip--split > figcaption {
+  grid-area: 1 / 2;
+  display: grid;
+  align-content: end;
+  margin: 0;
+  padding-left: var(--pane-pad);
+  border-left: 1px solid var(--rule-strong);
+  font-size: 0.9375rem;
+}
+
+.band .clip--split > figcaption {
+  border-left-color: var(--band-rule);
+  color: var(--band-muted);
+}
+
+.band .clip figcaption strong,
+.safety .clip figcaption strong {
+  color: var(--band-ink);
+}
+
+.band .clip > :is(video, .clip__poster),
+.safety .clip > :is(video, .clip__poster) {
+  border-color: var(--band-rule);
+}
+
+@media (max-width: 900px) {
+  .clip--split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .clip--split > :is(video, .clip__poster) {
+    width: 100%;
+  }
+
+  .clip--split > figcaption {
+    display: block;
+    grid-area: 2 / 1;
+    margin-top: 12px;
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+@media (forced-colors: active) {
+  .clip__toggle {
+    border: 1px solid ButtonText;
+    background: ButtonFace;
+    color: ButtonText;
   }
 }
 
@@ -1257,6 +1424,15 @@ tbody th {
   padding-right: var(--pane-pad);
 }
 
+/* The inspector column (points plus the profile clip) outgrows the handoff clip, so the clip
+   stays in view while it scrolls past. */
+@media (min-width: 901px) {
+  .ai__media {
+    position: sticky;
+    top: calc(var(--header-h) + 24px);
+  }
+}
+
 .ai__media img {
   width: 100%;
   border: 1px solid var(--rule-strong);
@@ -1264,11 +1440,17 @@ tbody th {
   box-shadow: var(--shadow);
 }
 
+.ai__side {
+  display: grid;
+  gap: 28px;
+  align-content: start;
+  padding-left: var(--pane-pad);
+  border-left: 1px solid var(--rule-strong);
+}
+
 .ai__points {
   display: grid;
   gap: 24px;
-  padding-left: var(--pane-pad);
-  border-left: 1px solid var(--rule-strong);
 }
 
 .ai__points li {
@@ -1483,7 +1665,7 @@ tbody th {
     padding-right: 0;
   }
 
-  .ai__points {
+  .ai__side {
     padding-left: 0;
     border-left: 0;
   }
@@ -1533,9 +1715,29 @@ tbody th {
   outline-color: var(--lime);
 }
 
-.safety__grid {
+.safety__grid,
+.safety__clips {
   display: grid;
   grid-template-columns: var(--split);
+}
+
+.safety__clips {
+  margin-bottom: clamp(40px, 6vw, 72px);
+}
+
+.safety__clips .clip:first-child {
+  padding-right: var(--pane-pad);
+}
+
+.safety__clips .clip + .clip {
+  padding-left: var(--pane-pad);
+  border-left: 1px solid var(--band-rule);
+}
+
+.safety__clips figcaption {
+  max-width: 56ch;
+  color: var(--band-muted);
+  font-size: 0.9375rem;
 }
 
 .safety__col {
@@ -1588,9 +1790,19 @@ tbody th {
 }
 
 @media (max-width: 900px) {
-  .safety__grid {
+  .safety__grid,
+  .safety__clips {
     grid-template-columns: minmax(0, 1fr);
     gap: 40px;
+  }
+
+  .safety__clips .clip:first-child {
+    padding-right: 0;
+  }
+
+  .safety__clips .clip + .clip {
+    padding-left: 0;
+    border-left: 0;
   }
 
   .safety__col:first-child {

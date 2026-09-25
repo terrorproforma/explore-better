@@ -35,6 +35,7 @@
     "archive:site-homepage": "node scripts/archive-site-homepage.mjs",
     "build:site-release": "node scripts/update-site-release.mjs",
     "build:site-images": "node scripts/build-site-images.mjs",
+    "build:feature-media": "node scripts/build-feature-media.mjs",
     "build:app": "node scripts/build-app.mjs",
     "build:terminal": "node scripts/build-terminal.mjs",
     "build:renderer": "npm run build:app && npm run build:terminal",

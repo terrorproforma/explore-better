@@ -1,6 +1,6 @@
 // Explore Better website behaviour. Every page works without this file; it adds the mobile
-// menu, copy buttons, demo chapters, and benchmark bars. The legacy-*.html archives use the
-// frozen script.js instead.
+// menu, copy buttons, demo chapters, benchmark bars, and feature-clip playback. The
+// legacy-*.html archives use the frozen script.js instead.
 document.documentElement.classList.add("js");
 
 const header = document.querySelector("[data-header]");
@@ -78,7 +78,8 @@ function videoClips() {
     try {
       const data = JSON.parse(script.textContent || "{}");
       const nodes = Array.isArray(data["@graph"]) ? data["@graph"] : [data];
-      const video = nodes.find((node) => node?.["@type"] === "VideoObject");
+      // The demo is the VideoObject with chapters; feature clips are VideoObjects without.
+      const video = nodes.find((node) => node?.["@type"] === "VideoObject" && Array.isArray(node.hasPart));
       if (Array.isArray(video?.hasPart)) {
         return video.hasPart
           .filter((clip) => clip?.["@type"] === "Clip" && Number.isFinite(Number(clip.startOffset)))
@@ -182,6 +183,86 @@ document.querySelectorAll("[data-benchmark-row]").forEach((row) => {
     if (bar && Number.isFinite(values[index])) bar.style.setProperty("--share", String((values[index] / largest) * 100));
   });
 });
+
+// Feature clips: short silent loops (scripts/build-feature-media.mjs writes the markup). A clip
+// plays while at least half of it is on screen, at most two at a time (the most visible win),
+// and only loads when it comes near the viewport. Reduced motion or Save-Data means nothing
+// plays by itself. Every clip gets a play/pause toggle in place of the no-JS native controls.
+const clipStates = [...document.querySelectorAll("[data-clip] video[data-clip-video]")].map((video, order) => ({ video, order, ratio: 0, userPaused: false, userPlaying: false }));
+if (clipStates.length && "IntersectionObserver" in window) {
+  const maxPlaying = 2;
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const autoplay = () => !reducedMotion.matches && navigator.connection?.saveData !== true;
+  const byVideo = new Map(clipStates.map((state) => [state.video, state]));
+
+  const schedule = () => {
+    document.documentElement.classList.toggle("clips-manual", !autoplay());
+    const wanted = document.hidden ? [] : clipStates
+      .filter((state) => !state.userPaused && (state.userPlaying ? state.ratio > 0 : autoplay() && state.ratio >= 0.5))
+      .sort((a, b) => b.userPlaying - a.userPlaying || b.ratio - a.ratio || a.order - b.order)
+      .slice(0, maxPlaying);
+    for (const state of clipStates) {
+      if (!wanted.includes(state)) {
+        if (!state.video.paused) state.video.pause();
+      } else if (state.video.paused) {
+        state.video.preload = "auto";
+        state.video.play()?.catch(() => {});
+      }
+    }
+  };
+
+  const sync = (state) => {
+    const playing = !state.video.paused;
+    state.button.setAttribute("aria-pressed", String(playing));
+    state.video.parentElement.classList.toggle("is-playing", playing);
+  };
+
+  for (const state of clipStates) {
+    const { video } = state;
+    video.controls = false;
+    video.muted = true;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "clip__toggle";
+    button.setAttribute("aria-pressed", "false");
+    button.setAttribute("aria-label", `Play video: ${video.dataset.title || video.getAttribute("aria-label") || "feature clip"}`);
+    const seconds = Math.round(Number(video.dataset.duration));
+    button.innerHTML = `<span class="clip__icon" aria-hidden="true"></span>${seconds > 0 ? `<span class="clip__time" aria-hidden="true">${seconds} s</span>` : ""}`;
+    button.addEventListener("click", () => {
+      const start = video.paused;
+      state.userPlaying = start;
+      state.userPaused = !start;
+      schedule();
+    });
+    video.addEventListener("click", () => button.click());
+    video.addEventListener("play", () => sync(state));
+    video.addEventListener("pause", () => sync(state));
+    video.after(button);
+    state.button = button;
+  }
+
+  // Warm clips a screen away so they start promptly, but only when they would autoplay.
+  const nearObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const { video } = byVideo.get(entry.target);
+      if (entry.isIntersecting && autoplay() && video.preload === "none") video.preload = "metadata";
+    }
+  }, { rootMargin: "100% 0px" });
+  const visibleObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const state = byVideo.get(entry.target);
+      state.ratio = entry.isIntersecting ? entry.intersectionRatio : 0;
+      if (!state.ratio) state.userPlaying = false;
+    }
+    schedule();
+  }, { threshold: [0, 0.25, 0.5, 0.75, 1] });
+  clipStates.forEach(({ video }) => {
+    nearObserver.observe(video);
+    visibleObserver.observe(video);
+  });
+  document.addEventListener("visibilitychange", schedule);
+  reducedMotion.addEventListener("change", schedule);
+}
 
 const year = document.querySelector("[data-year]");
 if (year) year.textContent = String(new Date().getFullYear());

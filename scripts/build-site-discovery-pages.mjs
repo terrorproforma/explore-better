@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { clipFigure, clipVideoObject, loadFeatureClips } from "./feature-clips.mjs";
 
 const root = process.cwd();
 const siteRoot = path.join(root, "site");
@@ -96,6 +97,24 @@ const media = {
   "use-cases/find-disk-space": await screenshot("disk-map", "Disk Map showing a nested treemap of folders and files beside folder, file type and largest-file tables")
 };
 
+// Feature clips (site/assets/features/features.json) replace the hero screenshot where one
+// exists. Pages fall back to the screenshot, or no figure, while a clip is unavailable.
+const featureClips = await loadFeatureClips(root);
+const heroClips = {
+  "mcp-file-manager": "ai-handoff",
+  integrations: "ai-handoff",
+  ...Object.fromEntries(Object.keys(integrations).map((key) => [`integrations/${key}`, "ai-handoff"])),
+  "use-cases/organize-downloads-safely": "transfer",
+  "use-cases/find-disk-space": "disk-map"
+};
+const prefixFor = (slug) => "../".repeat(slug.split("/").length);
+
+// A clip beside its caption, in the wide-pane/inspector split, for use inside a section.
+function splitClip(id, slug, caption) {
+  const clip = featureClips.get(id);
+  return clip ? clipFigure(clip, { prefix: prefixFor(slug), className: "clip--split", caption }) : "";
+}
+
 const pages = [
   {
     slug: "ai-file-manager-windows",
@@ -137,7 +156,7 @@ const pages = [
         ["Exact roots", "Effective access intersects per-client profile roots, client roots when supplied, and Windows permissions after canonicalization."],
         ["Read-first", "Profiles default to read-only. Permanent deletion and writable tools are separate permissions, disabled unless selected."],
         ["Auditable", "A rotating local audit records the client, tool, paths, policy decision, duration, and job or operation IDs, never file contents or tokens."]
-      ]), true),
+      ]) + splitClip("ai-profile", "mcp-file-manager", "<strong>One profile per client.</strong> Pick the exact folders and tools a client may use. New profiles are read-only; writes are a separate permission you can revoke at any time."), true),
       section("Install the standalone MCP bundle", "The Windows MCPB release contains the native stdio sidecar, manifest, tool catalogue, prompts, screenshots, license, and SHA-256 metadata.", `<pre class="detail-code">Registry name: io.github.terrorproforma/explore-better\nTransport: stdio\nPlatform: Windows x64\nProfile: required, separately revocable\nApp: auto-discovered from the normal per-user install</pre><p class="detail-cta"><a class="button button--primary" href="https://github.com/terrorproforma/explore-better/releases/tag/${releaseTag}">Download the MCPB release</a></p>`)
     ]
   },
@@ -189,7 +208,7 @@ const pages = [
         ["Bounded scope", "The profile cannot escape the one authorized folder through traversal, junctions, device paths, or alternate data streams."],
         ["Conflict visibility", "Existing destinations and policy choices appear in the plan instead of being buried in command flags."],
         ["Recovery and undo", "Journalled operations can be monitored, canceled, reconciled after a crash, and undone when supported."]
-      ]), true)
+      ]) + splitClip("safe-rename", "use-cases/organize-downloads-safely", "<strong>Refused, not guessed.</strong> A rename that would overwrite another file stops and says why, instead of replacing it."), true)
     ]
   },
   {
@@ -282,12 +301,18 @@ function renderPage(page) {
   const canonical = `${baseUrl}/${page.slug}/`;
   const crumbs = breadcrumbs(page, prefix);
   const shot = media[page.slug];
-  const figure = shot
-    ? `<figure class="page-figure"><img src="${prefix}${shot.src}" alt="${esc(shot.alt)}" width="${shot.width}" height="${shot.height}" loading="lazy" decoding="async" /></figure>`
-    : "";
+  const heroClip = featureClips.get(heroClips[page.slug]);
+  const figure = heroClip
+    ? clipFigure(heroClip, { prefix, className: "page-figure" })
+    : shot
+      ? `<figure class="page-figure"><img src="${prefix}${shot.src}" alt="${esc(shot.alt)}" width="${shot.width}" height="${shot.height}" loading="lazy" decoding="async" /></figure>`
+      : "";
   const body = page.prose
     ? `<section class="section detail-section"><div class="shell detail-prose">${page.prose}</div></section>`
     : page.sections.join("");
+  // Every clip shown on the page is also described as a VideoObject.
+  const videos = [...new Set([...(figure + body).matchAll(/id="clip-([a-z0-9-]+)"/g)].map((match) => match[1]))]
+    .map((id) => clipVideoObject(featureClips.get(id), canonical));
   const navCurrent = page.slug === "integrations" ? "integrations/" : "";
   return `<!doctype html>
 <html lang="en">
@@ -319,7 +344,8 @@ function renderPage(page) {
       "@graph": [
         { "@type": "SoftwareApplication", "@id": `${baseUrl}/#software`, name: "Explore Better", operatingSystem: "Windows 10, Windows 11 (x64)", applicationCategory: "UtilitiesApplication" },
         { "@type": "WebPage", name: page.title, description: page.description, url: canonical, isPartOf: { "@id": `${baseUrl}/#website` }, about: { "@id": `${baseUrl}/#software` } },
-        crumbs.schema
+        crumbs.schema,
+        ...videos
       ]
     })}</script>
   </head>

@@ -38,7 +38,9 @@ const mimeTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
+  ".mp4": "video/mp4",
   ".png": "image/png",
+  ".webp": "image/webp",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
   ".xml": "application/xml; charset=utf-8"
@@ -157,7 +159,7 @@ async function main() {
   // Homepage structured data: chapters (VideoObject clips) and the FAQ must be well formed and
   // match what the page shows.
   const homeGraph = jsonLdBlocks(htmlByPage.get("home")).flatMap((block) => block["@graph"] || [block]);
-  const video = homeGraph.find((node) => node["@type"] === "VideoObject");
+  const video = homeGraph.find((node) => node["@type"] === "VideoObject" && node.hasPart);
   const clips = video?.hasPart || [];
   const clipProblems = [];
   if (!video?.contentUrl?.startsWith(canonicalRoot) || !video?.thumbnailUrl?.startsWith(canonicalRoot) || !/^PT[\d.]+S$/.test(video?.duration || "")) clipProblems.push("video urls/duration");
@@ -178,6 +180,56 @@ async function main() {
       faqQuestions.map((question) => question.name.replaceAll("’", "'")).join("|") === faqVisible.join("|"),
     `${faqQuestions.length} structured questions, ${faqVisible.length} visible`
   );
+
+  // Feature clips: each page that shows a clip embeds it statically (poster, size, muted,
+  // playsinline, no autoplay) and describes it as a VideoObject built from features.json.
+  const manifest = JSON.parse(await fs.readFile(path.join(siteRoot, "assets", "features", "features.json"), "utf8").catch(() => "{}"));
+  const featureClips = new Map((manifest.clips || []).map((clip) => [clip.id, clip]));
+  const allClipIds = [...featureClips.keys()];
+  const clipPlacements = {
+    home: allClipIds,
+    mcp: ["ai-handoff", "ai-profile"],
+    "mcp-file-manager": ["ai-handoff", "ai-profile"],
+    integrations: ["ai-handoff"],
+    ...Object.fromEntries(["claude", "cursor", "codex", "chatgpt", "vscode"].map((name) => [`integrations-${name}`, ["ai-handoff"]])),
+    "use-cases-find-disk-space": ["disk-map"],
+    "use-cases-organize-downloads-safely": ["transfer", "safe-rename"]
+  };
+  const featureProblems = [];
+  if (allClipIds.length === 0) featureProblems.push("features.json lists no clips");
+  for (const [name, ids] of Object.entries(clipPlacements)) {
+    const html = htmlByPage.get(name) || "";
+    const prefix = pages.find((page) => page.name === name).route.split("/").filter(Boolean).map(() => "../").join("");
+    const pageUrl = pages.find((page) => page.name === name).canonical;
+    const videos = jsonLdBlocks(html).flatMap((block) => block["@graph"] || [block]).filter((node) => node["@type"] === "VideoObject" && !node.hasPart);
+    for (const tag of html.match(/<video\b[^>]*>/g) || []) {
+      if (/\sautoplay\b/.test(tag)) featureProblems.push(`${name}: a video has the autoplay attribute`);
+    }
+    for (const id of ids) {
+      const clip = featureClips.get(id);
+      if (!clip) {
+        featureProblems.push(`${name}: ${id} is not in features.json`);
+        continue;
+      }
+      const figure = new RegExp(`<figure class="[^"]*\\bclip\\b[^"]*" id="clip-${id}" data-clip>([\\s\\S]*?)</figure>`).exec(html)?.[1] || "";
+      const videoTag = /<video\b[^>]*>/.exec(figure)?.[0] || "";
+      const posterTag = /<img class="clip__poster"[^>]*>/.exec(figure)?.[0] || "";
+      if (!videoTag) featureProblems.push(`${name}: ${id} is not embedded`);
+      else if (![" muted", " playsinline", ' preload="none"', ` width="${clip.width}"`, ` height="${clip.height}"`].every((part) => videoTag.includes(part)) || !figure.includes(`<source src="${prefix}${clip.src}" type="video/mp4" />`)) {
+        featureProblems.push(`${name}: ${id} video attributes`);
+      }
+      if (!posterTag.includes(`src="${prefix}${clip.poster}"`) || !posterTag.includes('loading="lazy"') || !posterTag.includes(`width="${clip.width}"`)) featureProblems.push(`${name}: ${id} poster`);
+      const object = videos.find((node) => node.contentUrl === `${canonicalRoot}${clip.src}`);
+      if (!object) featureProblems.push(`${name}: ${id} has no VideoObject`);
+      else if (object.name !== clip.title || object.thumbnailUrl !== `${canonicalRoot}${clip.poster}` || object.duration !== `PT${clip.durationSeconds}S` ||
+        !/^2026-09-25/.test(object.uploadDate || "") || !object.description || object["@id"] !== `${pageUrl}#clip-${id}`) featureProblems.push(`${name}: ${id} VideoObject fields`);
+    }
+    if (videos.length !== ids.length) featureProblems.push(`${name}: ${videos.length} VideoObjects for ${ids.length} clips`);
+  }
+  add(checks, "feature-clips-pages", featureProblems.length === 0, featureProblems.join("; ") || `${Object.keys(clipPlacements).length} pages embed their clips with matching VideoObjects`);
+  const llmsFullText = await fs.readFile(path.join(siteRoot, "llms-full.txt"), "utf8");
+  const unlisted = allClipIds.filter((id) => !llmsFullText.includes(`${canonicalRoot}${featureClips.get(id).src}`));
+  add(checks, "llms-full-feature-videos", llmsFullText.includes("## Feature Videos") && allClipIds.length > 0 && unlisted.length === 0, unlisted.join(", ") || `${allClipIds.length} feature video URLs listed`);
 
   const homeTypes = graphTypes(jsonLdBlocks(htmlByPage.get("home")));
   const mcpTypes = graphTypes(jsonLdBlocks(htmlByPage.get("mcp")));
