@@ -25048,6 +25048,10 @@ async function terminalCapabilities() {
       app.terminals.capabilities = capabilities;
       renderTerminalProfileChoices();
       return capabilities;
+    }, (error) => {
+      // A transient failure must not poison every later terminal request.
+      app.terminals.capabilitiesPromise = null;
+      throw error;
     });
   }
   return app.terminals.capabilitiesPromise;
@@ -25088,7 +25092,16 @@ function activeTerminalSession(paneName = app.activePane) {
   return app.terminals.sessions.get(tabOf(paneName)?.id) || null;
 }
 
+function syncTerminalViewVisibility() {
+  const shown = new Set(["left", "right"]
+    .filter((paneName) => app.terminals.visible[paneName] === true)
+    .map((paneName) => tabOf(paneName)?.id)
+    .filter(Boolean));
+  for (const [tabId, session] of app.terminals.sessions) session.view?.setVisible?.(shown.has(tabId));
+}
+
 function renderPaneTerminal(paneName) {
+  syncTerminalViewVisibility();
   const pane = document.querySelector(`.pane[data-pane="${paneName}"]`);
   const drawer = document.querySelector(`[data-terminal-drawer="${paneName}"]`);
   const resizer = document.querySelector(`[data-layout-resize="terminal-${paneName}"]`);
@@ -25203,6 +25216,12 @@ function handleTerminalEvent(message) {
   const session = app.terminals.bySessionId.get(String(message?.sessionId || ""));
   if (!session) return queueEarlyTerminalEvent(message);
   if (session.disposed) return;
+  // Output is streamed straight to the view; chrome re-renders only on state changes.
+  let changed = message.type !== "data";
+  if (session.error && (message.type === "data" || message.type === "busy" || message.type === "cwd")) {
+    session.error = "";
+    changed = true;
+  }
   if (message.type === "data") session.view?.write(message.data);
   if (message.type === "busy") session.busy = message.busy === true;
   if (message.type === "cwd") session.cwd = String(message.cwd || session.cwd);
@@ -25218,6 +25237,7 @@ function handleTerminalEvent(message) {
     retireTerminalSession(session.sessionId);
     session.sessionId = "";
   }
+  if (!changed) return;
   const paneName = paneNameForTerminalTab(session.tabId);
   if (paneName && tabOf(paneName)?.id === session.tabId) renderPaneTerminal(paneName);
 }
@@ -25289,6 +25309,9 @@ async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides =
     });
     Object.assign(session, metadata, { starting: false, exited: false, error: "" });
     app.terminals.bySessionId.set(session.sessionId, session);
+    // The native terminal started at a default size before this view existed.
+    const dimensions = session.view.dimensions();
+    bridge.resize(session.sessionId, dimensions.cols, dimensions.rows);
     replayEarlyTerminalEvents(session.sessionId);
     if (session.sessionId && session.requestedCwd && session.requestedCwd !== session.cwd && currentSettings().terminalFollowDirectory) {
       await bridge.syncDirectory(session.sessionId, session.requestedCwd);
@@ -25399,7 +25422,9 @@ async function restartPaneTerminal(paneName = app.activePane, overrides = {}) {
   if (!session || !session.sessionId) {
     if (session && !(await disposeTerminalForTab(tab))) return null;
     app.terminals.visible[paneName] = true;
-    return createTerminalForTab(paneName, tab, overrides);
+    // Restarting an exited terminal keeps its shell and elevation choice.
+    const retained = session ? { profileId: session.profileId, elevation: session.elevation } : {};
+    return createTerminalForTab(paneName, tab, { ...retained, ...overrides });
   }
   const bridge = desktopTerminalBridge();
   const focusOwner = document.activeElement;

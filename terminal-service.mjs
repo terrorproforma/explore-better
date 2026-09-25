@@ -1,5 +1,5 @@
 import { EventEmitter, once } from "node:events";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
@@ -7,32 +7,55 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { terminalMarkerDirectory, windowsArgumentList } from "./lib/terminal-protocol.mjs";
+import { terminalMarkerDirectory, uncRoot, windowsArgumentList } from "./lib/terminal-protocol.mjs";
+import { cmdQuote, powerShellLiteral } from "./lib/shell-quote.mjs";
 
 const MAX_INPUT_BYTES = 256 * 1024;
 const MAX_DIMENSION = 1000;
 const OUTPUT_BATCH_BYTES = 128 * 1024;
+const RECENT_OUTPUT_CHARS = 1024 * 1024;
 const BROKER_TIMEOUT_MS = 20000;
-const idleMarkerPattern = /\x1b\]633;EB;idle(?:\x07|\x1b\\)/g;
+const RETIRE_TIMEOUT_MS = 15000;
+// Only the prompt integration knows the per-session nonce, so program output
+// cannot forge a prompt-ready signal.
+const idleMarkerPattern = /\x1b\]633;EB;idle(?:;([^\x07\x1b]*))?(?:\x07|\x1b\\)/g;
+const markerNoncePattern = /^[0-9a-f]{32}$/;
 const cwdMarkerPatterns = [
   { pattern: /\x1b\]9;9;([^\x07\x1b]*)(?:\x07|\x1b\\)/g, fileUrl: false },
   { pattern: /\x1b\]7;([^\x07\x1b]*)(?:\x07|\x1b\\)/g, fileUrl: true }
 ];
+// Reports xterm sends on its own (cursor position, device attributes, focus,
+// mode and OSC replies) do not change the shell's edit line.
+const terminalReportPattern = /\x1b\[(?:\d+;\d+R|[?>][\d;]*c|[IO]|\??[\d;]*\$y)|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const scrubbedEnvironmentKeys = new Set(["PORT", "HOST"]);
+const brokerPipePattern = /^\\\\\.\\pipe\\ExploreBetter-[A-Za-z0-9-]{1,128}$/;
 
-function powershellPromptCommand() {
+function powershellPromptCommand(markerNonce) {
   const script = [
     "$global:__ExploreBetterOriginalPrompt = $function:prompt",
     "function global:prompt {",
-    "$p = (Get-Location).Path",
+    "$loc = Get-Location",
     "$esc = [char]27",
-    "[Console]::Out.Write(\"$esc]633;EB;idle`a$esc]9;9;$p`a\")",
-    "if ($global:__ExploreBetterOriginalPrompt) { & $global:__ExploreBetterOriginalPrompt } else { \"PS $p> \" }",
+    "$p = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { '' }",
+    `$marker = \"$esc]633;EB;idle;${markerNonce}\`a\"`,
+    "if ($p) { $marker += \"$esc]9;9;$p`a\" }",
+    "[Console]::Out.Write($marker)",
+    "if ($global:__ExploreBetterOriginalPrompt) { & $global:__ExploreBetterOriginalPrompt } else { \"PS $($loc.Path)> \" }",
     "}"
   ].join("; ");
   return Buffer.from(script, "utf16le").toString("base64");
 }
 
+function profileArguments(profile, markerNonce) {
+  if (!markerNoncePattern.test(String(markerNonce || ""))) throw new Error("Invalid terminal prompt integration.");
+  return profile.kind === "powershell" ? [...profile.args, "-EncodedCommand", powershellPromptCommand(markerNonce)] : [...profile.args];
+}
+
+let cachedProfiles = null;
+let cachedPublicProfiles = null;
+
 function profileDefinitions() {
+  if (cachedProfiles) return cachedProfiles;
   const systemRoot = process.env.SystemRoot || "C:\\Windows";
   const windowsPowerShell = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const cmd = path.join(systemRoot, "System32", "cmd.exe");
@@ -41,19 +64,19 @@ function profileDefinitions() {
     path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WindowsApps", "pwsh.exe")
   ];
   const pwsh = pwshCandidates.find((candidate) => candidate && existsSync(candidate));
-  return [
+  cachedProfiles = Object.freeze([
     pwsh && {
       id: "powershell7",
       label: "PowerShell 7",
       file: pwsh,
-      args: ["-NoLogo", "-NoProfile", "-NoExit", "-EncodedCommand", powershellPromptCommand()],
+      args: ["-NoLogo", "-NoProfile", "-NoExit"],
       kind: "powershell"
     },
     existsSync(windowsPowerShell) && {
       id: "windows-powershell",
       label: "Windows PowerShell",
       file: windowsPowerShell,
-      args: ["-NoLogo", "-NoProfile", "-NoExit", "-EncodedCommand", powershellPromptCommand()],
+      args: ["-NoLogo", "-NoProfile", "-NoExit"],
       kind: "powershell"
     },
     existsSync(cmd) && {
@@ -63,11 +86,13 @@ function profileDefinitions() {
       args: ["/D"],
       kind: "cmd"
     }
-  ].filter(Boolean);
+  ].filter(Boolean).map((profile) => Object.freeze({ ...profile, args: Object.freeze(profile.args) })));
+  return cachedProfiles;
 }
 
 function publicProfiles() {
-  return profileDefinitions().map(({ id, label }) => ({ id, label }));
+  cachedPublicProfiles ||= Object.freeze(profileDefinitions().map(({ id, label }) => Object.freeze({ id, label })));
+  return cachedPublicProfiles;
 }
 
 function profileById(profileId) {
@@ -107,19 +132,27 @@ async function validateCreateRequest(request) {
   };
 }
 
-function terminalEnvironment(profile) {
-  const env = { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor", EXPLORE_BETTER_TERMINAL: "1" };
+export function terminalEnvironment(profile, markerNonce, source = process.env) {
+  const env = { ...source };
+  // The desktop host's listener address and API credentials must not reach
+  // user programs (a PORT-reading dev server would collide with the backend).
+  for (const key of Object.keys(env)) {
+    const name = key.toUpperCase();
+    if (scrubbedEnvironmentKeys.has(name) || ((name.startsWith("EXPLORE_BETTER_") || name.startsWith("EB_")) && name !== "EXPLORE_BETTER_TERMINAL")) delete env[key];
+  }
+  Object.assign(env, { TERM: "xterm-256color", COLORTERM: "truecolor", EXPLORE_BETTER_TERMINAL: "1" });
   if (profile.kind === "powershell") {
     // A desktop launched from another PowerShell runtime inherits its module path.
     // Resolve the selected shell's inbox modules first (including PSReadLine),
     // while retaining the user's additional module directories.
     const defaults = [path.join(path.dirname(profile.file), "Modules"), path.join(process.env.ProgramFiles || "C:\\Program Files", profile.id === "windows-powershell" ? "WindowsPowerShell" : "PowerShell", "Modules")];
-    const inherited = String(process.env.PSModulePath || "").split(path.delimiter).filter(Boolean);
+    const inherited = String(source.PSModulePath || "").split(path.delimiter).filter(Boolean);
     for (const key of Object.keys(env)) if (key.toLowerCase() === "psmodulepath") delete env[key];
     env.PSModulePath = [...defaults, ...inherited.filter((entry) => !defaults.some((item) => item.toLowerCase() === entry.toLowerCase()))].join(path.delimiter);
   }
   if (profile.kind === "cmd") {
-    env.PROMPT = "$E]633;EB;idle$E\\$E]9;9;$P$E\\$P$G";
+    if (!markerNoncePattern.test(String(markerNonce || ""))) throw new Error("Invalid terminal prompt integration.");
+    env.PROMPT = `$E]633;EB;idle;${markerNonce}$E\\$E]9;9;$P$E\\$P$G`;
   }
   return env;
 }
@@ -159,15 +192,16 @@ async function createLocalAdapter(options, _runtime, signal) {
     cols: options.cols,
     rows: options.rows,
     cwd: options.cwd,
-    env: terminalEnvironment(options.profile),
+    env: terminalEnvironment(options.profile, options.markerNonce),
     useConpty: true
   };
+  const args = profileArguments(options.profile, options.markerNonce);
   const preferCompatibilityHost = process.env.EXPLORE_BETTER_USE_CONPTY_DLL !== "0";
   let pty;
   try {
-    pty = nodePty.spawn(options.profile.file, options.profile.args, { ...spawnOptions, useConptyDll: preferCompatibilityHost });
+    pty = nodePty.spawn(options.profile.file, args, { ...spawnOptions, useConptyDll: preferCompatibilityHost });
   } catch (error) {
-    pty = nodePty.spawn(options.profile.file, options.profile.args, { ...spawnOptions, useConptyDll: !preferCompatibilityHost });
+    pty = nodePty.spawn(options.profile.file, args, { ...spawnOptions, useConptyDll: !preferCompatibilityHost });
   }
   pty.onData((data) => emitter.pushOutput(data));
   pty.onExit((event) => {
@@ -206,8 +240,8 @@ function parseJsonLines(onMessage) {
   };
 }
 
-function psQuote(value) {
-  return `'${String(value).replaceAll("'", "''")}'`;
+function sha256(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
 }
 
 async function createElevatedAdapter(options, runtime, signal) {
@@ -222,7 +256,7 @@ async function createElevatedAdapter(options, runtime, signal) {
   const brokerDir = path.join(runtime.userDataPath, "terminal-broker");
   const manifestPath = path.join(brokerDir, `${randomUUID()}.json`);
   await mkdir(brokerDir, { recursive: true });
-  await writeFile(manifestPath, JSON.stringify({
+  const manifestBytes = Buffer.from(JSON.stringify({
     version: 1,
     pipeName,
     nonce,
@@ -231,8 +265,10 @@ async function createElevatedAdapter(options, runtime, signal) {
     cwd: options.cwd,
     cols: options.cols,
     rows: options.rows,
+    markerNonce: options.markerNonce,
     createdAt: Date.now()
-  }), { encoding: "utf8", mode: 0o600, flag: "wx" });
+  }), "utf8");
+  await writeFile(manifestPath, manifestBytes, { mode: 0o600, flag: "wx" });
 
   let socket = null;
   let settled = false;
@@ -288,9 +324,11 @@ async function createElevatedAdapter(options, runtime, signal) {
     server.listen(pipeName, resolve);
   });
 
-  const brokerArg = `--terminal-broker-manifest=${manifestPath}`;
-  const launchArgs = runtime.packaged ? [brokerArg] : [runtime.appPath, brokerArg];
-  const command = `Start-Process -FilePath ${psQuote(runtime.executablePath)} -Verb RunAs -WindowStyle Hidden -ArgumentList ${psQuote(windowsArgumentList(launchArgs))}`;
+  // The manifest lives in user-writable storage, so the elevated command line
+  // binds the pipe, nonce and exact manifest contents the broker may accept.
+  const brokerArgs = terminalBrokerArguments({ manifestPath, pipeName, nonce, digest: sha256(manifestBytes) });
+  const launchArgs = runtime.packaged ? brokerArgs : [runtime.appPath, ...brokerArgs];
+  const command = `Start-Process -FilePath ${powerShellLiteral(runtime.executablePath)} -Verb RunAs -WindowStyle Hidden -ArgumentList ${powerShellLiteral(windowsArgumentList(launchArgs))}`;
   const launcher = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
     windowsHide: true,
     stdio: "ignore"
@@ -343,8 +381,24 @@ async function createElevatedAdapter(options, runtime, signal) {
 
 function quoteDirectory(profile, cwd) {
   if (/[\0\r\n"]/u.test(cwd)) throw new Error("Folder cannot be quoted for this shell.");
-  if (profile.kind === "cmd") return `cd /d "${cwd}"\r`;
-  return `Set-Location -LiteralPath '${cwd.replaceAll("'", "''")}'\r`;
+  if (profile.kind === "cmd") return `cd /d ${cmdQuote(cwd)}\r`;
+  return `Set-Location -LiteralPath ${powerShellLiteral(cwd)}\r`;
+}
+
+// Tracks whether the shell's edit line may hold user text, so folder-follow
+// never appends a cd command to (and submits) a half-typed line.
+function trackLineInput(session, data) {
+  const text = String(data).replace(terminalReportPattern, "");
+  const submitted = Math.max(text.lastIndexOf("\r"), text.lastIndexOf("\n"), text.lastIndexOf("\x03"));
+  if (submitted >= 0) {
+    session.inputDirty = false;
+    session.typeAhead = false;
+  }
+  if (text.length > submitted + 1) {
+    session.inputDirty = true;
+    // Text typed while a command runs lands on the next prompt's edit line.
+    if (session.busy) session.typeAhead = true;
+  }
 }
 
 function inspectMarkers(session, data) {
@@ -352,28 +406,34 @@ function inspectMarkers(session, data) {
   const lastOscStart = markerData.lastIndexOf("\x1b]");
   const lastBell = markerData.lastIndexOf("\x07");
   const lastStringTerminator = markerData.lastIndexOf("\x1b\\");
-  const pendingMarker = lastOscStart > Math.max(lastBell, lastStringTerminator) ? markerData.slice(lastOscStart) : "";
+  let pendingMarker = lastOscStart > Math.max(lastBell, lastStringTerminator) ? markerData.slice(lastOscStart) : "";
+  // An ESC at the chunk boundary may introduce the next chunk's OSC marker.
+  if (!pendingMarker && markerData.endsWith("\x1b")) pendingMarker = "\x1b";
   session.markerBuffer = pendingMarker.length <= 65536 ? pendingMarker : "";
   let idle = false;
-  if (idleMarkerPattern.test(markerData)) idle = true;
-  idleMarkerPattern.lastIndex = 0;
+  for (const match of markerData.matchAll(idleMarkerPattern)) {
+    if (session.markerNonce && match[1] === session.markerNonce) idle = true;
+  }
   for (const { pattern, fileUrl } of cwdMarkerPatterns) {
-    let match;
-    while ((match = pattern.exec(markerData))) {
-      const cwd = terminalMarkerDirectory(match[1], fileUrl);
+    for (const match of markerData.matchAll(pattern)) {
+      const cwd = terminalMarkerDirectory(match[1], fileUrl, session.allowedUncRoots);
       if (cwd && cwd !== session.cwd) {
         session.cwd = cwd;
         session.send({ type: "cwd", cwd });
       }
     }
-    pattern.lastIndex = 0;
   }
   if (idle && session.busy) {
     session.busy = false;
     session.send({ type: "busy", busy: false });
   }
-  if (idle) session.promptReady = true;
-  if (idle && session.pendingCwd) {
+  if (idle) {
+    session.promptReady = true;
+    // A fresh prompt starts with an empty line unless type-ahead is pending.
+    if (session.typeAhead) session.typeAhead = false;
+    else session.inputDirty = false;
+  }
+  if (idle && session.pendingCwd && !session.inputDirty) {
     const pending = session.pendingCwd;
     session.pendingCwd = "";
     try { session.adapter.write(quoteDirectory(session.profile, pending)); }
@@ -381,11 +441,14 @@ function inspectMarkers(session, data) {
   }
 }
 
-export function createTerminalService({ MessageChannelMain, getMainWindow, getBaseUrl, runtime, createAdapter = (options, runtime, signal) => options.elevation === "administrator" ? createElevatedAdapter(options, runtime, signal) : createLocalAdapter(options, runtime, signal) }) {
+export function createTerminalService({ MessageChannelMain, getMainWindow, getBaseUrl, runtime, retireTimeoutMs = RETIRE_TIMEOUT_MS, createAdapter = (options, runtime, signal) => options.elevation === "administrator" ? createElevatedAdapter(options, runtime, signal) : createLocalAdapter(options, runtime, signal) }) {
   const sessions = new Map();
   const tabSessions = new Map();
   const pendingCreates = new Map();
   const retiring = new Set();
+  // Recent output exists only for smoke verification; normal sessions skip it.
+  const retainOutput = runtime?.smoke ?? process.argv.includes("--smoke");
+  let closing = false;
 
   function trusted(event) {
     const window = getMainWindow();
@@ -398,16 +461,25 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
   }
 
   function retireAdapter(adapter) {
-    const stopped = adapter.exited || new Promise((resolve) => {
-      adapter.once("exit", resolve);
-      adapter.once("disconnect", resolve);
+    // A native process that never reports exit is dropped after a bound so
+    // shutdown and idle waits cannot hang on it indefinitely.
+    const stopped = new Promise((resolve) => {
+      const timer = setTimeout(resolve, retireTimeoutMs);
+      timer.unref?.();
+      const done = () => { clearTimeout(timer); resolve(); };
+      if (adapter.exited) Promise.resolve(adapter.exited).then(done, done);
+      else {
+        adapter.once("exit", done);
+        adapter.once("disconnect", done);
+      }
     });
     retiring.add(stopped);
-    Promise.resolve(stopped).then(() => retiring.delete(stopped), () => retiring.delete(stopped));
+    stopped.then(() => retiring.delete(stopped));
     try { adapter.kill(); } catch {}
   }
 
   async function create(event, rawRequest, replacementSessionId = "") {
+    if (closing) throw new Error("Explore Better is closing.");
     if (!trusted(event)) throw new Error("Untrusted terminal sender.");
     const tabId = String(rawRequest?.tabId || "");
     if (!/^[A-Za-z0-9-]{8,128}$/.test(tabId)) throw new Error("Invalid terminal tab identity.");
@@ -421,12 +493,12 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
     let channel;
     const sessionId = randomUUID();
     try {
-      const options = await validateCreateRequest(rawRequest);
+      const options = { ...(await validateCreateRequest(rawRequest)), markerNonce: randomBytes(16).toString("hex") };
       pending.controller.signal.throwIfAborted();
       if (!trusted(event)) throw new Error("Terminal window closed while starting.");
       adapter = await createAdapter(options, runtime, pending.controller.signal);
       pending.controller.signal.throwIfAborted();
-      if (!trusted(event) || pendingCreates.get(tabKey) !== pending || (replacementSessionId && !sessions.has(replacementSessionId))) throw new Error("Terminal was closed while starting.");
+      if (closing || !trusted(event) || pendingCreates.get(tabKey) !== pending || (replacementSessionId && !sessions.has(replacementSessionId))) throw new Error("Terminal was closed while starting.");
       channel = new MessageChannelMain();
       if (replacementSessionId) dispose(replacementSessionId);
       const session = {
@@ -439,12 +511,19 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
         cwd: options.cwd,
         busy: false,
         promptReady: false,
+        inputDirty: false,
+        typeAhead: false,
         markerBuffer: "",
+        markerNonce: options.markerNonce,
+        // UNC folders are trusted only from the spawn folder or an app sync.
+        allowedUncRoots: new Set([uncRoot(options.cwd)].filter(Boolean)),
         pendingCwd: "",
         adapter,
         port: channel.port1,
         output: "",
-        recentOutput: "",
+        outputBytes: 0,
+        recentChunks: [],
+        recentLength: 0,
         outputTimer: null,
         send(message) { try { channel.port1.postMessage({ sessionId, ...message }); } catch {} }
       };
@@ -456,15 +535,23 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
         if (!session.output) return;
         const output = session.output;
         session.output = "";
+        session.outputBytes = 0;
         session.send({ type: "data", data: output });
       };
       adapter.on("data", (data) => {
         if (!sessions.has(sessionId)) return;
         if (runtime.debug) console.log(`Explore Better PTY data: ${JSON.stringify(String(data).slice(0, 240))}`);
         inspectMarkers(session, data);
-        session.recentOutput = `${session.recentOutput}${data}`.slice(-1024 * 1024);
+        if (retainOutput) {
+          session.recentChunks.push(data);
+          session.recentLength += data.length;
+          while (session.recentChunks.length > 1 && session.recentLength - session.recentChunks[0].length >= RECENT_OUTPUT_CHARS) {
+            session.recentLength -= session.recentChunks.shift().length;
+          }
+        }
         session.output += data;
-        if (Buffer.byteLength(session.output) >= OUTPUT_BATCH_BYTES) flush();
+        session.outputBytes += Buffer.byteLength(data);
+        if (session.outputBytes >= OUTPUT_BATCH_BYTES) flush();
         else if (!session.outputTimer) session.outputTimer = setTimeout(flush, 8);
       });
       const finishSession = ({ exitCode, signal, disconnected } = {}) => {
@@ -518,6 +605,7 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
           session.busy = true;
           session.send({ type: "busy", busy: true });
         }
+        trackLineInput(session, data);
         session.adapter.write(data);
       }
       if (message.type === "resize") {
@@ -538,7 +626,9 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
     if (!sessions.has(session.id)) throw new Error("Terminal was closed.");
     if (session.syncRevision !== revision) return { queued: true, superseded: true, cwd: normalizedCwd };
     const command = quoteDirectory(session.profile, normalizedCwd);
-    if (session.busy || !session.promptReady) {
+    const syncedUncRoot = uncRoot(normalizedCwd);
+    if (syncedUncRoot) session.allowedUncRoots.add(syncedUncRoot);
+    if (session.busy || !session.promptReady || session.inputDirty) {
       session.pendingCwd = normalizedCwd;
       session.send({ type: "sync-pending", cwd: normalizedCwd });
       return { queued: true, cwd: normalizedCwd };
@@ -586,6 +676,7 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
   }
 
   function disposeAll() {
+    closing = true;
     for (const pending of pendingCreates.values()) pending.controller.abort(new Error("Explore Better is closing."));
     for (const sessionId of [...sessions.keys()]) dispose(sessionId);
   }
@@ -616,7 +707,7 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
   }
 
   function outputForSmoke() {
-    return [...sessions.values()].map((session) => session.recentOutput).join("\n");
+    return [...sessions.values()].map((session) => session.recentChunks.join("").slice(-RECENT_OUTPUT_CHARS)).join("\n");
   }
 
   function firstSessionForSmoke() {
@@ -624,7 +715,10 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
   }
 
   return {
-    capabilities: () => ({ available: process.platform === "win32", profiles: publicProfiles(), defaultProfileId: publicProfiles()[0]?.id || "", elevationAvailable: process.platform === "win32" }),
+    capabilities: () => {
+      const profiles = publicProfiles();
+      return { available: process.platform === "win32", profiles, defaultProfileId: profiles[0]?.id || "", elevationAvailable: process.platform === "win32" };
+    },
     create,
     restart,
     syncDirectory,
@@ -647,19 +741,51 @@ export function createTerminalService({ MessageChannelMain, getMainWindow, getBa
   };
 }
 
-export function terminalBrokerManifestFromArgv(argv = process.argv) {
-  return argv.find((value) => value.startsWith("--terminal-broker-manifest="))?.slice("--terminal-broker-manifest=".length) || "";
+function argvValue(argv, name) {
+  const prefix = `--${name}=`;
+  return argv.find((value) => String(value).startsWith(prefix))?.slice(prefix.length) || "";
 }
 
-export async function runTerminalBroker(manifestPath, { createAdapter = createLocalAdapter, shutdownTimeoutMs = 8000 } = {}) {
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+export function terminalBrokerManifestFromArgv(argv = process.argv) {
+  return argvValue(argv, "terminal-broker-manifest");
+}
+
+export function terminalBrokerArguments({ manifestPath, pipeName, nonce, digest }) {
+  return [
+    `--terminal-broker-manifest=${manifestPath}`,
+    `--terminal-broker-pipe=${pipeName}`,
+    `--terminal-broker-nonce=${nonce}`,
+    `--terminal-broker-digest=${digest}`
+  ];
+}
+
+export function terminalBrokerBindingFromArgv(argv = process.argv) {
+  return {
+    pipeName: argvValue(argv, "terminal-broker-pipe"),
+    nonce: argvValue(argv, "terminal-broker-nonce"),
+    digest: argvValue(argv, "terminal-broker-digest")
+  };
+}
+
+export async function runTerminalBroker(manifestPath, { createAdapter = createLocalAdapter, shutdownTimeoutMs = 8000, binding = terminalBrokerBindingFromArgv() } = {}) {
+  const manifestBytes = await readFile(manifestPath);
   await rm(manifestPath, { force: true }).catch(() => {});
+  // Another unelevated process could rewrite the manifest to steer this
+  // elevated shell to its own pipe; only the launch-bound contents are valid.
+  if (!binding?.pipeName || !binding.nonce || !/^[0-9a-f]{64}$/i.test(String(binding.digest || "")) || sha256(manifestBytes) !== String(binding.digest).toLowerCase()) {
+    throw new Error("Administrator terminal manifest does not match its launch binding.");
+  }
+  const manifest = JSON.parse(manifestBytes.toString("utf8"));
   if (manifest?.version !== 1 || !manifest.pipeName || !manifest.nonce || Date.now() - Number(manifest.createdAt) > BROKER_TIMEOUT_MS * 2) {
     throw new Error("Invalid or expired administrator terminal manifest.");
   }
+  if (manifest.pipeName !== binding.pipeName || manifest.nonce !== binding.nonce || !brokerPipePattern.test(String(manifest.pipeName))) {
+    throw new Error("Administrator terminal manifest does not match its launch binding.");
+  }
+  if (!markerNoncePattern.test(String(manifest.markerNonce || ""))) throw new Error("Invalid administrator terminal manifest.");
   const profile = profileById(String(manifest.profileId || ""));
   if (!profile || !profile.file || !existsSync(profile.file) || !["powershell", "cmd"].includes(profile.kind)) throw new Error("Invalid administrator terminal profile.");
-  const options = { profile, cwd: manifest.cwd, cols: clampDimension(manifest.cols, 100), rows: clampDimension(manifest.rows, 28) };
+  const options = { profile, cwd: manifest.cwd, cols: clampDimension(manifest.cols, 100), rows: clampDimension(manifest.rows, 28), markerNonce: manifest.markerNonce };
   // The broker owns normal pipe closure so a kill request can receive the
   // actual native exit before either side closes the connection.
   const socket = net.createConnection({ path: manifest.pipeName, allowHalfOpen: true });
