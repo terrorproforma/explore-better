@@ -30,7 +30,6 @@ for (const required of [electronApp, ...requiredRendererFiles]) {
 // EXPLORE_BETTER_CAPTURE_HOME to a short folder that does not exist yet (for example C:\Demo);
 // otherwise it is a random folder under EXPLORE_BETTER_CAPTURE_ROOT or the temp directory.
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "eb-site-"));
-const localAppData = path.join(temp, "LocalAppData");
 const userData = path.join(temp, "Electron");
 let home;
 if (process.env.EXPLORE_BETTER_CAPTURE_HOME) {
@@ -44,6 +43,9 @@ if (process.env.EXPLORE_BETTER_CAPTURE_HOME) {
 } else {
   home = await fs.mkdtemp(path.join(process.env.EXPLORE_BETTER_CAPTURE_ROOT || os.tmpdir(), "Demo-"));
 }
+// App data paths are visible in the AI Bridge settings (the MCP server path), so keep
+// them under the fixture home rather than the real temp folder, which names the user.
+const localAppData = path.join(home, "AppData", "Local");
 
 async function freePort() {
   const server = net.createServer();
