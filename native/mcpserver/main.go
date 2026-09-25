@@ -42,6 +42,10 @@ const (
 	maxResourceURIBytes   = 2048
 )
 
+// handshakeProtocolVersions lists the MCP revisions the sidecar serves; the
+// newest must equal the contract's mcpProtocolVersion.
+var handshakeProtocolVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
+
 type contract struct {
 	BridgeProtocolVersion int                `json:"bridgeProtocolVersion"`
 	SchemaVersion         string             `json:"schemaVersion"`
@@ -784,6 +788,9 @@ func loadContract() (contract, []byte, error) {
 	if err == nil && c.BridgeProtocolVersion != bridgeProtocolVersion {
 		err = errors.New("embedded contract and sidecar bridge protocol versions differ")
 	}
+	if err == nil && c.MCPProtocolVersion != handshakeProtocolVersions[0] {
+		err = errors.New("embedded contract and sidecar MCP protocol versions differ")
+	}
 	return c, data, err
 }
 
@@ -843,6 +850,10 @@ func main() {
 			Instructions: activeContract.ServerInstructions,
 			PageSize:     100,
 			KeepAlive:    20 * time.Second,
+			// Stay on the initialize-handshake protocols the contract declares.
+			// 2026-07-28 forbids the server-initiated roots/list that scopes
+			// every call, and drops resource subscriptions and session clientInfo.
+			SupportedProtocolVersions: handshakeProtocolVersions,
 			SubscribeHandler: func(ctx context.Context, request *mcp.SubscribeRequest) error {
 				sessionID, clientInfo := sessionIdentity(request.Session)
 				return bridge.setSubscription(ctx, sessionID, clientInfo, request.Params.URI, true)
