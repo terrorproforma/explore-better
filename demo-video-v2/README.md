@@ -225,3 +225,7 @@ The v5 capture (in git history) recorded a native 1600×900 app session and a re
 - The site narrative runs from human/AI context, through command, disk map, safe transfer preview and terminal, into scoped MCP tools and proof.
 - Off-thread source decoding keeps every UI frame deterministic in the final render.
 - All score and UI footage are original to this project.
+
+## Privacy check before publishing
+
+`npm run verify:privacy` samples every site video (the demo and all feature clips) at 10 fps and reads each frame with the built-in Windows OCR engine. It fails if any frame shows the current account name or a user-profile path, reporting only timestamps. Run it after every render and before committing new media.

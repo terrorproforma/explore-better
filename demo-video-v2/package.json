@@ -13,7 +13,8 @@
     "render:v6": "node render-v6.mjs",
     "render:v7": "node render-v7.mjs",
     "render:features": "node render-features.mjs",
-    "render:music": "node render-music.mjs"
+    "render:music": "node render-music.mjs",
+    "verify:privacy": "node tools/media-privacy-scan.mjs"
   },
   "dependencies": {
     "@remotion/cli": "4.0.489",
