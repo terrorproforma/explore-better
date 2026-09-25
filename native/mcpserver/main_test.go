@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -371,6 +372,36 @@ func TestSessionIdentityIsStableWithoutTransportSessionID(t *testing.T) {
 	}
 	if stableSessionID("http-session") != "http-session" {
 		t.Fatal("a transport session ID was replaced")
+	}
+}
+
+func TestServedProtocolVersionsMatchContractAndSDK(t *testing.T) {
+	if _, _, err := loadContract(); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range handshakeProtocolVersions {
+		if !slices.Contains(mcp.SupportedProtocolVersions(), v) || v >= "2026-07-28" {
+			t.Fatalf("protocol version %q is not a handshake version supported by the SDK", v)
+		}
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, &mcp.ServerOptions{SupportedProtocolVersions: handshakeProtocolVersions})
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+	params := serverSession.InitializeParams()
+	if params == nil || params.ProtocolVersion != handshakeProtocolVersions[0] || params.ClientInfo == nil {
+		t.Fatalf("a current SDK client did not negotiate the handshake protocol: %+v", params)
 	}
 }
 
