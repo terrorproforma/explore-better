@@ -3483,6 +3483,7 @@ async function assertRenameTargetAvailable(src, dest) {
   if (await renameTargetTaken(src, dest)) {
     const error = new Error("A file or folder with that name already exists.");
     error.code = "EEXIST";
+    error.status = 409;
     throw error;
   }
 }
