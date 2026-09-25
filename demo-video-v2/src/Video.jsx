@@ -12,6 +12,7 @@ import {
   useCurrentFrame,
   useVideoConfig
 } from "remotion";
+import { ExploreBetterV6 } from "./V6.jsx";
 
 const ink = "#111715";
 const lime = "#c7ff4a";
@@ -567,6 +568,16 @@ export function Root() {
         fps={30}
         width={1920}
         height={1080}
+      />
+      <Composition
+        id="ExploreBetterV6"
+        component={ExploreBetterV6}
+        durationInFrames={300}
+        fps={30}
+        width={1920}
+        height={1080}
+        defaultProps={{ edit: null }}
+        calculateMetadata={({ props }) => ({ durationInFrames: props.edit?.durationInFrames || 300 })}
       />
     </>
   );

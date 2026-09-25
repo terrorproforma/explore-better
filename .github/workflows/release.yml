@@ -20,8 +20,13 @@ jobs:
     permissions:
       contents: read
 
+  # Unsigned build: the only build until the repository variables described in
+  # docs/CODE_SIGNING.md exist, and afterwards still the build for untagged manual
+  # runs. It never receives an OIDC token. Its steps are unchanged from the
+  # pre-signing workflow; keep them in sync with build-signed below.
   build:
     needs: test
+    if: ${{ !(startsWith(github.ref, 'refs/tags/') && (vars.AZURE_SIGNING_ENDPOINT != '' || vars.AZURE_SIGNING_ACCOUNT != '' || vars.AZURE_SIGNING_PROFILE != '' || vars.AZURE_SIGNING_PUBLISHER_NAME != '')) }}
     runs-on: windows-latest
     timeout-minutes: 45
     permissions:
@@ -78,11 +83,148 @@ jobs:
             dist/mcp/server.json
             artifacts/production-signing-latest.md
 
-  # Runs no repository code: it only attests the exact bytes produced by the
-  # build job and places them on a draft release for a maintainer to publish.
+  # Signed build with Microsoft Artifact Signing. For tags it replaces `build` as soon
+  # as any AZURE_SIGNING_* repository variable is set; a partial configuration fails
+  # here instead of silently shipping unsigned. Owner setup: docs/CODE_SIGNING.md.
+  #
+  # Why sign inside the electron-builder run rather than in a later job: the order is
+  # load-bearing. The app executable and the resources\native helpers must be signed
+  # before NSIS embeds them, the uninstaller before the installer is compiled, and the
+  # installer before its blockmap, latest.yml and SHA256SUMS are hashed. A separate
+  # signing job would have to unpack, sign and re-run NSIS, i.e. package twice.
+  # The cost is id-token: write in a job that runs npm-installed code, bounded by:
+  #   - only this job has the permission, and it runs only for tags once configured;
+  #   - Azure trusts only the `release-signing` environment (restricted to v* tags);
+  #   - npm ci and the pre-packaging build steps run BEFORE azure/login, and the Azure
+  #     session is cleared straight after packaging, before the remaining steps;
+  #   - no client secret exists: azure/login exchanges a short-lived OIDC token for a
+  #     service principal that holds only the Certificate Profile Signer role.
+  # Residual risk: code already on the runner (npm dependencies, electron-builder) can
+  # request an OIDC token while this job runs. That is inherent to letting the
+  # packager sign; the lockfile, npm audit and the tag-only environment bound it.
+  build-signed:
+    name: build (signed)
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/') && (vars.AZURE_SIGNING_ENDPOINT != '' || vars.AZURE_SIGNING_ACCOUNT != '' || vars.AZURE_SIGNING_PROFILE != '' || vars.AZURE_SIGNING_PUBLISHER_NAME != '')
+    runs-on: windows-latest
+    timeout-minutes: 60
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      EXPLORE_BETTER_DISABLE_STATE_WATCH: "1"
+    steps:
+      - name: Check signing configuration
+        shell: pwsh
+        env:
+          SIGNING_VAR_AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          SIGNING_VAR_AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          SIGNING_VAR_AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          SIGNING_VAR_AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          SIGNING_VAR_AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          SIGNING_VAR_AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+          SIGNING_VAR_AZURE_SIGNING_PUBLISHER_NAME: ${{ vars.AZURE_SIGNING_PUBLISHER_NAME }}
+        run: |
+          $required = @('AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID', 'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_PROFILE', 'AZURE_SIGNING_PUBLISHER_NAME')
+          $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("SIGNING_VAR_$_")) })
+          if ($missing.Count -gt 0) {
+            throw "Code signing is partly configured. Set these repository variables (docs/CODE_SIGNING.md) or remove every AZURE_SIGNING_* variable: $($missing -join ', ')"
+          }
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.25.12
+          cache-dependency-path: |
+            native/fshelper/go.mod
+            native/mcpserver/go.sum
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - name: Confirm release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          if ($LASTEXITCODE -ne 0) { throw "Could not read the package version." }
+          if ($env:GITHUB_REF_NAME -ne "v$packageVersion") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version $packageVersion"
+          }
+      # The same prepackage steps `npm run package:installer` runs, finished before
+      # any Azure credential exists on the runner.
+      - name: Build packaging inputs before signing in to Azure
+        run: |
+          npm run prepackage:installer
+          if ($LASTEXITCODE -ne 0) { throw "Release step failed: prepackage:installer" }
+      - name: Sign in to Azure with GitHub OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      # The OIDC assertion azure/login used expires within minutes; obtaining the
+      # Artifact Signing token now caches it (about an hour) for every signature.
+      - name: Obtain the Artifact Signing access token
+        run: |
+          az account get-access-token --resource https://codesigning.azure.net --output none
+          if ($LASTEXITCODE -ne 0) { throw "Could not obtain an Artifact Signing access token. Check the federated credential subject." }
+      # electron-builder signs (timestamped, SHA-256) the app executable, the packaged
+      # resources\native helpers, elevate.exe, the uninstaller and the installer, and
+      # writes publisherName into app-update.yml. forceCodeSigning fails the build if
+      # any signature fails.
+      - name: Package and sign installer
+        env:
+          EXPLORE_BETTER_AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          EXPLORE_BETTER_AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          EXPLORE_BETTER_AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+          EXPLORE_BETTER_AZURE_SIGNING_PUBLISHER_NAME: ${{ vars.AZURE_SIGNING_PUBLISHER_NAME }}
+        run: |
+          node scripts/run-electron-builder.mjs --win nsis
+          if ($LASTEXITCODE -ne 0) { throw "Release step failed: package:installer (signed)" }
+      - name: Sign out of Azure
+        if: always()
+        run: az account clear
+      - name: Build update metadata from the signed output
+        env:
+          # Bundle the signed sidecar copy in the MCPB instead of native/bin.
+          EXPLORE_BETTER_MCPB_SIDECAR: dist/win-unpacked/resources/native/ExploreBetterMcp.exe
+        run: |
+          $releaseSteps = @('verify:packaged-terminal', 'build:mcpb', 'verify:mcpb', 'verify:mcp-release', 'verify:brand', 'build:update-feed', 'build:release-checksums', 'verify:release-checksums')
+          foreach ($releaseStep in $releaseSteps) {
+            npm run $releaseStep
+            if ($LASTEXITCODE -ne 0) { throw "Release step failed: $releaseStep" }
+          }
+      - name: Require trusted, timestamped Authenticode signatures
+        env:
+          EXPLORE_BETTER_SIGNING_SUBJECT: ${{ vars.AZURE_SIGNING_PUBLISHER_NAME }}
+        run: npm run verify:production-signing
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ExploreBetter-${{ github.ref_name }}-windows-x64
+          if-no-files-found: error
+          path: |
+            dist/ExploreBetter-*-x64-setup.exe
+            dist/ExploreBetter-*-x64-setup.exe.blockmap
+            dist/update-feed/latest.yml
+            dist/SHA256SUMS.txt
+            dist/mcp/ExploreBetter-MCP-*-windows-x64.mcpb
+            dist/mcp/SHA256SUMS-mcp.txt
+            dist/mcp/manifest.json
+            dist/mcp/server.json
+            artifacts/production-signing-latest.md
+
+  # Runs no repository code: it only attests the exact bytes produced by whichever
+  # build job ran (exactly one does) and places them on a draft release for a
+  # maintainer to publish.
   publish:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, build-signed]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') && contains(needs.*.result, 'success') && !contains(needs.*.result, 'failure') }}
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:

@@ -1,6 +1,6 @@
 # Explore Better Distribution Checklist
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-09-25
 
 Quick progress view: [GitHub distribution readiness issue #1](https://github.com/terrorproforma/explore-better/issues/1)
 
@@ -14,7 +14,7 @@ encrypted secret store.
 
 | # | Distribution track | Status | Owner action remaining |
 |---|---|---|---|
-| 1 | Code signing and SmartScreen trust | IN PROGRESS | Complete the open Public Trust individual identity validation |
+| 1 | Code signing and SmartScreen trust | IN PROGRESS | Complete the open Public Trust individual identity validation, then follow [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) |
 | 2 | Publisher identity and brand ownership | NOT STARTED | Choose the legal publisher and decide whether to register a business or trademark |
 | 3 | Microsoft Store publication | NOT STARTED | Open and verify the correct Partner Center developer account |
 | 4 | Domain and public support identity | NOT STARTED | Purchase the final domain and own the support mailboxes |
@@ -55,6 +55,14 @@ Current facts:
 - Explore Better is public under the MIT licence, so SignPath Foundation's free
   [open-source signing program](https://signpath.org/) is a credible alternative
   if its project review accepts the application.
+- The release workflow is signing-ready. A `build (signed)` job replaces the unsigned
+  build for `v*` tags once the repository variables exist. It signs through
+  electron-builder's Artifact Signing integration using GitHub OIDC (no client
+  secret), timestamps every signature, and fails the release unless strict
+  Authenticode verification passes. Until then, releases stay unsigned exactly as
+  before. The owner steps (certificate profile, Entra app with a federated
+  credential, signer role, `release-signing` environment, `gh variable set`) are in
+  [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md).
 
 Owner-only actions:
 
@@ -64,7 +72,7 @@ Owner-only actions:
 - [x] Select individual or organization when completing the identity request: individual.
 - [ ] Complete the provider's identity validation or open-source project application.
 - [x] Accept the Artifact Signing terms and submit the Public Trust application.
-- [ ] Store provider credentials in Azure/GitHub secrets; never commit or message them.
+- [ ] Create the certificate profile, signing identity, signer role, `release-signing` environment and repository variables ([docs/CODE_SIGNING.md](docs/CODE_SIGNING.md)). OIDC means there is no client secret to store; never commit or message identifiers tied to personal details.
 
 Project actions after the provider route exists:
 
@@ -73,8 +81,9 @@ Project actions after the provider route exists:
 - [x] Create the dedicated East US resource group and validate the signing account name.
 - [x] Create the Basic `explorebettersigning` account after the subscription upgrade.
 - [ ] Add a public code-signing policy and named release roles when required.
-- [ ] Sign the Electron app, installer, uninstaller, native filesystem helper, terminal broker, and MCP sidecar.
-- [ ] Timestamp every signature and fail release builds when any required PE file is unsigned.
+- [x] Wire signing for the Electron app (which also runs the terminal broker), installer, uninstaller, native filesystem helper, and MCP sidecar (app and MCPB copies) into the release workflow, gated on repository variables.
+- [ ] Ship the first signed release. After that, every release must be signed with the same subject, because electron-updater enforces `publisherName`.
+- [x] Timestamp every signature and fail signed release builds when any required PE file is unsigned or untimestamped (strict `verify:production-signing`).
 - [ ] Verify signatures on a clean Windows machine and publish signature evidence with the release.
 - [ ] Replace the website and README unsigned-preview warning with the verified publisher name.
 

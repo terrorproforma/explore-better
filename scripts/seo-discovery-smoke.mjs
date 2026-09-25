@@ -9,7 +9,7 @@ const artifactsDir = path.join(root, "artifacts");
 const reportPath = path.join(artifactsDir, "seo-discovery-latest.json");
 const canonicalRoot = "https://terrorproforma.github.io/explore-better/";
 const pages = [
-  { name: "home", route: "/", file: "index.html", canonical: canonicalRoot, h1: "YOUR FILES. SHARED CONTROL." },
+  { name: "home", route: "/", file: "index.html", canonical: canonicalRoot, h1: "Fast for you. Safe for your AI." },
   { name: "mcp", route: "/mcp/", file: "mcp/index.html", canonical: `${canonicalRoot}mcp/`, h1: "Explore Better MCP Server" },
   ...[
     ["ai-file-manager-windows", "AI-native Windows file manager and Explorer replacement"],
@@ -133,7 +133,51 @@ async function main() {
     add(checks, `${page.name}-jsonld-parse`, blocks.length > 0 && !parseError, parseError || `${blocks.length} block(s)`);
     add(checks, `${page.name}-jsonld-software`, types.includes("SoftwareApplication"), types.join(", "));
     add(checks, `${page.name}-honest-schema`, !html.includes('"aggregateRating"') && !html.includes('"review"'), "No invented ratings or reviews");
+    // Social previews use a PNG (widest crawler support); every live page uses the current design.
+    add(checks, `${page.name}-og-image-png`, /\.png$/.test(ogImage), ogImage || "missing");
+    add(
+      checks,
+      `${page.name}-current-design`,
+      /<link rel="stylesheet" href="(\.\.\/)*site\.css" \/>/.test(html) && /<script src="(\.\.\/)*site\.js" defer><\/script>/.test(html) && !/styles\.css|script\.js/.test(html),
+      "Uses site.css and site.js, not the frozen legacy assets"
+    );
+    if (page.name !== "home") {
+      const crumbs = blocks.flatMap((block) => block["@graph"] || [block]).find((node) => node?.["@type"] === "BreadcrumbList");
+      const items = crumbs?.itemListElement || [];
+      add(
+        checks,
+        `${page.name}-breadcrumbs`,
+        items.length >= 2 && items[0].item === canonicalRoot && items.at(-1).item === page.canonical && items.every((item, index) => item.position === index + 1) &&
+          html.includes('aria-label="Breadcrumb"'),
+        items.map((item) => item.name).join(" \\ ") || "missing"
+      );
+    }
   }
+
+  // Homepage structured data: chapters (VideoObject clips) and the FAQ must be well formed and
+  // match what the page shows.
+  const homeGraph = jsonLdBlocks(htmlByPage.get("home")).flatMap((block) => block["@graph"] || [block]);
+  const video = homeGraph.find((node) => node["@type"] === "VideoObject");
+  const clips = video?.hasPart || [];
+  const clipProblems = [];
+  if (!video?.contentUrl?.startsWith(canonicalRoot) || !video?.thumbnailUrl?.startsWith(canonicalRoot) || !/^PT[\d.]+S$/.test(video?.duration || "")) clipProblems.push("video urls/duration");
+  const durationSeconds = Number(/^PT([\d.]+)S$/.exec(video?.duration || "")?.[1]);
+  clips.forEach((clip, index) => {
+    if (clip["@type"] !== "Clip" || !clip.name) clipProblems.push(`clip ${index} type/name`);
+    if (!(clip.startOffset < clip.endOffset) || clip.endOffset > durationSeconds + 0.01) clipProblems.push(`clip ${index} offsets`);
+    if (index > 0 && clip.startOffset !== clips[index - 1].endOffset) clipProblems.push(`clip ${index} does not follow clip ${index - 1}`);
+    if (clip.url !== `${canonicalRoot}#t=${clip.startOffset}`) clipProblems.push(`clip ${index} url`);
+  });
+  add(checks, "home-video-chapters", clips.length >= 3 && clipProblems.length === 0, clipProblems.join("; ") || `${clips.length} contiguous clips covering the ${durationSeconds}s demo`);
+  const faqQuestions = homeGraph.find((node) => node["@type"] === "FAQPage")?.mainEntity || [];
+  const faqVisible = [...htmlByPage.get("home").matchAll(/<summary>([^<]+)<\/summary>/g)].map((match) => match[1].replaceAll("’", "'"));
+  add(
+    checks,
+    "home-faq-schema",
+    faqQuestions.length >= 5 && faqQuestions.every((question) => question["@type"] === "Question" && question.acceptedAnswer?.text?.length > 40) &&
+      faqQuestions.map((question) => question.name.replaceAll("’", "'")).join("|") === faqVisible.join("|"),
+    `${faqQuestions.length} structured questions, ${faqVisible.length} visible`
+  );
 
   const homeTypes = graphTypes(jsonLdBlocks(htmlByPage.get("home")));
   const mcpTypes = graphTypes(jsonLdBlocks(htmlByPage.get("mcp")));

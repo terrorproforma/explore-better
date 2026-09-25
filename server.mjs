@@ -4409,19 +4409,20 @@ async function resumeOperation(operationId) {
 }
 
 async function readJson(req) {
-  // The limit is 2M decoded characters; 3 UTF-8 bytes per UTF-16 unit bounds the raw bytes.
+  // The limit is 12M decoded characters (a 20,000-item selection of long paths);
+  // 3 UTF-8 bytes per UTF-16 unit bounds the raw bytes.
   const tooLarge = () => Object.assign(new Error("Request body is too large."), { status: 413 });
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 6_000_000) {
+    if (size > 36_000_000) {
       throw tooLarge();
     }
     chunks.push(chunk);
   }
   const body = Buffer.concat(chunks, size).toString("utf8");
-  if (body.length > 2_000_000) {
+  if (body.length > 12_000_000) {
     throw tooLarge();
   }
   if (!body.trim()) {
@@ -4432,6 +4433,19 @@ async function readJson(req) {
   } catch (error) {
     throw Object.assign(new Error(`Request body is not valid JSON: ${error.message}`), { status: 400 });
   }
+}
+
+// Batch operations must act on every selected item or refuse clearly; silently
+// truncating a selection makes "Copy 900 items" copy only some of them.
+function boundedPathList(value, max, label) {
+  const list = Array.isArray(value) ? value : [];
+  if (list.length > max) {
+    throw Object.assign(
+      new Error(`${label} supports up to ${max.toLocaleString("en-US")} items at a time; ${list.length.toLocaleString("en-US")} were selected.`),
+      { status: 413, code: "SELECTION_TOO_LARGE" }
+    );
+  }
+  return list;
 }
 
 function resolveUserPath(value) {
@@ -5572,10 +5586,9 @@ async function applyWindowsAttributes(body) {
   if (process.platform !== "win32") {
     throw new Error("Windows attribute editing is only available on Windows.");
   }
-  const paths = (Array.isArray(body.paths) ? body.paths : [])
+  const paths = boundedPathList(body.paths, 2000, "Attribute and timestamp editing")
     .filter(Boolean)
-    .map((item) => resolveUserPath(item))
-    .slice(0, 500);
+    .map((item) => resolveUserPath(item));
   if (!paths.length) {
     throw new Error("Select files or folders first.");
   }
@@ -5612,10 +5625,9 @@ async function applyWindowsTimestamps(body) {
   if (process.platform !== "win32") {
     throw new Error("Windows timestamp editing is only available on Windows.");
   }
-  const paths = (Array.isArray(body.paths) ? body.paths : [])
+  const paths = boundedPathList(body.paths, 2000, "Attribute and timestamp editing")
     .filter(Boolean)
-    .map((item) => resolveUserPath(item))
-    .slice(0, 500);
+    .map((item) => resolveUserPath(item));
   if (!paths.length) {
     throw new Error("Select files or folders first.");
   }
@@ -11375,7 +11387,7 @@ async function resolveCollection(body) {
 }
 
 async function applyPathLabels(body) {
-  const paths = Array.isArray(body.paths) ? body.paths.slice(0, 500).map(resolveUserPath) : [];
+  const paths = boundedPathList(body.paths, 5000, "Labels").map(resolveUserPath);
   if (!paths.length) {
     throw new Error("Select items to label.");
   }
@@ -13095,7 +13107,7 @@ function requireBrowserApplyToken(req, body) {
 }
 
 async function buildTransferPlan(body) {
-  const paths = Array.isArray(body.paths) ? body.paths.slice(0, 500).map(resolveUserPath) : [];
+  const paths = boundedPathList(body.paths, 20_000, "Copy and move").map(resolveUserPath);
   if (!paths.length) {
     throw new Error("Select at least one item to transfer.");
   }
@@ -13110,6 +13122,17 @@ async function buildTransferPlan(body) {
   const conflictMode = transferConflictMode(body.conflictMode);
   const itemPolicies = transferItemPolicies(body.itemPolicies);
   const sourceKeys = new Set(paths.map(pathIdentity));
+  // Every folder that contains (or is) a selected source; replacing one of these
+  // would destroy a source before it is transferred.
+  const sourceAncestorKeys = new Set();
+  for (const source of paths) {
+    for (let current = source; ; current = path.dirname(current)) {
+      const key = pathIdentity(current);
+      if (sourceAncestorKeys.has(key)) break;
+      sourceAncestorKeys.add(key);
+      if (path.dirname(current) === current) break;
+    }
+  }
   const reservedTargets = new Set();
   const items = [];
 
@@ -13159,7 +13182,7 @@ async function buildTransferPlan(body) {
             status = "invalid";
             reason = "Destination is also selected as a source.";
             action = "block";
-          } else if (paths.some((selected) => insidePath(selected, baseDest))) {
+          } else if (sourceAncestorKeys.has(pathIdentity(baseDest))) {
             status = "invalid";
             reason = "Destination contains a selected source.";
             action = "block";
@@ -13621,7 +13644,7 @@ async function uniqueTemporaryRenamePath(parent, index) {
 }
 
 async function buildBulkRenamePlan(body) {
-  const paths = Array.isArray(body.paths) ? body.paths.slice(0, 500) : [];
+  const paths = boundedPathList(body.paths, 2000, "Bulk rename");
   if (!paths.length) {
     throw new Error("Select at least one item to rename.");
   }
@@ -17337,7 +17360,7 @@ async function checksumReport(body, context = {}) {
   const signal = context.signal || body.signal;
   throwIfAborted(signal);
   const paths = Array.isArray(body.paths)
-    ? body.paths.slice(0, 500)
+    ? boundedPathList(body.paths, 5000, "Checksums")
     : body.path
       ? [body.path]
       : [];

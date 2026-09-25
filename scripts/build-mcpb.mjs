@@ -17,6 +17,9 @@ const stageDir = path.join(root, "dist", "mcp-stage");
 const artifactName = validateReleaseVersion(`v${packageJson.version}`, packageJson.version);
 const artifactPath = path.join(outputDir, artifactName);
 const fixedTime = new Date("2026-01-01T00:00:00.000Z");
+// Signed releases bundle the Authenticode-signed copy that electron-builder produced in
+// dist/win-unpacked; every other build bundles the committed native/bin sidecar.
+const sidecarSource = path.resolve(root, process.env.EXPLORE_BETTER_MCPB_SIDECAR || path.join("native", "bin", "ExploreBetterMcp.exe"));
 
 async function copy(source, target) {
   await fs.mkdir(path.dirname(target), { recursive: true });
@@ -35,7 +38,7 @@ async function stageBundle() {
   await fs.writeFile(path.join(stageDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   await copy(path.join(root, "distribution", "mcpb", "README.md"), path.join(stageDir, "README.md"));
   await copy(path.join(root, "LICENSE"), path.join(stageDir, "LICENSE"));
-  await copy(path.join(root, "native", "bin", "ExploreBetterMcp.exe"), path.join(stageDir, "server", "ExploreBetterMcp.exe"));
+  await copy(sidecarSource, path.join(stageDir, "server", "ExploreBetterMcp.exe"));
   await copy(path.join(root, "site", "assets", "app-icon.png"), path.join(stageDir, "assets", "icon.png"));
   await copy(path.join(root, "site", "assets", "ai-bridge.png"), path.join(stageDir, "assets", "ai-bridge.png"));
   await copy(path.join(root, "site", "assets", "disk-map.png"), path.join(stageDir, "assets", "disk-map.png"));
@@ -77,7 +80,7 @@ await fs.writeFile(path.join(outputDir, "manifest.json"), `${JSON.stringify(mani
 await fs.writeFile(path.join(outputDir, "server.json"), `${JSON.stringify(serverJson, null, 2)}\n`, "utf8");
 await fs.writeFile(
   path.join(outputDir, "SHA256SUMS-mcp.txt"),
-  `${artifactSha256}  ${artifactName}\n${sha256(await fs.readFile(path.join(root, "native", "bin", "ExploreBetterMcp.exe")))}  ExploreBetterMcp.exe\n${sha256(await fs.readFile(path.join(outputDir, "manifest.json")))}  manifest.json\n`,
+  `${artifactSha256}  ${artifactName}\n${sha256(await fs.readFile(sidecarSource))}  ExploreBetterMcp.exe\n${sha256(await fs.readFile(path.join(outputDir, "manifest.json")))}  manifest.json\n`,
   "utf8"
 );
 
@@ -88,6 +91,7 @@ console.log(
     sha256: artifactSha256,
     tools: manifest.tools.length,
     prompts: manifest.prompts.length,
+    sidecar: sidecarSource,
     serverJson: path.join(outputDir, "server.json")
   })
 );

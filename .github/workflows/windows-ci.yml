@@ -98,6 +98,7 @@ jobs:
       - run: npm run verify:renderer-async
       - run: npm run verify:clipboard-sequence
       - run: npm run verify:mcp-release
+      - run: npm run verify:azure-signing-config
       - name: Preserve verification evidence
         if: always()
         uses: actions/upload-artifact@v7

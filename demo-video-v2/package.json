@@ -8,7 +8,8 @@
     "render": "node render.mjs",
     "render:industrial": "node render-industrial.mjs",
     "render:tight": "node render-tight.mjs",
-    "render:value": "node render-value.mjs"
+    "render:value": "node render-value.mjs",
+    "render:v6": "node render-v6.mjs"
   },
   "dependencies": {
     "@remotion/cli": "4.0.489",

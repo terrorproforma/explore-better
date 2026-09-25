@@ -23059,14 +23059,17 @@ function operationRecoveryMarkup(operation) {
   if (!recovery) {
     return "";
   }
-  const failed = recovery.failed;
+  // Running operations persist a provisional "interrupted" checkpoint so a crash
+  // leaves an accurate record; it is progress, not a failure, until the run ends.
+  const active = operationIsActive(operation);
+  const failed = active ? null : recovery.failed;
   const completedPreview = (recovery.completed || []).slice(0, 3);
   const remainingPreview = (recovery.remaining || []).slice(0, 3);
   const completedMore = Math.max(0, Number(recovery.completedCount || 0) - completedPreview.length);
   const remainingMore = Math.max(0, Number(recovery.remainingCount || 0) - remainingPreview.length);
-  return `<div class="operation-recovery">
+  return `<div class="operation-recovery${active ? " in-progress" : ""}">
     <div class="operation-recovery-head">
-      <strong>Recovery</strong>
+      <strong>${active ? "Checkpoint" : "Recovery"}</strong>
       <span>${escapeHtml(recovery.completedCount || 0)} done</span>
       <span>${escapeHtml(recovery.remainingCount || 0)} remaining</span>
     </div>
@@ -23248,7 +23251,8 @@ function renderOperationDetails() {
   const remaining = Array.isArray(recovery?.remaining) ? recovery.remaining : [];
   const completed = Array.isArray(recovery?.completed) ? recovery.completed : [];
   const backups = operationBackupItems(operation);
-  const failed = recovery?.failed ? [recovery.failed] : [];
+  // A running operation's checkpoint failure is provisional (see operationRecoveryMarkup).
+  const failed = recovery?.failed && !operationIsActive(operation) ? [recovery.failed] : [];
   const elevation = recovery?.elevation && typeof recovery.elevation === "object" ? recovery.elevation : null;
   const selectedCount = remaining.filter((item, offset) =>
     app.operationDetails.selectedRemaining.has(recoveryItemIndex(item, offset))

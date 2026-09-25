@@ -8,6 +8,11 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # beta.14 is an intentional pin (see PRODUCT_TESTING.md): beta.15 only adds
+      # a 5 s ConPTY worker timeout that kills slow-starting terminals.
+      - dependency-name: node-pty
+        versions: ["1.2.0-beta.15"]
 
   - package-ecosystem: gomod
     directories:

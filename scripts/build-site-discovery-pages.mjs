@@ -5,8 +5,10 @@ import path from "node:path";
 const root = process.cwd();
 const siteRoot = path.join(root, "site");
 const baseUrl = "https://terrorproforma.github.io/explore-better";
-const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
-const releaseTag = `v${packageJson.version}`;
+// The site describes the latest published release (site/release.json), which can trail
+// package.json until that release exists; scripts/update-site-release.mjs writes it first.
+const release = JSON.parse(await fs.readFile(path.join(siteRoot, "release.json"), "utf8"));
+const releaseTag = `v${release.version}`;
 const benchmark = JSON.parse(await fs.readFile(path.join(siteRoot, "benchmarks", "mcp-value.json"), "utf8"));
 const benchmarkById = new Map(benchmark.workflows.map((workflow) => [workflow.id, workflow]));
 const benchmarkMetric = (id, side) => benchmarkById.get(id)?.[side]?.medianMs ?? "n/a";
@@ -65,21 +67,41 @@ function cards(items) {
   return `<div class="detail-grid">${items.map((item) => `<article><h3>${item[0]}</h3><p>${item[1]}</p></article>`).join("")}</div>`;
 }
 
+// Steps are a real sequence, so site.css numbers them with a CSS counter.
 function steps(items) {
-  return `<ol class="detail-steps">${items.map((item, index) => `<li><span>0${index + 1}</span><strong>${item[0]}</strong><small>${item[1]}</small></li>`).join("")}</ol>`;
+  return `<ol class="detail-steps">${items.map((item) => `<li><strong>${item[0]}</strong><small>${item[1]}</small></li>`).join("")}</ol>`;
 }
 
 function section(title, intro, body, dark = false) {
-  return `<section class="detail-section${dark ? " detail-section--dark" : ""}"><div class="page-shell"><p class="eyebrow${dark ? " light" : ""}">Explore Better</p><h2>${title}</h2><p class="detail-prose">${intro}</p>${body}</div></section>`;
+  return `<section class="section detail-section${dark ? " band" : ""}"><div class="shell"><div class="section-head section-head--split"><h2>${title}</h2><p>${intro}</p></div>${body}</div></section>`;
 }
+
+// Real app captures shown on some pages. Dimensions come from the source PNG so the WebP
+// copy made by scripts/build-site-images.mjs is always declared at its true size.
+async function screenshot(name, alt) {
+  try {
+    const png = await fs.readFile(path.join(siteRoot, "assets", `${name}.png`));
+    await fs.access(path.join(siteRoot, "assets", `${name}.webp`));
+    return { src: `assets/${name}.webp`, alt, width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+  } catch {
+    return null;
+  }
+}
+
+const media = {
+  "ai-file-manager-windows": await screenshot("workspace", "Explore Better showing two folders side by side, each pane with its own tabs, path bar and file list"),
+  "mcp-file-manager": await screenshot("ai-bridge", "AI Bridge preferences with a read-only Codex profile, its authorized folder and tool permissions"),
+  integrations: await screenshot("ai-bridge", "AI Bridge preferences with one-click setup buttons for Codex, Claude, Cursor and VS Code"),
+  "use-cases/organize-downloads-safely": await screenshot("transfer-preview", "A transfer preview listing conflicts and destinations before any file is changed"),
+  "use-cases/find-disk-space": await screenshot("disk-map", "Disk Map showing a nested treemap of folders and files beside folder, file type and largest-file tables")
+};
 
 const pages = [
   {
     slug: "ai-file-manager-windows",
+    crumb: "AI file manager for Windows",
     title: "AI-native Windows file manager and Explorer replacement",
-    description: "Explore Better combines a fast dual-pane Windows file manager with a local MCP server so humans and AI can share live folder context and safe file operations.",
-    eyebrow: "A new file-manager category",
-    lede: "A real Explorer replacement for you. A structured, permissioned file workspace for your AI.",
+    description: "Explore Better combines a fast dual-pane Windows file manager with a local MCP server so humans and AI can share live folder context and safe file operations.",    lede: "A real Explorer replacement for you. A structured, permissioned file workspace for your AI.",
     sections: [
       section("A shared view of the filesystem", "Terminal agents know what commands printed. Explore Better gives an AI the same active panes, tabs, selection, authorized roots, indexes, and operation history that you can see.", cards([
         ["For people", "Dual panes, tabs, native listing, per-tab terminals, visual disk analysis, search, previews, and reversible Explorer integration."],
@@ -101,10 +123,9 @@ const pages = [
   },
   {
     slug: "mcp-file-manager",
+    crumb: "MCP file manager",
     title: "A local MCP file manager for Windows",
-    description: "Explore Better MCP gives AI clients typed file context, indexed search, disk analysis, duplicate finding, comparisons, and previewed recoverable operations.",
-    eyebrow: "Thirty-two typed tools / 22 semantic actions / local stdio",
-    lede: "Reliable AI file work without arbitrary shell execution, cloud file uploads, or unrestricted machine access.",
+    description: "Explore Better MCP gives AI clients typed file context, indexed search, disk analysis, duplicate finding, comparisons, and previewed recoverable operations.",    lede: "Reliable AI file work without arbitrary shell execution, cloud file uploads, or unrestricted machine access.",
     sections: [
       section("Tools built around real file workflows", "The MCP sidecar is a thin adapter. Explore Better remains the authority for filesystem state, policy, indexing, transactions, and recovery.", cards([
         ["Context and discovery", "Read active pane context, list locations and directories, search indexes, inspect paths, read bounded text, and compute checksums."],
@@ -117,15 +138,14 @@ const pages = [
         ["Read-first", "Profiles default to read-only. Permanent deletion and writable tools are separate permissions, disabled unless selected."],
         ["Auditable", "A rotating local audit records the client, tool, paths, policy decision, duration, and job or operation IDs, never file contents or tokens."]
       ]), true),
-      section("Install the standalone MCP bundle", "The Windows MCPB release contains the native stdio sidecar, manifest, tool catalogue, prompts, screenshots, license, and SHA-256 metadata.", `<pre class="detail-code">Registry name: io.github.terrorproforma/explore-better\nTransport: stdio\nPlatform: Windows x64\nProfile: required, separately revocable\nApp: auto-discovered from the normal per-user install</pre><p><a class="button button--primary" href="https://github.com/terrorproforma/explore-better/releases/tag/${releaseTag}">Download the MCPB release</a></p>`)
+      section("Install the standalone MCP bundle", "The Windows MCPB release contains the native stdio sidecar, manifest, tool catalogue, prompts, screenshots, license, and SHA-256 metadata.", `<pre class="detail-code">Registry name: io.github.terrorproforma/explore-better\nTransport: stdio\nPlatform: Windows x64\nProfile: required, separately revocable\nApp: auto-discovered from the normal per-user install</pre><p class="detail-cta"><a class="button button--primary" href="https://github.com/terrorproforma/explore-better/releases/tag/${releaseTag}">Download the MCPB release</a></p>`)
     ]
   },
   {
     slug: "integrations",
+    crumb: "Integrations",
     title: "Connect Explore Better to your AI client",
-    description: "Set up the local Explore Better MCP server for Codex, Claude Desktop, Cursor, VS Code, ChatGPT-compatible clients, or any stdio MCP host.",
-    eyebrow: "AI client integrations",
-    lede: "One local file authority, separate folder-scoped profiles for every client.",
+    description: "Set up the local Explore Better MCP server for Codex, Claude Desktop, Cursor, VS Code, ChatGPT-compatible clients, or any stdio MCP host.",    lede: "One local file authority, separate folder-scoped profiles for every client.",
     sections: [
       section("First-class setup paths", "Explore Better edits supported client configuration structurally, preserves unrelated servers, and makes a byte-for-byte backup before its first change.", cards(Object.entries(integrations).map(([key, item]) => [`<a href="${key}/">${item.label}</a>`, item.description]))),
       section("The same safety model everywhere", "A client name never grants trust. Every connection is constrained by its own profile, authorized roots, tool permissions, limits, and write policy.", steps([
@@ -137,10 +157,9 @@ const pages = [
   },
   ...Object.entries(integrations).map(([slug, item]) => ({
     slug: `integrations/${slug}`,
+    crumb: item.label,
     title: item.title,
-    description: item.description,
-    eyebrow: `${item.label} / local MCP on Windows`,
-    lede: item.proof,
+    description: item.description,    lede: item.proof,
     sections: [
       section(`Connect ${item.label} in three steps`, "The desktop app creates the profile first, so credentials and authorized roots never need to appear in a public URL or copied command.", steps([
         ["Enable AI Bridge", "Open Preferences > AI Bridge and turn on the local bridge."],
@@ -157,10 +176,9 @@ const pages = [
   })),
   {
     slug: "use-cases/organize-downloads-safely",
+    crumb: "Organize Downloads safely",
     title: "Organize Downloads safely with AI on Windows",
-    description: "Use Explore Better and a local AI client to inspect, classify, preview, and apply recoverable organization plans for a busy Downloads folder.",
-    eyebrow: "Practical workflow / Downloads",
-    lede: "Let AI do the inventory and planning while Explore Better keeps every change visible, bounded, and recoverable.",
+    description: "Use Explore Better and a local AI client to inspect, classify, preview, and apply recoverable organization plans for a busy Downloads folder.",    lede: "Let AI do the inventory and planning while Explore Better keeps every change visible, bounded, and recoverable.",
     sections: [
       section("A safer organization loop", "Authorize only the Downloads folder, begin read-only, and ask for evidence before enabling write tools.", steps([
         ["Investigate", "List and inspect files, group by type and age, find duplicates, and identify partial downloads without changing anything."],
@@ -176,10 +194,9 @@ const pages = [
   },
   {
     slug: "use-cases/find-disk-space",
+    crumb: "Find disk space",
     title: "Find what is using disk space with AI",
-    description: "Explore Better combines exact Windows allocated-size analysis, a nested disk treemap, duplicate finding, and typed MCP results for AI-guided cleanup.",
-    eyebrow: "Practical workflow / disk space",
-    lede: "See the shape of the disk yourself, then let AI compare the evidence without handing it an unrestricted shell.",
+    description: "Explore Better combines exact Windows allocated-size analysis, a nested disk treemap, duplicate finding, and typed MCP results for AI-guided cleanup.",    lede: "See the shape of the disk yourself, then let AI compare the evidence without handing it an unrestricted shell.",
     sections: [
       section("From volume to exact file", "The native Windows provider reports logical bytes, allocated bytes, cluster size, and the accuracy source so sparse or compressed files are not mislabeled.", cards([
         ["Nested treemap", "Drill from broad folders into individual files while folder, extension, and top-file tables stay synchronized."],
@@ -195,10 +212,9 @@ const pages = [
   },
   {
     slug: "security",
+    crumb: "Security",
     title: "Explore Better security model",
-    description: "How Explore Better protects local file access, MCP profiles, previewed writes, Electron IPC, terminal elevation, and recovery data on Windows.",
-    eyebrow: "Security / local-first boundaries",
-    lede: "Powerful local tools should expose less authority than the user who launched them, not more.",
+    description: "How Explore Better protects local file access, MCP profiles, previewed writes, Electron IPC, terminal elevation, and recovery data on Windows.",    lede: "Powerful local tools should expose less authority than the user who launched them, not more.",
     sections: [
       section("Separate boundaries for separate jobs", "The renderer, local backend, filesystem helper, terminal service, elevated terminal broker, and MCP sidecar each receive only the interface needed for their role.", cards([
         ["Desktop boundary", "The Electron renderer uses a narrow preload bridge; navigation and external links are restricted, and the HTTP backend is loopback-only with a launch capability."],
@@ -214,29 +230,65 @@ const pages = [
   },
   {
     slug: "privacy",
+    crumb: "Privacy",
     title: "Explore Better privacy policy",
-    description: "Explore Better is local-first software. Learn what the app, AI Bridge, website, and GitHub release distribution do and do not collect.",
-    eyebrow: "Privacy / effective July 14, 2026",
-    lede: "Explore Better does not operate a cloud file service. Your browsing state, file contents, terminal sessions, and MCP traffic remain on your Windows device.",
+    description: "Explore Better is local-first software. Learn what the app, AI Bridge, website, and GitHub release distribution do and do not collect.",    lede: "Explore Better does not operate a cloud file service. Your browsing state, file contents, terminal sessions, and MCP traffic remain on your Windows device.",
     prose: `<h2>Local application data</h2><p>The app stores preferences, indexes, caches, operation journals, recovery records, client profiles, and local audit metadata under the current Windows user account. These records support the features you enable and are not sent to an Explore Better server.</p><h2>AI Bridge</h2><p>The MCP sidecar communicates locally over stdio and an authenticated same-user named pipe. Explore Better does not upload MCP requests, tool results, file contents, profile secrets, or capability tokens. Your chosen AI client may process tool inputs and results under that client's own privacy terms.</p><h2>Website and releases</h2><p>The static website is hosted by GitHub Pages and release files are hosted by GitHub Releases. GitHub may process request logs and account data under its own policies. The site contains no Explore Better analytics, advertising trackers, or account system.</p><h2>Control and deletion</h2><p>You can revoke individual AI profiles, clear local audit history and caches, disable Explorer integration, and uninstall the app. Uninstall options determine whether local settings are retained. Repository questions can be raised through the public issue tracker.</p>`
   },
   {
     slug: "terms",
+    crumb: "Terms",
     title: "Explore Better terms of use",
-    description: "Terms for downloading, using, modifying, and redistributing the Explore Better Windows file manager and local MCP server.",
-    eyebrow: "Terms / effective July 14, 2026",
-    lede: "Explore Better is open-source preview software distributed under the MIT License.",
+    description: "Terms for downloading, using, modifying, and redistributing the Explore Better Windows file manager and local MCP server.",    lede: "Explore Better is open-source preview software distributed under the MIT License.",
     prose: `<h2>License</h2><p>The source code and bundled MCP distribution are provided under the MIT License in the project repository. That license grants broad permission to use, copy, modify, merge, publish, distribute, sublicense, and sell copies, subject to its notice requirements.</p><h2>Preview software</h2><p>The current release is a public preview and is provided without warranty. File operations can carry inherent risk. Keep independent backups, review previews and paths, verify release hashes, and do not grant AI clients broader roots or write permissions than their task requires.</p><h2>Third-party services</h2><p>GitHub, Windows, and connected AI clients are independent products governed by their own terms. Explore Better does not guarantee availability or behavior of third-party integrations.</p><h2>Abuse and support</h2><p>Do not use the software to access data without authorization or to bypass Windows permissions. Issues and security reports may be submitted through the repository's documented channels. The MIT License remains the controlling software license.</p>`
   }
 ];
+
+const sprite = `<svg class="sprite" aria-hidden="true" focusable="false"><symbol id="i-download" viewBox="0 0 24 24"><path d="M12 15V3" /><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /></symbol><symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h16" /></symbol></svg>`;
+
+// The same primary navigation as the homepage, resolved relative to the page.
+function siteHeader(prefix, current = "") {
+  const links = [
+    ["#features", "Features"],
+    ["#ai", "For AI agents"],
+    ["#safety", "Safety"],
+    ["mcp/", "Benchmarks"],
+    ["integrations/", "Integrations"],
+    ["#faq", "FAQ"]
+  ].map(([href, label]) => `<a href="${prefix}${href}"${href === current ? ' aria-current="page"' : ""}>${label}</a>`).join("");
+  return `<header class="site-header" data-header><div class="shell site-header__inner"><a class="brand" href="${prefix}" aria-label="Explore Better home"><img src="${prefix}assets/brand-mark.svg" alt="" width="34" height="33" /><span>Explore Better</span></a><button class="nav-toggle" type="button" data-nav-toggle aria-expanded="false" aria-controls="site-nav"><svg class="icon" aria-hidden="true"><use href="#i-menu" /></svg><span class="sr-only">Open navigation</span></button><nav class="site-nav" id="site-nav" data-nav aria-label="Primary navigation">${links}<a href="https://github.com/terrorproforma/explore-better">GitHub</a></nav><a class="header-download" href="${prefix}#download"><svg class="icon" aria-hidden="true"><use href="#i-download" /></svg><span>Download</span></a></div></header>`;
+}
+
+function siteFooter(prefix) {
+  return `<footer class="site-footer"><div class="shell site-footer__inner"><div class="site-footer__brand"><a class="brand" href="${prefix}"><img src="${prefix}assets/brand-mark.svg" alt="" width="34" height="33" /><span>Explore Better</span></a><p>Your files. Shared control.</p></div><nav class="footer-links" aria-label="Footer"><a href="${prefix}">Home</a><a href="https://github.com/terrorproforma/explore-better">Source</a><a href="https://github.com/terrorproforma/explore-better/releases">Releases</a><a href="https://github.com/terrorproforma/explore-better/blob/master/USER_MANUAL.md">Manual</a><a href="${prefix}mcp/">MCP evidence</a><a href="${prefix}integrations/">AI integrations</a><a href="${prefix}security/">Security</a><a href="${prefix}privacy/">Privacy</a><a href="${prefix}terms/">Terms</a><a href="${prefix}llms.txt">llms.txt</a></nav><small>Explore Better is free and open source under the MIT license.</small></div></footer>`;
+}
+
+function breadcrumbs(page, prefix) {
+  const parts = page.slug.split("/");
+  const trail = [{ label: "Home", href: prefix, url: `${baseUrl}/` }];
+  if (parts.length > 1) {
+    const parent = pages.find((candidate) => candidate.slug === parts[0]);
+    trail.push({ label: parent ? parent.crumb || parent.title : parts[0].replace(/-/g, " ").replace(/^./, (c) => c.toUpperCase()), href: parent ? `${prefix}${parts[0]}/` : "", url: parent ? `${baseUrl}/${parts[0]}/` : "" });
+  }
+  trail.push({ label: page.crumb || page.title, href: "", url: `${baseUrl}/${page.slug}/`, current: true });
+  const html = `<nav class="page-hero__kicker" aria-label="Breadcrumb"><ol class="crumbs">${trail.map((step) => `<li>${step.current ? `<span aria-current="page">${esc(step.label)}</span>` : step.href ? `<a href="${step.href}">${esc(step.label)}</a>` : esc(step.label)}</li>`).join("")}</ol></nav>`;
+  const schema = { "@type": "BreadcrumbList", itemListElement: trail.filter((step) => step.url).map((step, index) => ({ "@type": "ListItem", position: index + 1, name: step.label, item: step.url })) };
+  return { html, schema };
+}
 
 function renderPage(page) {
   const depth = page.slug.split("/").length;
   const prefix = "../".repeat(depth);
   const canonical = `${baseUrl}/${page.slug}/`;
+  const crumbs = breadcrumbs(page, prefix);
+  const shot = media[page.slug];
+  const figure = shot
+    ? `<figure class="page-figure"><img src="${prefix}${shot.src}" alt="${esc(shot.alt)}" width="${shot.width}" height="${shot.height}" loading="lazy" decoding="async" /></figure>`
+    : "";
   const body = page.prose
-    ? `<section class="detail-section"><div class="page-shell detail-prose">${page.prose}</div></section>`
+    ? `<section class="section detail-section"><div class="shell detail-prose">${page.prose}</div></section>`
     : page.sections.join("");
+  const navCurrent = page.slug === "integrations" ? "integrations/" : "";
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -244,7 +296,9 @@ function renderPage(page) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="${esc(page.description)}" />
     <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1" />
-    <meta name="theme-color" content="#111715" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f0f2ee" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#141b18" media="(prefers-color-scheme: dark)" />
     <meta property="og:title" content="${esc(page.title)} - Explore Better" />
     <meta property="og:description" content="${esc(page.description)}" />
     <meta property="og:type" content="website" />
@@ -258,29 +312,26 @@ function renderPage(page) {
     <link rel="alternate" type="text/plain" href="${baseUrl}/llms.txt" title="Explore Better LLM index" />
     <link rel="icon" type="image/svg+xml" href="${prefix}assets/brand-mark.svg" />
     <link rel="icon" type="image/png" href="${prefix}assets/app-icon.png" />
-    <link rel="stylesheet" href="${prefix}styles.css" />
-    <script src="${prefix}script.js" defer></script>
+    <link rel="stylesheet" href="${prefix}site.css" />
+    <script src="${prefix}site.js" defer></script>
     <script type="application/ld+json">${JSON.stringify({
       "@context": "https://schema.org",
       "@graph": [
-        { "@type": "SoftwareApplication", "@id": `${baseUrl}/#software`, name: "Explore Better", operatingSystem: "Windows 11 x64", applicationCategory: "UtilitiesApplication" },
-        { "@type": "WebPage", name: page.title, description: page.description, url: canonical, isPartOf: { "@id": `${baseUrl}/#website` }, about: { "@id": `${baseUrl}/#software` } }
+        { "@type": "SoftwareApplication", "@id": `${baseUrl}/#software`, name: "Explore Better", operatingSystem: "Windows 10, Windows 11 (x64)", applicationCategory: "UtilitiesApplication" },
+        { "@type": "WebPage", name: page.title, description: page.description, url: canonical, isPartOf: { "@id": `${baseUrl}/#website` }, about: { "@id": `${baseUrl}/#software` } },
+        crumbs.schema
       ]
     })}</script>
   </head>
-  <body>
+  <body class="detail">
+    ${sprite}
     <a class="skip-link" href="#main">Skip to content</a>
-    <header class="site-header detail-header" data-header>
-      <a class="brand" href="${prefix}" aria-label="Explore Better home"><img src="${prefix}assets/brand-mark.svg" alt="" width="44" height="42" /><span>Explore Better</span></a>
-      <button class="icon-button nav-toggle" type="button" data-nav-toggle aria-expanded="false" aria-controls="site-nav"><img src="${prefix}assets/icons/menu.svg" alt="" width="20" height="20" /><span class="sr-only">Open navigation</span></button>
-      <nav class="site-nav" id="site-nav" data-nav aria-label="Primary navigation"><a href="${prefix}ai-file-manager-windows/">Human + AI</a><a href="${prefix}mcp-file-manager/">MCP server</a><a href="${prefix}integrations/">Integrations</a><a href="${prefix}mcp/">Proof</a></nav>
-      <a class="header-download" href="${prefix}#download"><img src="${prefix}assets/icons/download.svg" alt="" width="18" height="18" /><span>Download</span></a>
-    </header>
-    <main class="detail-main" id="main">
-      <section class="detail-hero"><div class="page-shell"><p class="eyebrow light">${page.eyebrow}</p><h1>${page.title}</h1><p class="detail-hero__lede">${page.lede}</p><div class="hero__actions"><a class="button button--primary" href="${prefix}#download">Download for Windows</a><a class="button button--ghost" href="${prefix}mcp/">See measured proof</a></div></div></section>
+    ${siteHeader(prefix, navCurrent)}
+    <main id="main">
+      <section class="page-hero"><div class="shell"><div class="page-hero__grid"><div class="page-hero__main">${crumbs.html}<h1>${page.title}</h1><p class="page-hero__lede">${page.lede}</p><div class="page-hero__actions"><a class="button button--primary" href="${prefix}#download"><svg class="icon" aria-hidden="true"><use href="#i-download" /></svg>Download for Windows</a><a class="button button--quiet" href="${prefix}mcp/">See the MCP evidence</a></div></div><aside class="page-hero__aside" aria-label="Explore Better at a glance"><dl class="props"><div><dt>Price</dt><dd>Free, MIT licensed</dd></div><div><dt>Runs on</dt><dd>Windows 10 and 11, x64</dd></div><div><dt>Release</dt><dd><a href="https://github.com/terrorproforma/explore-better/releases/tag/${releaseTag}">${releaseTag}</a>, unsigned preview</dd></div><div><dt>AI access</dt><dd>Local stdio MCP server, read-only by default</dd></div></dl></aside></div>${figure}</div></section>
       ${body}
     </main>
-    <footer class="site-footer"><div class="page-shell footer-layout"><a class="brand brand--footer" href="${prefix}"><img src="${prefix}assets/brand-mark.svg" alt="" width="44" height="42" /><span>Explore Better</span></a><p>The Windows file manager built for humans and AI.</p><div class="footer-links"><a href="${prefix}security/">Security</a><a href="${prefix}privacy/">Privacy</a><a href="${prefix}terms/">Terms</a><a href="https://github.com/terrorproforma/explore-better">Source</a></div><small>MIT licensed</small></div></footer>
+    ${siteFooter(prefix)}
   </body>
 </html>`;
 }

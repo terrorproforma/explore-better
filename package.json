@@ -1,6 +1,6 @@
 {
   "name": "explore-better",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -34,6 +34,7 @@
     "build:site-pages": "npm run build:icon && node scripts/build-site-discovery-pages.mjs",
     "archive:site-homepage": "node scripts/archive-site-homepage.mjs",
     "build:site-release": "node scripts/update-site-release.mjs",
+    "build:site-images": "node scripts/build-site-images.mjs",
     "build:app": "node scripts/build-app.mjs",
     "build:terminal": "node scripts/build-terminal.mjs",
     "build:renderer": "npm run build:app && npm run build:terminal",
@@ -52,6 +53,7 @@
     "verify:action-inventory": "node scripts/action-inventory.mjs",
     "verify:landing-page": "node scripts/landing-page-smoke.mjs",
     "verify:seo-discovery": "node scripts/seo-discovery-smoke.mjs",
+    "verify:site-links": "node scripts/site-link-check.mjs",
     "verify:privacy": "node scripts/privacy-audit.mjs",
     "verify:brand": "node scripts/brand-asset-smoke.mjs",
     "verify:perf-100k": "node scripts/perf-100k-verify.mjs",
@@ -116,6 +118,7 @@
     "verify:release-integrity": "node scripts/release-integrity-smoke.mjs",
     "verify:code-signing": "node scripts/code-signing-rehearsal-smoke.mjs",
     "verify:production-signing": "node scripts/production-signing-smoke.mjs",
+    "verify:azure-signing-config": "node scripts/azure-signing-config-smoke.mjs",
     "verify:production-readiness": "node scripts/production-readiness-smoke.mjs",
     "build:update-feed": "node scripts/generate-update-feed.mjs",
     "build:release-checksums": "node scripts/generate-release-checksums.mjs",
@@ -268,12 +271,12 @@
         "to": "app-icon.png"
       },
       {
-        "from": "native/bin/explore-better-fs.exe",
-        "to": "native/explore-better-fs.exe"
-      },
-      {
-        "from": "native/bin/ExploreBetterMcp.exe",
-        "to": "native/ExploreBetterMcp.exe"
+        "from": "native/bin",
+        "to": "native",
+        "filter": [
+          "explore-better-fs.exe",
+          "ExploreBetterMcp.exe"
+        ]
       }
     ],
     "asarUnpack": [

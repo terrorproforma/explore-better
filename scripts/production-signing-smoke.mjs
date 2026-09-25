@@ -193,6 +193,7 @@ foreach ($Target in $Payload.targets) {
     notBefore = ""
     notAfter = ""
     serialNumber = ""
+    timestamperSubject = ""
   }
   if (Test-Path -LiteralPath $Path) {
     $Item.exists = $true
@@ -206,6 +207,9 @@ foreach ($Target in $Payload.targets) {
       $Item.notBefore = $Sig.SignerCertificate.NotBefore.ToUniversalTime().ToString("o")
       $Item.notAfter = $Sig.SignerCertificate.NotAfter.ToUniversalTime().ToString("o")
       $Item.serialNumber = [string]$Sig.SignerCertificate.SerialNumber
+    }
+    if ($Sig.TimeStamperCertificate) {
+      $Item.timestamperSubject = [string]$Sig.TimeStamperCertificate.Subject
     }
   }
   $Results += [pscustomobject]$Item
@@ -326,6 +330,11 @@ async function main() {
       id: "native-helper",
       label: "Packaged native filesystem helper",
       path: path.join(workspace, "dist", "win-unpacked", "resources", "native", "explore-better-fs.exe")
+    },
+    {
+      id: "mcp-sidecar",
+      label: "Packaged MCP sidecar",
+      path: path.join(workspace, "dist", "win-unpacked", "resources", "native", "ExploreBetterMcp.exe")
     }
   ];
   const files = [];
@@ -428,6 +437,15 @@ async function main() {
           ? `thumbprint=${signature.signerThumbprint}, subject=${signature.signerSubject}`
           : "No signer certificate."
       );
+      // Artifact Signing certificates live for days; only an RFC 3161 timestamp keeps
+      // the signature valid after the certificate expires.
+      requireCheck(
+        checks,
+        signed && Boolean(signature.timestamperSubject),
+        `${file.id}-timestamped`,
+        `${file.label} signature is timestamped`,
+        signature?.timestamperSubject ? `timestamper=${signature.timestamperSubject}` : "No timestamp countersignature."
+      );
       if (!allowUntrusted()) {
         requireCheck(
           checks,
@@ -449,6 +467,26 @@ async function main() {
           ? `status=${signature.status}, signer=${signature.signerSubject}`
           : `status=${signature?.status || "missing"}; production release still needs a real signing certificate.`
       );
+    }
+  }
+
+  // The MCP bundle ships its own copy of the sidecar. A signed release must bundle the
+  // signed packaged copy (build-mcpb.mjs EXPLORE_BETTER_MCPB_SIDECAR), not native/bin.
+  const mcpChecksumsPath = path.join(workspace, "dist", "mcp", "SHA256SUMS-mcp.txt");
+  const packagedSidecar = files.find((file) => file.id === "mcp-sidecar");
+  if (expectationConfigured && packagedSidecar) {
+    if (await pathExists(mcpChecksumsPath)) {
+      const line = (await fs.readFile(mcpChecksumsPath, "utf8")).split(/\r?\n/).find((entry) => /\s\*?ExploreBetterMcp\.exe$/.test(entry));
+      const bundled = line ? line.split(/\s+/)[0].toLowerCase() : "";
+      requireCheck(
+        checks,
+        bundled === packagedSidecar.sha256,
+        "mcpb-sidecar-signed",
+        "MCP bundle carries the signed packaged sidecar",
+        bundled === packagedSidecar.sha256 ? `sha256=${bundled}` : `bundle=${bundled || "missing"}, packaged=${packagedSidecar.sha256}`
+      );
+    } else {
+      addCheck(checks, "warn", "mcpb-sidecar-signed", "MCP bundle carries the signed packaged sidecar", "Run npm run build:mcpb to compare the bundled sidecar.");
     }
   }
 

@@ -18,9 +18,13 @@ const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".mp4": "video/mp4",
   ".png": "image/png",
-  ".svg": "image/svg+xml"
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp"
 };
+const expectedHeadline = "Fast for you. Safe for your AI.";
+const requiredSections = ["top", "demo", "features", "ai", "safety", "proof", "release", "download", "faq"];
 
 function browserPath() {
   return (
@@ -44,10 +48,22 @@ async function startServer() {
         return;
       }
       const bytes = await fs.readFile(target);
-      response.writeHead(200, {
-        "content-type": mimeTypes[path.extname(target).toLowerCase()] || "application/octet-stream",
-        "cache-control": "no-store"
-      });
+      const type = mimeTypes[path.extname(target).toLowerCase()] || "application/octet-stream";
+      // Byte ranges, as GitHub Pages serves them, so the demo video can seek.
+      const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers.range || "");
+      if (range) {
+        const start = range[1] ? Number(range[1]) : Math.max(0, bytes.length - Number(range[2]));
+        const end = range[1] && range[2] ? Math.min(Number(range[2]), bytes.length - 1) : bytes.length - 1;
+        response.writeHead(206, {
+          "content-type": type,
+          "content-range": `bytes ${start}-${end}/${bytes.length}`,
+          "accept-ranges": "bytes",
+          "cache-control": "no-store"
+        });
+        response.end(bytes.subarray(start, end + 1));
+        return;
+      }
+      response.writeHead(200, { "content-type": type, "accept-ranges": "bytes", "cache-control": "no-store" });
       response.end(bytes);
     } catch (error) {
       response.writeHead(error?.code === "ENOENT" ? 404 : 500).end("Not found");
@@ -93,12 +109,7 @@ async function pageSnapshot(page, installerName) {
       renderedHeight: Math.round(image.getBoundingClientRect().height)
     }));
     const aspectIssues = [...document.images]
-      .filter(
-        (image) =>
-          image.naturalWidth >= 300 &&
-          !image.classList.contains("hero__media") &&
-          !image.classList.contains("pitch-hero__media")
-      )
+      .filter((image) => image.naturalWidth >= 300)
       .map((image) => {
         const rect = image.getBoundingClientRect();
         const naturalRatio = image.naturalWidth / image.naturalHeight;
@@ -114,10 +125,27 @@ async function pageSnapshot(page, installerName) {
     const downloadLinks = [...document.querySelectorAll("a[href]")]
       .filter((link) => link.getAttribute("href")?.includes(expectedInstallerName))
       .map((link) => link.href);
+    const heroImage = document.querySelector(".hero__shot img");
+    const contentImages = [...document.querySelectorAll("main img")];
+    const authoredLoading = (image) => (window.authoredLoading?.has(image) ? window.authoredLoading.get(image) : image.getAttribute("loading"));
     return {
       title: document.title,
-      h1: document.querySelector("h1")?.textContent.trim() || "",
+      h1: document.querySelector("h1")?.textContent.replace(/\s+/g, " ").trim() || "",
       sectionCount: document.querySelectorAll("main section").length,
+      sectionIds: [...document.querySelectorAll("main > section[id]")].map((section) => section.id),
+      unsizedImages: [...document.images].filter((image) => !image.getAttribute("width") || !image.getAttribute("height")).map((image) => image.getAttribute("src")),
+      heroImage: heroImage
+        ? { src: heroImage.getAttribute("src"), fetchpriority: heroImage.getAttribute("fetchpriority"), loading: authoredLoading(heroImage) }
+        : null,
+      eagerBelowFold: contentImages.filter((image) => image !== heroImage && authoredLoading(image) !== "lazy").map((image) => image.getAttribute("src")),
+      externalAssets: [
+        ...[...document.querySelectorAll('link[rel="stylesheet"]')].map((link) => link.getAttribute("href")),
+        ...[...document.querySelectorAll("script[src]")].map((script) => script.getAttribute("src"))
+      ].filter((href) => /^(https?:)?\/\//.test(href || "")),
+      installerSize: document.querySelector("[data-installer-size]")?.textContent.trim() || "",
+      releaseVersions: [...document.querySelectorAll("[data-release-version]")].map((element) => element.textContent.trim()),
+      downloadButtonText: [...document.querySelectorAll("a[href]")]
+        .find((link) => link.getAttribute("href")?.includes(expectedInstallerName))?.textContent.replace(/\s+/g, " ").trim() || "",
       scrollWidth: document.documentElement.scrollWidth,
       viewportWidth,
       offenders,
@@ -132,7 +160,7 @@ async function pageSnapshot(page, installerName) {
       unsignedDisclosure: document.querySelector("#unsigned-preview-note")?.textContent.replace(/\s+/g, " ").trim() || "",
       brandMarks: document.querySelectorAll('.brand img[src$="assets/brand-mark.svg"]').length,
       svgFavicon: document.querySelector('link[rel="icon"][type="image/svg+xml"]')?.getAttribute("href") || "",
-      majorFeatures: ["demo", "outcomes", "ai-bridge"].map((id) => ({
+      majorFeatures: ["demo", "features", "ai"].map((id) => ({
         id,
         present: Boolean(document.getElementById(id)),
         media: Boolean(document.querySelector(`#${id} img[src^="assets/"], #${id} video`))
@@ -152,7 +180,8 @@ async function releaseExpectations() {
   return {
     version,
     installerName: String(release.installer || ""),
-    checksum: String(release.sha256 || "")
+    checksum: String(release.sha256 || ""),
+    sizeMiB: release.sizeMiB
   };
 }
 
@@ -239,6 +268,8 @@ async function main() {
       await page.waitForSelector("h1");
       await page.evaluate(async () => {
         const images = [...document.images];
+        // Remember the authored loading attributes before forcing every image to load.
+        window.authoredLoading = new WeakMap(images.map((image) => [image, image.getAttribute("loading")]));
         images.forEach((image) => {
           image.loading = "eager";
         });
@@ -257,14 +288,43 @@ async function main() {
 
       const snapshot = await pageSnapshot(page, release.installerName);
       addCheck(checks, `${viewport.name}-title`, snapshot.title.includes("Explore Better"), snapshot.title);
-      addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === "Your files. Shared control.", snapshot.h1 || "Missing H1");
+      addCheck(checks, `${viewport.name}-hero`, snapshot.h1 === expectedHeadline, snapshot.h1 || "Missing H1");
       addCheck(
         checks,
         `${viewport.name}-brand-system`,
         snapshot.brandMarks >= 2 && snapshot.svgFavicon === "assets/brand-mark.svg",
         `${snapshot.brandMarks} brand marks; favicon ${snapshot.svgFavicon || "missing"}`
       );
-      addCheck(checks, `${viewport.name}-sections`, snapshot.sectionCount >= 7, `${snapshot.sectionCount} main sections`);
+      addCheck(
+        checks,
+        `${viewport.name}-sections`,
+        snapshot.sectionCount >= requiredSections.length && requiredSections.every((id) => snapshot.sectionIds.includes(id)),
+        `${snapshot.sectionCount} main sections; missing: ${requiredSections.filter((id) => !snapshot.sectionIds.includes(id)).join(", ") || "none"}`
+      );
+      addCheck(
+        checks,
+        `${viewport.name}-image-dimensions`,
+        snapshot.unsizedImages.length === 0,
+        snapshot.unsizedImages.join(", ") || "Every image declares width and height (no layout shift)"
+      );
+      addCheck(
+        checks,
+        `${viewport.name}-image-loading`,
+        snapshot.heroImage?.fetchpriority === "high" && snapshot.heroImage?.loading !== "lazy" &&
+          /\.webp$/.test(snapshot.heroImage?.src || "") && snapshot.eagerBelowFold.length === 0,
+        snapshot.eagerBelowFold.length
+          ? `Not lazy: ${snapshot.eagerBelowFold.join(", ")}`
+          : `Hero ${snapshot.heroImage?.src || "missing"} is eager with high priority; every other image is lazy`
+      );
+      addCheck(checks, `${viewport.name}-local-assets`, snapshot.externalAssets.length === 0, snapshot.externalAssets.join(", ") || "No external stylesheets or scripts");
+      addCheck(
+        checks,
+        `${viewport.name}-release-strings`,
+        snapshot.installerSize === `${release.sizeMiB} MiB` &&
+          snapshot.releaseVersions.length >= 2 && snapshot.releaseVersions.every((value) => value === `v${release.version}`) &&
+          snapshot.downloadButtonText === `Download Explore Better v${release.version}`,
+        `${snapshot.installerSize}; ${snapshot.releaseVersions.join(", ")}; "${snapshot.downloadButtonText}"`
+      );
       addCheck(
         checks,
         `${viewport.name}-major-features`,
@@ -372,18 +432,107 @@ async function main() {
           JSON.stringify(copy));
       }
 
-      const codexChapter = page.locator('[data-demo-time="36.5"]');
+      // Demo chapters are rendered from the VideoObject hasPart clips in the JSON-LD.
+      const chapterState = await page.evaluate(() => {
+        const graph = [...document.querySelectorAll('script[type="application/ld+json"]')]
+          .flatMap((script) => JSON.parse(script.textContent)["@graph"] || []);
+        const clips = graph.find((node) => node["@type"] === "VideoObject")?.hasPart || [];
+        const buttons = [...document.querySelectorAll("[data-chapter-list] button[data-demo-time]")];
+        return {
+          clips: clips.map((clip) => `${clip.startOffset}:${clip.name}`),
+          buttons: buttons.map((button) => `${button.dataset.demoTime}:${button.lastElementChild?.textContent.trim()}`),
+          visible: !document.querySelector("[data-chapters]")?.hidden,
+          current: buttons.filter((button) => button.getAttribute("aria-current") === "true").length
+        };
+      });
+      addCheck(
+        checks,
+        `${viewport.name}-demo-chapter-list`,
+        chapterState.visible && chapterState.clips.length >= 3 && chapterState.buttons.join("|") === chapterState.clips.join("|") && chapterState.current === 1,
+        `${chapterState.buttons.length} chapter buttons match ${chapterState.clips.length} JSON-LD clips; ${chapterState.current} current`
+      );
+      const lastClipStart = chapterState.clips.at(-2)?.split(":")[0] || "0";
+      const codexChapter = page.locator(`[data-chapter-list] [data-demo-time="${lastClipStart}"]`);
       await page.locator("[data-demo-video]").evaluate((video) => {
         video.pause();
         video.play = () => Promise.resolve();
       });
       await codexChapter.click();
+      const seeked = await page
+        .waitForFunction((start) => Math.abs(document.querySelector("[data-demo-video]").currentTime - Number(start)) < 0.5, lastClipStart, { timeout: 10_000 })
+        .then(() => true)
+        .catch(() => false);
       addCheck(
         checks,
         `${viewport.name}-demo-chapters`,
-        (await codexChapter.getAttribute("aria-current")) === "true",
-        "Codex chapter click updates the current chapter state"
+        (await codexChapter.getAttribute("aria-current")) === "true" && seeked &&
+          (await page.locator('[data-chapter-list] [aria-current="true"]').count()) === 1,
+        `Chapter at ${lastClipStart}s becomes current and seeks the video (${seeked ? "seeked" : "did not seek"})`
       );
+
+      // Tool catalogue filter: pure CSS (:has), so it also works without JavaScript.
+      const toolCounts = {};
+      for (const filter of ["default", "write", "all"]) {
+        await page.locator(`[data-tool-filter="${filter}"]`).check({ force: true });
+        toolCounts[filter] = await page.evaluate(() => ({
+          tools: [...document.querySelectorAll("[data-tools] li[data-access]")].filter((item) => item.getBoundingClientRect().height > 0).length,
+          groups: [...document.querySelectorAll("[data-tools] .tools__group")].filter((group) => group.getBoundingClientRect().height > 0).length
+        }));
+      }
+      addCheck(
+        checks,
+        `${viewport.name}-tool-filter`,
+        toolCounts.all.tools === 32 && toolCounts.default.tools === 21 && toolCounts.write.tools === 11 &&
+          toolCounts.all.groups === 5 && toolCounts.write.groups === 2,
+        JSON.stringify(toolCounts)
+      );
+
+      // FAQ: native disclosure widgets that mirror the FAQPage structured data.
+      const faq = await page.evaluate(() => {
+        const graph = [...document.querySelectorAll('script[type="application/ld+json"]')]
+          .flatMap((script) => JSON.parse(script.textContent)["@graph"] || []);
+        const questions = (graph.find((node) => node["@type"] === "FAQPage")?.mainEntity || []).map((question) => question.name);
+        const summaries = [...document.querySelectorAll("#faq summary")].map((summary) => summary.textContent.trim());
+        return { questions, summaries };
+      });
+      const firstQuestion = page.locator("#faq details").first();
+      await firstQuestion.locator("summary").click();
+      const opened = await firstQuestion.evaluate((details) => details.open && details.querySelector("p").getBoundingClientRect().height > 0);
+      addCheck(
+        checks,
+        `${viewport.name}-faq`,
+        faq.summaries.length >= 5 && faq.summaries.join("|") === faq.questions.join("|") && opened,
+        `${faq.summaries.length} questions match FAQPage JSON-LD; first answer ${opened ? "opens" : "did not open"}`
+      );
+
+      // Benchmark bars are sized from the published numbers.
+      const bars = await page.evaluate(() => [...document.querySelectorAll("[data-benchmark-row]")].map((row) => {
+        const [mcp, powershell] = [...row.querySelectorAll(".bar")].map((bar) => bar.getBoundingClientRect().width);
+        return { mcp, powershell };
+      }));
+      addCheck(
+        checks,
+        `${viewport.name}-benchmark-bars`,
+        bars.length === 3 && bars.every((bar) => bar.powershell > bar.mcp && bar.mcp >= 2),
+        JSON.stringify(bars)
+      );
+
+      // Skip link is the first focus stop and becomes visible.
+      await page.goto(baseUrl, { waitUntil: "load" });
+      await page.bringToFront();
+      await page.keyboard.press("Tab");
+      await page.waitForTimeout(100);
+      const skip = await page.evaluate(() => {
+        const element = document.activeElement;
+        const rect = element.getBoundingClientRect();
+        return {
+          isSkip: element.matches(".skip-link"),
+          visible: rect.top >= 0 && rect.bottom <= window.innerHeight,
+          outline: getComputedStyle(element).outlineStyle,
+          target: Boolean(document.querySelector(element.getAttribute("href") || "#missing"))
+        };
+      });
+      addCheck(checks, `${viewport.name}-skip-link`, skip.isSkip && skip.visible && skip.target && skip.outline !== "none", JSON.stringify(skip));
 
       if (viewport.name === "mobile") {
         const toggle = page.locator("[data-nav-toggle]");
@@ -426,14 +575,78 @@ async function main() {
       await context.close();
     }
 
+    // Without JavaScript every section, the recorded trace, the download panel and the tool
+    // filter still work; only the JS-built chapter list stays hidden.
     const noScriptContext = await browser.newContext({ viewport: viewports[0], javaScriptEnabled: false });
     const noScriptPage = await noScriptContext.newPage();
     await noScriptPage.goto(baseUrl, { waitUntil: "load" });
-    const hiddenReveals = await noScriptPage.evaluate(
-      () => [...document.querySelectorAll(".reveal")].filter((element) => getComputedStyle(element).opacity !== "1").length
+    const noScript = await noScriptPage.evaluate(() => {
+      const hidden = (element) => {
+        const style = getComputedStyle(element);
+        return style.opacity !== "1" || style.visibility === "hidden" || style.display === "none";
+      };
+      return {
+        hiddenSections: [...document.querySelectorAll("main > section")].filter(hidden).map((section) => section.id),
+        hiddenTrace: [...document.querySelectorAll(".trace__log > li")].filter(hidden).length,
+        traceItems: document.querySelectorAll(".trace__log > li").length,
+        chaptersHidden: document.querySelector("[data-chapters]")?.hidden === true,
+        downloadVisible: !hidden(document.querySelector("#download a[href*='releases/download']"))
+      };
+    });
+    await noScriptPage.locator('[data-tool-filter="write"]').check({ force: true });
+    const noScriptWriteTools = await noScriptPage.evaluate(
+      () => [...document.querySelectorAll("[data-tools] li[data-access]")].filter((item) => item.getBoundingClientRect().height > 0).length
     );
-    addCheck(checks, "no-js-content-visible", hiddenReveals === 0, `${hiddenReveals} reveal sections hidden without JavaScript`);
+    addCheck(
+      checks,
+      "no-js-content-visible",
+      noScript.hiddenSections.length === 0 && noScript.hiddenTrace === 0 && noScript.traceItems >= 5 && noScript.chaptersHidden && noScript.downloadVisible,
+      `${noScript.hiddenSections.length} hidden sections, ${noScript.hiddenTrace}/${noScript.traceItems} hidden trace items, chapters ${noScript.chaptersHidden ? "hidden" : "shown empty"}`
+    );
+    addCheck(checks, "no-js-tool-filter", noScriptWriteTools === 11, `${noScriptWriteTools} tools shown for "Change files" without JavaScript`);
     await noScriptContext.close();
+
+    // The hero trace is the page's one orchestrated animation; reduced motion must skip it.
+    const motionState = async (reducedMotion) => {
+      const context = await browser.newContext({ viewport: viewports[0], reducedMotion });
+      const page = await context.newPage();
+      await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => document.documentElement.classList.contains("js"));
+      const state = await page.evaluate(() => [...document.querySelectorAll(".trace__log > li")].map((item) => ({
+        animation: getComputedStyle(item).animationName,
+        duration: Number.parseFloat(getComputedStyle(item).animationDuration) || 0
+      })));
+      await context.close();
+      return state;
+    };
+    const animated = await motionState("no-preference");
+    const reduced = await motionState("reduce");
+    addCheck(
+      checks,
+      "reduced-motion",
+      animated.length >= 5 && animated.every((item) => item.animation === "trace-in" && item.duration > 0.1) &&
+        reduced.every((item) => item.animation === "none" || item.duration < 0.01),
+      `animated: ${animated.map((item) => item.animation).join(",")}; reduced: ${reduced.map((item) => `${item.animation}/${item.duration}s`).join(",")}`
+    );
+
+    // Clip URLs in the VideoObject use #t=<seconds>; arriving on one seeks the demo.
+    const deepContext = await browser.newContext({ viewport: viewports[0], reducedMotion: "reduce" });
+    const deepPage = await deepContext.newPage();
+    // Use a mid-video chapter from the page's own VideoObject so recuts stay covered.
+    const clipStarts = [...homepageSource.matchAll(/"@type":\s*"Clip"[^}]*?"startOffset":\s*([\d.]+)/g)].map((match) => match[1]);
+    if (clipStarts.length <= 2) throw new Error("The VideoObject should list chapter clips for the deep-link check.");
+    const deepStart = clipStarts[Math.floor(clipStarts.length / 2)] || "0";
+    await deepPage.goto(`${baseUrl}/#t=${deepStart}`, { waitUntil: "load" });
+    const deepLinked = await deepPage
+      .waitForFunction((start) => {
+        const video = document.querySelector("[data-demo-video]");
+        const current = document.querySelector('[data-chapter-list] [aria-current="true"]');
+        return Math.abs(video.currentTime - Number(start)) < 0.5 && current?.dataset.demoTime === start;
+      }, deepStart, { timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    addCheck(checks, "demo-deep-link", deepLinked, deepLinked ? `#t=${deepStart} seeks the demo and marks its chapter current` : `Deep link #t=${deepStart} did not seek the demo`);
+    await deepContext.close();
 
     addCheck(checks, "runtime-errors", errors.length === 0, errors.length ? errors.join("; ") : "No page errors");
   } finally {
