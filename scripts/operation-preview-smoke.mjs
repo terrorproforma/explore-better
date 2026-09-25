@@ -258,6 +258,55 @@ async function main() {
     assert(freshSyncResult.operation?.status === "completed", "Fresh sync digest apply should complete.");
     assert((await fs.readFile(path.join(fixture.syncRight, "fresh.txt"), "utf8")) === "fresh from left\n", "Fresh sync digest apply should copy fresh.txt.");
 
+    const dupRoot = path.join(fixtureRoot, "dup");
+    const dupTarget = path.join(fixtureRoot, "dup-target");
+    await fs.mkdir(path.join(dupRoot, "one"), { recursive: true });
+    await fs.mkdir(path.join(dupRoot, "two"), { recursive: true });
+    await fs.mkdir(dupTarget, { recursive: true });
+    await fs.writeFile(path.join(dupRoot, "one", "same.txt"), "one\n");
+    await fs.writeFile(path.join(dupRoot, "two", "same.txt"), "two\n");
+    const dupBody = {
+      paths: [path.join(dupRoot, "one", "same.txt"), path.join(dupRoot, "two", "same.txt")],
+      targetDir: dupTarget,
+      mode: "copy",
+      conflictMode: "unique"
+    };
+    const dupPlan = await requestJson(baseUrl, "/api/transfer/preview", { method: "POST", body: JSON.stringify(dupBody) });
+    assert(dupPlan.canApply === true && !dupPlan.counts?.duplicate, "Unique mode should rename same-named sources instead of blocking.");
+    assert(count(dupPlan, "copy") === 1 && count(dupPlan, "rename") === 1, "Same-named sources should plan one copy and one rename.");
+    const dupResult = await requestJson(baseUrl, "/api/transfer", {
+      method: "POST",
+      body: JSON.stringify({ ...dupBody, expectedPlanDigest: dupPlan.planDigest })
+    });
+    assert(dupResult.operation?.status === "completed", "Same-named unique transfer should complete.");
+    assert((await fs.readFile(path.join(dupTarget, "same.txt"), "utf8")) === "one\n", "First same-named source keeps its name.");
+    assert((await fs.readFile(dupPlan.items[1].dest, "utf8")) === "two\n", "Second same-named source lands at the renamed destination.");
+
+    const ancestorRoot = path.join(fixtureRoot, "ancestor");
+    await fs.mkdir(path.join(ancestorRoot, "a", "a"), { recursive: true });
+    await fs.writeFile(path.join(ancestorRoot, "a", "a", "inner.txt"), "inner\n");
+    await fs.writeFile(path.join(ancestorRoot, "a", "keep.txt"), "keep\n");
+    const ancestorBody = { paths: [path.join(ancestorRoot, "a", "a")], targetDir: ancestorRoot, mode: "copy", conflictMode: "overwrite" };
+    const ancestorPlan = await requestJson(baseUrl, "/api/transfer/preview", { method: "POST", body: JSON.stringify(ancestorBody) });
+    assert(ancestorPlan.items[0]?.status === "invalid" && ancestorPlan.canApply === false, "Overwriting an ancestor of a source must be blocked.");
+    await assertRejectedApply(baseUrl, "/api/transfer", { ...ancestorBody, expectedPlanDigest: ancestorPlan.planDigest });
+    assert((await fs.readFile(path.join(ancestorRoot, "a", "keep.txt"), "utf8")) === "keep\n", "Blocked ancestor overwrite must leave the ancestor intact.");
+
+    const bulkLeft = path.join(fixtureRoot, "bulk-left");
+    const bulkRight = path.join(fixtureRoot, "bulk-right");
+    await fs.mkdir(bulkLeft, { recursive: true });
+    await fs.mkdir(bulkRight, { recursive: true });
+    const bulkItems = Array.from({ length: 1005 }, (_, index) => `bulk-${String(index).padStart(4, "0")}.txt`);
+    await Promise.all(bulkItems.map((name) => fs.writeFile(path.join(bulkLeft, name), `${name}\n`)));
+    const bulkBody = { leftPath: bulkLeft, rightPath: bulkRight, direction: "leftToRight", overwrite: false, mirrorDeletes: false, items: bulkItems };
+    const bulkPlan = await requestJson(baseUrl, "/api/operation/preview", { method: "POST", body: JSON.stringify({ ...bulkBody, type: "sync" }) });
+    assert(bulkPlan.items.length === bulkItems.length && count(bulkPlan, "copy") === bulkItems.length, "Sync preview must cover every item apply will run.");
+    const bulkResult = await requestJson(baseUrl, "/api/sync", {
+      method: "POST",
+      body: JSON.stringify({ ...bulkBody, expectedPlanDigest: bulkPlan.planDigest })
+    });
+    assert(bulkResult.operation?.status === "completed" && bulkResult.copied?.length === bulkItems.length, "Large sync apply should copy exactly the previewed items.");
+
     const unsafeMessage = await assertRejectedPreview(baseUrl, {
       type: "sync",
       leftPath: fixture.syncLeft,

@@ -9982,11 +9982,25 @@ async function removeCommittedMoveSource(source, dest, options = {}) {
     if (!validSnapshot(moveSnapshot?.source) || !validSnapshot(moveSnapshot?.destination) || moveSnapshot.source.contentDigest !== moveSnapshot.destination.contentDigest) {
       throw new Error("This move has no verified recovery snapshot. Keep both files and compare them before reconciling the move.");
     }
-    const [currentSource, currentDestination] = await Promise.all([
-      pathSnapshot(src, { signal: options.hooks?.signal }),
-      pathSnapshot(target, { signal: options.hooks?.signal })
-    ]);
-    if (currentSource.stateDigest !== moveSnapshot.source.stateDigest || currentDestination.stateDigest !== moveSnapshot.destination.stateDigest) {
+    const quickStates = options.quickStates;
+    let changed;
+    if (quickStates?.source && quickStates?.destination) {
+      // Same-process removal: both sides were content-hashed once and compared
+      // above, and their cheap state was captured before hashing, so any later
+      // write shows up as a changed identity, size, mtime, mode, or membership.
+      const [currentSource, currentDestination] = await Promise.all([
+        pathQuickState(src, options.hooks?.signal),
+        pathQuickState(target, options.hooks?.signal)
+      ]);
+      changed = currentSource !== quickStates.source || currentDestination !== quickStates.destination;
+    } else {
+      const [currentSource, currentDestination] = await Promise.all([
+        pathSnapshot(src, { signal: options.hooks?.signal }),
+        pathSnapshot(target, { signal: options.hooks?.signal })
+      ]);
+      changed = currentSource.stateDigest !== moveSnapshot.source.stateDigest || currentDestination.stateDigest !== moveSnapshot.destination.stateDigest;
+    }
+    if (changed) {
       throw new Error("The source or destination changed after this move was copied. Both paths were preserved; compare them before reconciling the move.");
     }
     if (testFailSourceRemoval) {
@@ -10016,10 +10030,34 @@ async function removeCommittedMoveSource(source, dest, options = {}) {
   }
 }
 
+// Metadata-only digest (no content reads) of a tree: relative names, kinds,
+// identity, mode, size, mtime, and link targets.
+async function pathQuickState(target, signal) {
+  const hash = crypto.createHash("sha256");
+  async function visit(itemPath, relative) {
+    throwIfAborted(signal);
+    const stats = await fs.lstat(itemPath);
+    const kind = stats.isSymbolicLink() ? "link" : stats.isDirectory() ? "directory" : stats.isFile() ? "file" : "other";
+    const value = kind === "link" ? await fs.readlink(itemPath) : "";
+    hash.update(JSON.stringify([relative, kind, String(stats.dev), String(stats.ino), stats.mode, stats.size, stats.mtimeMs, value]) + "\n");
+    if (kind === "directory") {
+      const names = (await fs.readdir(itemPath)).sort();
+      for (const name of names) await visit(path.join(itemPath, name), relative ? `${relative}/${name}` : name);
+    }
+  }
+  await visit(path.resolve(target), "");
+  return hash.digest("hex");
+}
+
 async function copyAcrossVolumesAndRemoveSource(source, dest, options = {}) {
+  // Each side is content-hashed exactly once: the source before the copy and the
+  // destination after the commit. The pre-removal re-check compares the cheap
+  // state captured before each hash instead of reading both trees again.
+  const sourceQuickState = await pathQuickState(source, options.hooks?.signal);
   const sourceSnapshot = await pathSnapshot(source, { signal: options.hooks?.signal });
   const progressState = options.progressState || createCopyProgressState(await scanCopyFootprints([source], options.hooks || {}));
   await copyToStagingAndCommit(source, dest, { ...options, progressState });
+  const destinationQuickState = await pathQuickState(dest, options.hooks?.signal);
   const destinationSnapshot = await pathSnapshot(dest, { signal: options.hooks?.signal });
   const moveSnapshot = { version: 1, source: sourceSnapshot, destination: destinationSnapshot };
   const remainingPaths = options.moveRecovery?.paths || [];
@@ -10029,7 +10067,7 @@ async function copyAcrossVolumesAndRemoveSource(source, dest, options = {}) {
     transaction: { version: 1, phase: "source-removal-pending", source, destinationPath: dest, stagingPath: null, moveSnapshot },
     recovery: { type: "move", sourceRemovalPending: true, destinationCommitted: true, pendingSource: source, committedDestination: dest, retry, canRetryRemaining: true, completed, remaining: [source, ...remainingPaths].map((item, index) => ({ path: item, index: index + completed.length })), remainingCount: remainingPaths.length + 1, completedCount: completed.length }
   });
-  await removeCommittedMoveSource(source, dest, { ...options, moveSnapshot });
+  await removeCommittedMoveSource(source, dest, { ...options, moveSnapshot, quickStates: { source: sourceQuickState, destination: destinationQuickState } });
 }
 
 async function copyOne(source, targetDir, options = {}) {
@@ -10160,6 +10198,11 @@ async function copyPaths(paths, targetDir, hooks = {}) {
       error,
       result: { copied: copied.map((item) => item.dest), items: copied }
     });
+    if (transactionFailure?.transaction) {
+      details.transaction = transactionFailure.transaction;
+      details.recovery = { ...details.recovery, transaction: transactionFailure.transaction };
+    }
+    error.details = details;
     throw error;
   }
 }
@@ -10171,8 +10214,6 @@ async function movePaths(paths, targetDir, hooks = {}) {
   const resolvedTargetDir = resolveUserPath(targetDir);
   for (const source of resolvedSources) {
     const stats = await fs.lstat(source);
-    await assertSafeDestination(source, resolvedTargetDir);
-    await assertSafeDestination(source, resolvedTargetDir);
     await assertSafeDestination(source, resolvedTargetDir);
     if (stats.isDirectory() && isInsidePath(resolvedTargetDir, source)) {
       throw new Error("A folder cannot be moved into itself or one of its descendants.");
@@ -10375,23 +10416,76 @@ async function deletePaths(paths, hooks = {}) {
   }
 }
 
-async function recycleOnePath(itemPath) {
-  const resolved = resolveUserPath(itemPath);
-  const stats = await fs.stat(resolved);
+const recycleBatchSize = 50;
+
+// Recycles a batch with one PowerShell process, stopping at the first failure.
+// Returns the recycled prefix and the failure (with its batch index), if any.
+async function recycleBatch(itemPaths) {
+  const items = [];
+  let statFailure = null;
+  for (const [index, itemPath] of itemPaths.entries()) {
+    try {
+      const stats = await fs.stat(itemPath);
+      items.push({ source: itemPath, isDirectory: stats.isDirectory(), size: stats.isFile() ? stats.size : null });
+    } catch (error) {
+      statFailure = { index, error };
+      break;
+    }
+  }
+  if (!items.length) {
+    return { recycled: [], failure: statFailure };
+  }
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName Microsoft.VisualBasic
 $payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $ui = [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs
 $recycle = [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
-if ($payload.isDirectory) {
-  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($payload.path, $ui, $recycle)
-} else {
-  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($payload.path, $ui, $recycle)
+$results = @()
+foreach ($item in @($payload.items)) {
+  try {
+    if ($item.isDirectory) {
+      [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory([string]$item.path, $ui, $recycle)
+    } else {
+      [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile([string]$item.path, $ui, $recycle)
+    }
+    $results += [pscustomobject]@{ ok = $true }
+  } catch {
+    $results += [pscustomobject]@{ ok = $false; error = $_.Exception.Message }
+    break
+  }
 }
+ConvertTo-Json -InputObject @{ results = @($results) } -Compress -Depth 4
 `;
-  await runPowerShellPayload(script, { path: resolved, isDirectory: stats.isDirectory() });
-  return { source: resolved, isDirectory: stats.isDirectory(), size: stats.isFile() ? stats.size : null };
+  let results = null;
+  let batchError = null;
+  try {
+    const parsed = parsePowerShellJson(
+      await runPowerShellPayload(script, { items: items.map((item) => ({ path: item.source, isDirectory: item.isDirectory })) }),
+      {}
+    );
+    results = parsed.results == null ? [] : [].concat(parsed.results);
+  } catch (error) {
+    batchError = error;
+  }
+  const recycled = [];
+  for (const [index, item] of items.entries()) {
+    const outcome = results?.[index];
+    if (outcome?.ok === true) {
+      recycled.push(item);
+      continue;
+    }
+    if (outcome && outcome.ok === false) {
+      return { recycled, failure: { index, error: new Error(String(outcome.error || "Recycle Bin operation failed.")) } };
+    }
+    // No per-item result (PowerShell itself failed): the item's location decides.
+    if (!(await pathExists(item.source))) {
+      recycled.push(item);
+      continue;
+    }
+    return { recycled, failure: { index, error: batchError || new Error("Recycle Bin operation failed.") } };
+  }
+  return { recycled, failure: statFailure };
 }
 
 async function recyclePaths(paths, hooks = {}) {
@@ -10401,27 +10495,33 @@ async function recyclePaths(paths, hooks = {}) {
   let activeIndex = 0;
   try {
     await hooks.updateProgress?.({ unit: "items", total, completed: 0, phase: "Preparing" });
-    for (const [index, itemPath] of resolvedSources.entries()) {
-      activeIndex = index;
+    for (let start = 0; start < resolvedSources.length; start += recycleBatchSize) {
+      activeIndex = start;
       await hooks.throwIfCanceled?.();
       await hooks.waitIfPaused?.();
+      const chunk = resolvedSources.slice(start, start + recycleBatchSize);
       await hooks.updateProgress?.({
         unit: "items",
         total,
-        completed: index,
+        completed: start,
         phase: "Recycling",
-        current: labelFromPath(itemPath),
-        currentPath: itemPath
+        current: labelFromPath(chunk[0]),
+        currentPath: chunk[0]
       });
-      const item = await recycleOnePath(itemPath);
-      recycled.push(item);
+      const batch = await recycleBatch(chunk);
+      recycled.push(...batch.recycled);
+      activeIndex = start + batch.recycled.length;
+      if (!batch.recycled.length) {
+        throw batch.failure.error;
+      }
+      const lastPath = batch.recycled.at(-1).source;
       await hooks.updateProgress?.({
         unit: "items",
         total,
-        completed: index + 1,
+        completed: recycled.length,
         phase: "Recycled",
-        current: labelFromPath(itemPath),
-        currentPath: itemPath
+        current: labelFromPath(lastPath),
+        currentPath: lastPath
       });
       await checkpointRecovery(
         hooks,
@@ -10430,7 +10530,7 @@ async function recyclePaths(paths, hooks = {}) {
           body: { paths },
           resolvedSources,
           completedItems: recycled.map((item) => ({ source: item.source })),
-          failedIndex: index + 1,
+          failedIndex: recycled.length,
           error: interruptedCheckpointError(),
           result: {
             recycled: recycled.map((item) => item.source),
@@ -10440,6 +10540,9 @@ async function recyclePaths(paths, hooks = {}) {
           }
         })
       );
+      if (batch.failure) {
+        throw batch.failure.error;
+      }
     }
     await hooks.updateProgress?.({ unit: "items", total, completed: recycled.length, phase: "Completed" });
     return {
@@ -10493,7 +10596,19 @@ async function trashPaths(paths, hooks = {}) {
         current: labelFromPath(resolvedSource),
         currentPath: resolvedSource
       });
-      const dest = await moveOne(resolvedSource, batchDir);
+      // Cross-volume trash copies with progress and cancel; the trash checkpoint
+      // below stays the recovery record, so the move-resume record is not written.
+      const dest = await moveOne(resolvedSource, batchDir, {
+        hooks: { ...hooks, updateRecovery: undefined },
+        progressFields: () => ({
+          unit: "items",
+          total,
+          completed: index,
+          phase: "Trashing",
+          current: labelFromPath(resolvedSource),
+          currentPath: resolvedSource
+        })
+      });
       moved.push({ source: resolvedSource, dest });
       await hooks.updateProgress?.({
         unit: "items",
@@ -11191,7 +11306,15 @@ async function buildShortcutPlan(paths, targetDir, conflictMode = "unique") {
   return { targetDir: destDir, items };
 }
 
-async function createWindowsShortcuts(body) {
+async function failWithCreatedUndo(error, targetDir, created, hooks = {}) {
+  const undo = created.length ? { type: "trash-created", items: created.map((item) => ({ path: item.dest })) } : null;
+  const details = { ...(error.details || {}), error: error.message, targetDir, created, count: created.length, undo };
+  await hooks.updateRecovery?.(details);
+  error.details = details;
+  return error;
+}
+
+async function createWindowsShortcuts(body, hooks = {}) {
   if (process.platform !== "win32") {
     throw new Error("Windows shortcuts are only available on Windows.");
   }
@@ -11223,7 +11346,17 @@ foreach ($Item in @($Payload.items)) {
 }
 [pscustomobject]@{ created = $Created } | ConvertTo-Json -Compress -Depth 4
 `;
-  const result = await runPowerShellPayload(script, { items: plan.items });
+  let result;
+  try {
+    result = await runPowerShellPayload(script, { items: plan.items });
+  } catch (error) {
+    // Planned destinations did not exist, so any that exist now were created here.
+    const created = [];
+    for (const item of plan.items) {
+      if (await pathExists(item.dest)) created.push({ source: item.source, dest: item.dest, name: item.name });
+    }
+    throw await failWithCreatedUndo(error, plan.targetDir, created, hooks);
+  }
   const parsed = parsePowerShellJson(result, { created: plan.items });
   const created = (Array.isArray(parsed.created) ? parsed.created : [parsed.created])
     .filter(Boolean)
@@ -11312,22 +11445,26 @@ async function buildFilesystemLinkPlan(paths, targetDir, linkKind = "auto", conf
   return { targetDir: destDir, items };
 }
 
-async function createFilesystemLinks(body) {
+async function createFilesystemLinks(body, hooks = {}) {
   const linkKind = normalizeLinkKind(body.linkKind);
   const conflictMode = body.conflictMode === "fail" ? "fail" : "unique";
   const plan = await buildFilesystemLinkPlan(body.paths, body.targetDir || body.path, linkKind, conflictMode);
   const created = [];
-  for (const item of plan.items) {
-    if (item.linkKind === "hardlink") {
-      await fs.link(item.source, item.dest);
-    } else if (item.linkKind === "junction") {
-      await fs.symlink(item.source, item.dest, "junction");
-    } else if (item.linkKind === "symlink") {
-      await fs.symlink(item.source, item.dest, item.isDirectory ? "dir" : "file");
-    } else {
-      throw new Error(`Unsupported link type: ${item.linkKind}`);
+  try {
+    for (const item of plan.items) {
+      if (item.linkKind === "hardlink") {
+        await fs.link(item.source, item.dest);
+      } else if (item.linkKind === "junction") {
+        await fs.symlink(item.source, item.dest, "junction");
+      } else if (item.linkKind === "symlink") {
+        await fs.symlink(item.source, item.dest, item.isDirectory ? "dir" : "file");
+      } else {
+        throw new Error(`Unsupported link type: ${item.linkKind}`);
+      }
+      created.push({ source: item.source, dest: item.dest, name: item.name, linkKind: item.linkKind });
     }
-    created.push({ source: item.source, dest: item.dest, name: item.name, linkKind: item.linkKind });
+  } catch (error) {
+    throw await failWithCreatedUndo(error, plan.targetDir, created, hooks);
   }
 
   return {
@@ -11383,15 +11520,27 @@ async function extractZipArchive(body) {
   await fs.mkdir(targetDir, { recursive: true });
   const defaultFolder = path.parse(path.basename(archive)).name || "Extracted";
   const folderName = cleanEntryName(body.folderName || defaultFolder);
-  const dest = await uniquePath(targetDir, folderName);
-  await fs.mkdir(dest, { recursive: true });
+  let dest = await uniquePath(targetDir, folderName);
+  // Extract beside the destination and rename into place so a failure never
+  // leaves a partially extracted folder behind.
+  const staging = siblingStagingPath(dest);
+  await fs.mkdir(staging, { recursive: true });
 
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 $payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
 Expand-Archive -LiteralPath $payload.archive -DestinationPath $payload.dest -Force
 `;
-  await runPowerShellPayload(script, { archive, dest });
+  try {
+    await runPowerShellPayload(script, { archive, dest: staging });
+    if (await pathExists(dest)) {
+      dest = await uniquePath(targetDir, folderName);
+    }
+    await renamePathWithRetry(staging, dest);
+  } catch (error) {
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
   return {
     result: { archive, extractedDir: dest },
     undo: { type: "trash-created", items: [{ path: dest }] }
@@ -11628,9 +11777,11 @@ async function syncCompareItems(body, hooks = {}) {
     };
   });
   const copyingTasks = [];
-  for (const task of tasks) {
+  const copyingTaskIndexes = [];
+  for (const [index, task] of tasks.entries()) {
     if ((await pathExists(task.source)) && (overwrite || !(await pathExists(task.dest)))) {
       copyingTasks.push(task);
+      copyingTaskIndexes.push(index);
     }
   }
   let activeIndex = 0;
@@ -11640,11 +11791,8 @@ async function syncCompareItems(body, hooks = {}) {
       await scanCopyFootprints(
         copyingTasks.map((task) => task.source),
         hooks,
-        (itemPath) => {
-          const index = tasks.findIndex((task) => pathIdentity(task.source) === pathIdentity(itemPath));
-          if (index !== -1) {
-            activeIndex = index;
-          }
+        (itemPath, copyingIndex) => {
+          activeIndex = copyingTaskIndexes[copyingIndex];
         }
       )
     );
@@ -11853,6 +12001,14 @@ function originalPathLookupFromOperations(operations = []) {
       }
       if (item?.source && item?.dest) {
         lookup.set(pathIdentity(item.dest), item.source);
+      }
+      if (item?.backup && item?.dest) {
+        lookup.set(pathIdentity(item.backup), item.dest);
+      }
+    }
+    for (const item of Array.isArray(operation?.undo?.deleted) ? operation.undo.deleted : []) {
+      if (item?.from && item?.to) {
+        lookup.set(pathIdentity(item.from), item.to);
       }
     }
   }
@@ -12407,7 +12563,7 @@ async function buildTransferPlan(body) {
           status = "skip";
           reason = "Destination already exists.";
           action = "skip";
-        } else if (existing && effectiveConflictMode === "unique") {
+        } else if (effectiveConflictMode === "unique" && (existing || reservedTargets.has(pathIdentity(baseDest)))) {
           dest = await uniquePathWithReserved(targetDir, originalName, reservedTargets);
           reason = `Will rename to ${path.basename(dest)}.`;
           action = "rename";
@@ -12415,6 +12571,10 @@ async function buildTransferPlan(body) {
           if (sourceKeys.has(pathIdentity(baseDest))) {
             status = "invalid";
             reason = "Destination is also selected as a source.";
+            action = "block";
+          } else if (paths.some((selected) => insidePath(selected, baseDest))) {
+            status = "invalid";
+            reason = "Destination contains a selected source.";
             action = "block";
           } else {
             reason = "Will replace existing destination.";
@@ -12497,16 +12657,17 @@ async function buildSyncPreviewPlan(body) {
   const direction = body.direction === "rightToLeft" ? "rightToLeft" : "leftToRight";
   const overwrite = Boolean(body.overwrite);
   const mirrorDeletes = Boolean(body.mirrorDeletes);
-  const relativePaths = Array.isArray(body.items) ? body.items.slice(0, 1000) : [];
+  // Plan every requested item: apply runs all of body.items, so the preview and
+  // its digest must cover the same set.
+  const relativePaths = Array.isArray(body.items) ? body.items : [];
   if (!relativePaths.length) {
     throw new Error("Select at least one compare item to sync.");
   }
 
   const sourceRoot = direction === "leftToRight" ? leftRoot : rightRoot;
   const destRoot = direction === "leftToRight" ? rightRoot : leftRoot;
-  const items = [];
-  for (let index = 0; index < relativePaths.length; index += 1) {
-    const safePath = safeCompareRelativePath(relativePaths[index]);
+  const items = await mapConcurrent(relativePaths, 16, async (requestedPath, index) => {
+    const safePath = safeCompareRelativePath(requestedPath);
     const relativePath = safePath.relativePath;
     const rel = safePath.rel;
     const source = resolveRelativeUnderRoot(sourceRoot, rel);
@@ -12549,7 +12710,7 @@ async function buildSyncPreviewPlan(body) {
       }
     }
 
-    items.push({
+    return {
       index,
       relativePath,
       rel,
@@ -12568,8 +12729,8 @@ async function buildSyncPreviewPlan(body) {
       destSize: destStats && !destStats.isDirectory() ? destStats.size : null,
       destModified: destStats ? destStats.mtimeMs : null,
       destIsDirectory: Boolean(destStats?.isDirectory())
-    });
-  }
+    };
+  });
 
   const counts = items.reduce((acc, item) => {
     acc[item.status] = (acc[item.status] || 0) + 1;
