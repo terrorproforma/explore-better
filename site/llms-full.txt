@@ -131,19 +131,19 @@ The main app, backend, renderer, native filesystem helper, and MCP sidecar run a
 
 Short silent recordings of the real app, each a loop of a single feature. Posters use the same name with a .webp extension.
 
-- Two panes, many tabs (6 s): Browse two folders side by side, each pane with its own tabs and history. https://terrorproforma.github.io/explore-better/assets/features/dual-pane.mp4
-- A terminal in every tab (7 s): Open a PowerShell drawer under a pane that follows the folder you browse. https://terrorproforma.github.io/explore-better/assets/features/terminal.mp4
-- See where the space went (8 s): Scan a folder and drill into a nested treemap of its allocated size. https://terrorproforma.github.io/explore-better/assets/features/disk-map.mp4
-- Copies you can check first (9 s): Preview a copy's conflicts, choose what happens, and watch it complete. https://terrorproforma.github.io/explore-better/assets/features/transfer.mp4
-- Huge folders stay quick (6 s): Scroll a 100,000-entry folder without waiting for it to load. https://terrorproforma.github.io/explore-better/assets/features/large-folder.mp4
-- Search and duplicates (7 s): Filter a search by name, size and date and get results as you type. https://terrorproforma.github.io/explore-better/assets/features/search.mp4
-- Compare and sync (8 s): Compare two folders and preview a sync plan before applying it. https://terrorproforma.github.io/explore-better/assets/features/compare-sync.mp4
-- Previews, including 3D (9 s): Preview text, images and 3D models without leaving the pane. https://terrorproforma.github.io/explore-better/assets/features/previews.mp4
-- A command palette (6 s): Find any command by typing a few letters of its name. https://terrorproforma.github.io/explore-better/assets/features/command-palette.mp4
-- Refused overwrite (7 s): A rename that would overwrite another file is refused, not guessed. https://terrorproforma.github.io/explore-better/assets/features/safe-rename.mp4
-- Keyboard first (8 s): Move, select and open files without touching the mouse. https://terrorproforma.github.io/explore-better/assets/features/keyboard.mp4
-- Hand the active folder to Codex (9 s): Codex reads the live pane through a read-only MCP profile and reveals its answer. https://terrorproforma.github.io/explore-better/assets/features/ai-handoff.mp4
-- A profile per AI client (6 s): Choose the exact folders and tools a client may use, read-only by default. https://terrorproforma.github.io/explore-better/assets/features/ai-profile.mp4
+- Dual panes and tabs (10.43 s): Two independent panes, each with its own tabs, breadcrumbs and view mode. https://terrorproforma.github.io/explore-better/assets/features/dual-pane.mp4
+- A terminal in every tab (8.1 s): Each tab's PowerShell follows the folder you open in the pane. https://terrorproforma.github.io/explore-better/assets/features/terminal.mp4
+- Disk Map (10.83 s): A nested treemap of exact disk allocation, with the largest files beside it. https://terrorproforma.github.io/explore-better/assets/features/disk-map.mp4
+- Transfer preview and undo (11.43 s): See every copy, rename, overwrite and skip before a byte moves, then undo the whole batch. https://terrorproforma.github.io/explore-better/assets/features/transfer.mp4
+- 100,000 files, no waiting (6.67 s): A folder with 100,000 entries opens instantly and scrolls without stutter. https://terrorproforma.github.io/explore-better/assets/features/large-folder.mp4
+- Filtered search (9.83 s): Combine name, size, date and type filters, and get the results in the pane. https://terrorproforma.github.io/explore-better/assets/features/search.mp4
+- Compare and sync (7.57 s): Compare two folders and preview the sync plan before anything changes. https://terrorproforma.github.io/explore-better/assets/features/compare-sync.mp4
+- Previews, including 3D (11.87 s): Text, images, PDFs and STEP or STL models preview in the side panel. https://terrorproforma.github.io/explore-better/assets/features/previews.mp4
+- Command palette (9.7 s): Ctrl+P finds any of 100+ commands by fuzzy search. https://terrorproforma.github.io/explore-better/assets/features/command-palette.mp4
+- Safe rename (11.37 s): Rename refuses to overwrite an existing file, and every rename can be undone. https://terrorproforma.github.io/explore-better/assets/features/safe-rename.mp4
+- Keyboard-first (8.03 s): Arrow keys, Shift+F10 menus and every dialog work without a mouse, with visible focus. https://terrorproforma.github.io/explore-better/assets/features/keyboard.mp4
+- Live AI context over MCP (7.9 s): An AI client sees your active pane and can reveal files in it, through a local read-only MCP profile. https://terrorproforma.github.io/explore-better/assets/features/ai-handoff.mp4
+- Scoped AI access (9.73 s): Each AI client gets a profile: its folders, its tools, and an audit log of every call. https://terrorproforma.github.io/explore-better/assets/features/ai-profile.mp4
 
 ## Verification
 

@@ -21,7 +21,8 @@ export const CLIPS = [
       { from: ["start", 0.55], to: ["tab-switch", 0.75], cam: [FULL, [["tab-open", -0.4], 1.18, 560, 380], [["tiles", 0.2], 1.18, 560, 420], [["tab-switch", -0.2], 1.05, 640, 430], [["tab-switch", 0.6], 1, 720, 450]] },
       { from: ["focus-right", -0.6], to: ["focus-right", 0.9], cam: [FULL] }
     ],
-    poster: ["tiles", -0.1]
+    poster: ["tiles", -0.1],
+    posterOutputSeconds: 4.69
   },
   {
     id: "terminal",
@@ -63,7 +64,8 @@ export const CLIPS = [
     segments: [
       { from: ["start", 0.5], to: ["end", -0.1], cam: [FULL, [["open", 0.1], 1, 720, 450], [["listed", 1.0], 1.1, 680, 400]] }
     ],
-    poster: ["scrolled", 0.3]
+    poster: ["scrolled", 0.3],
+    posterOutputSeconds: 3
   },
   {
     id: "search",
@@ -73,7 +75,8 @@ export const CLIPS = [
     segments: [
       { from: ["start", 0.5], to: ["end", -0.1], cam: [FULL, [["dialog", 0.1], 1, 720, 450], [["dialog", 0.8], 1.22, 720, 280], [["filled", 0.2], 1.22, 720, 280], [["results", 0.4], 1.15, 720, 470], [["pane", 0.1], 1.15, 720, 470], [["pane", 0.8], 1.2, 560, 330]] }
     ],
-    poster: ["results", 1.0]
+    poster: ["results", 1.0],
+    posterOutputSeconds: 6.39
   },
   {
     id: "compare-sync",
@@ -83,7 +86,8 @@ export const CLIPS = [
     segments: [
       { from: ["start", 0.5], to: ["end", -0.1], cam: [FULL, [["dialog", 0.2], 1, 720, 450], [["compared", 0.2], 1.22, 720, 560], [["planned", -0.3], 1.22, 720, 560], [["planned", 0.5], 1.22, 720, 470]] }
     ],
-    poster: ["planned", 1.2]
+    poster: ["planned", 1.2],
+    posterOutputSeconds: 4.92
   },
   {
     id: "previews",
@@ -103,7 +107,8 @@ export const CLIPS = [
     segments: [
       { from: ["start", 0.5], to: ["end", -0.1], cam: [FULL, [["split", -0.9], 1, 720, 450], [["split", -0.2], 1.3, 720, 250], [["horizontal", -0.2], 1.3, 720, 250], [["horizontal", 0.5], 1, 720, 450], [["vertical", -1.6], 1, 720, 450], [["vertical", -1.1], 1.3, 720, 250], [["vertical", -0.1], 1.3, 720, 250], [["vertical", 0.6], 1, 720, 450]] }
     ],
-    poster: ["results", 0.2]
+    poster: ["results", 0.2],
+    posterOutputSeconds: 6.3
   },
   {
     id: "safe-rename",
@@ -124,6 +129,7 @@ export const CLIPS = [
       { from: ["start", 0.5], to: ["end", -0.1], cam: [FULL, [0.4, 1.25, 560, 440], [["menu", 0.1], 1.08, 620, 450], [["enter", 0.1], 1.08, 620, 450], [["enter", 0.8], 1, 720, 450]] }
     ],
     poster: ["menu", 1.4],
+    posterOutputSeconds: 5.22,
     keyPlacement: "left"
   },
   {
@@ -235,7 +241,8 @@ export function buildFeatureEdit(plan, capture) {
     ai = { client, from: 0, duration: cursor, task: "Find the release checklist and reveal it in my active pane.", rows, trimmedSeconds };
     labels.push({ text: `REAL ${client.toUpperCase()} RUN / ${trimmedSeconds} S OF MODEL WAIT TRIMMED`, from: 6, duration: cursor - 6 });
   }
-  const posterFrame = toOutput(at(plan.poster));
+  // posterOutputSeconds pins the poster to a reviewed moment of the finished clip.
+  const posterFrame = Number.isFinite(plan.posterOutputSeconds) ? Math.round(plan.posterOutputSeconds * FPS) : toOutput(at(plan.poster));
   if (posterFrame === null) throw new Error(`${plan.id}: poster time falls outside the edit.`);
   return {
     id: plan.id,
