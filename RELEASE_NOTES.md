@@ -25,6 +25,7 @@
 
 - Fixed size- and date-filtered searches never showing results, auto-refresh reload loops when a folder watcher is unavailable, Ctrl+W in the terminal closing its tab, stale native-drag drops, column resizing reversing the sort, and orphaned shells after restoring tab groups or layouts.
 - Access-denied folders, missing Open With programs, locked or deleted preview files, and helper crashes no longer produce server errors or crash the backend. A crashed renderer reloads automatically.
+- Folder and state watchers start from canonical long paths, so browsing a folder through an 8.3 short name (for example `C:\PROGRA~1`) no longer aborts the backend.
 - Timed-out scripts stop making changes, custom command timeouts end the whole process tree, and folder watchers recover after errors.
 - Background indexes keep links searchable without reading their targets, watch each root recursively, and reject unsafe root ids.
 

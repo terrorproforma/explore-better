@@ -204,6 +204,9 @@ async function main() {
     const gated = await checkMoveUnderHooks(baseUrl, fixture, "gated");
     assert(gated.operation?.status === "failed" && gated.sourceExists, "EB_TEST_* hooks should still apply with EXPLORE_BETTER_TEST_HOOKS=1.");
     checks.push("EB_TEST_* failure injection still works with the test-hooks flag");
+  } catch (error) {
+    if (server?.output?.length) console.error(`Server output:\n${server.output.join("")}`);
+    throw error;
   } finally {
     await stopServer(server);
     await fs.rm(fixture, { recursive: true, force: true }).catch(() => {});

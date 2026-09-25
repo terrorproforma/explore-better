@@ -73,6 +73,7 @@
     "verify:transactional-operations": "node scripts/transactional-operations-smoke.mjs",
     "verify:rename-retry-safety": "node scripts/rename-retry-safety-smoke.mjs",
     "verify:listing-index-regression": "node scripts/listing-index-regression-smoke.mjs",
+    "verify:short-path-watch": "node scripts/short-path-watch-smoke.mjs",
     "verify:trusted-script-timeout": "node scripts/trusted-script-timeout-devices-smoke.mjs",
     "verify:auto-refresh-fallback": "node scripts/auto-refresh-fallback-smoke.mjs",
     "verify:state-sync-write-load": "node scripts/state-sync-write-load-smoke.mjs",

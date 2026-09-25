@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, existsSync, watch } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, realpathSync, watch as watchPathRaw } from "node:fs";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -52,6 +52,17 @@ const modelWorkerContentSecurityPolicy = [
 ].join("; ");
 const rawPlainTextExtensions = new Set([".js", ".mjs", ".cjs", ".css"]);
 const rawForbiddenFetchDestinations = new Set(["script", "worker", "sharedworker", "serviceworker", "style"]);
+
+// libuv aborts the whole process (fs-event.c assertion) when a watched Windows
+// path is an 8.3 short name and change events arrive under the long name, so
+// every watcher starts from the canonical long path.
+function watch(target, options, listener) {
+  let canonical = target;
+  try {
+    canonical = realpathSync.native(target);
+  } catch {}
+  return watchPathRaw(canonical, options, listener);
+}
 
 function isLoopbackHostname(value) {
   const hostname = String(value || "").trim().replace(/^\[|\]$/g, "").toLowerCase();

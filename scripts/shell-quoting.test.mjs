@@ -34,7 +34,8 @@ let tempDir;
 let context;
 
 before(async () => {
-  tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "eb-shell-quoting-"));
+  // Canonicalize so 8.3 short TEMP paths (e.g. CI's RUNNER~1) match what PowerShell reports.
+  tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "eb-shell-quoting-")));
   context = vm.createContext({
     Buffer, StringDecoder, spawn, crypto, fs, path, process, setTimeout, clearTimeout, Promise, Error, Number, String, JSON,
     cmdQuote,
