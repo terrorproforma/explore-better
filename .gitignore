@@ -29,3 +29,11 @@ Thumbs.db
 .idea/
 .cursor/
 *~
+
+# Generated demo media (sources stay tracked; renders are reproducible and the
+# published website cut lives in site/assets)
+demo-video/output/
+demo-video-v2/output/
+demo-video-v2/capture/
+demo-video-v2/public/live.mp4
+demo-video*/node_modules/
