@@ -8732,14 +8732,15 @@ async function buildBackgroundIndexRoot(root, job, signal) {
 
     const entries = Array.isArray(index.entries) ? index.entries : [];
     const entryCapacity = Math.max(0, root.maxEntries - aggregateEntries.length);
-    const eligibleEntries = entries.filter(entry => !entry.isSymlink && !entry.reparse && (!entry.linkType || entry.linkType === "Hard Link"));
-    const aggregateCandidates = eligibleEntries.slice(0, entryCapacity);
-    if (eligibleEntries.length > aggregateCandidates.length) {
+    // Links stay searchable by name and target, but their content lives outside
+    // the traversal contract, so only plain entries are content-indexed.
+    const aggregateCandidates = entries.slice(0, entryCapacity);
+    if (entries.length > aggregateCandidates.length) {
       truncated = true;
     }
     const contentResults = await backgroundIndexContentForEntries(
       root,
-      aggregateCandidates,
+      aggregateCandidates.filter(entry => !entry.isSymlink && !entry.reparse && (!entry.linkType || entry.linkType === "Hard Link")),
       Math.max(0, root.maxContentFiles - contentIndexed),
       signal
     );
