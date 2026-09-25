@@ -140,10 +140,10 @@ async function main() {
     { name: "release notes links", min: 2, pattern: new RegExp(`releases/tag/v${VERSION}`, "g"), replace: `releases/tag/${tag}`, expect: `releases/tag/${tag}` },
     { name: "source tree link", pattern: new RegExp(`(explore-better/tree/)v${VERSION}(">Source at )v${VERSION}`, "g"), replace: `$1${tag}$2${tag}`, expect: `tree/${tag}">Source at ${tag}` },
     { name: "download button text", pattern: new RegExp(`(Download Explore Better )v${VERSION}`, "g"), replace: `$1${tag}`, expect: `Download Explore Better ${tag}` },
-    { name: "release eyebrow", pattern: new RegExp(`(<p class="eyebrow">Explore Better )v${VERSION}( /)`, "g"), replace: `$1${tag}$2`, expect: `<p class="eyebrow">Explore Better ${tag} /` },
+    { name: "visible release version (hero note, What's new heading)", min: 2, pattern: new RegExp(`(<span data-release-version>)v${VERSION}(</span>)`, "g"), replace: `$1${tag}$2`, expect: `<span data-release-version>${tag}</span>` },
     { name: "Get-FileHash command", pattern: new RegExp(`(Get-FileHash \\.\\\\)ExploreBetter-${VERSION}-x64-setup\\.exe`, "g"), replace: `$1${installer}`, expect: `Get-FileHash .\\${installer}` },
     { name: "checksum", pattern: /(<code data-checksum>)[^<]+(<\/code>)/g, replace: `$1${sha256}$2`, expect: `<code data-checksum>${sha256}</code>` },
-    { name: "installer size", pattern: /(<p class="download-facts">Windows x64 \/ )[0-9.]+( MiB)/g, replace: `$1${sizeMiB}$2`, expect: `Windows x64 / ${sizeMiB} MiB` }
+    { name: "installer size", pattern: /(<dd data-installer-size>)[0-9.]+( MiB<\/dd>)/g, replace: `$1${sizeMiB}$2`, expect: `<dd data-installer-size>${sizeMiB} MiB</dd>` }
   ]));
 
   const mcpPath = path.join("mcp", "index.html");

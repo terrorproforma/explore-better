@@ -168,7 +168,8 @@ async function updatePublicBenchmarkTable(report) {
       [`${workflow.id}:powershell`]: `${workflow.powershell.medianMs} ms`
     };
     for (const [key, value] of Object.entries(values)) {
-      const pattern = new RegExp(`(<td data-benchmark="${key}">)[^<]*(</td>)`);
+      // Other attributes (such as the phone layout's data-label) may sit beside data-benchmark.
+      const pattern = new RegExp(`(<td\\b[^>]*\\sdata-benchmark="${key}"[^>]*>)[^<]*(</td>)`);
       assert(pattern.test(html), `Public MCP page is missing benchmark cell ${key}.`);
       html = html.replace(pattern, `$1${value}$2`);
     }
