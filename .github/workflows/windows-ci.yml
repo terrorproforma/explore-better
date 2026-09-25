@@ -5,9 +5,17 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # The tag-driven release workflow calls this workflow as its test gate.
+  workflow_call:
 
 permissions:
   contents: read
+
+concurrency:
+  # github.workflow resolves to the caller's name under workflow_call, so the
+  # release gate never shares (or deadlocks on) a group with push/PR CI runs.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
@@ -17,6 +25,8 @@ jobs:
       EXPLORE_BETTER_DISABLE_STATE_WATCH: "1"
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -33,8 +43,10 @@ jobs:
       - run: npm run verify:brand
       - run: npm run build:native-helper
       - run: npm run build:renderer
-      - run: npm run build:mcp-server
+      # build:mcpb also rebuilds the MCP sidecar (build:mcp-server).
       - run: npm run build:mcpb
+      - name: Confirm committed native binaries match their Go sources
+        run: git diff --exit-code --stat -- native/bin
       - run: npm run verify:terminal-service
       - run: npm run verify:desktop-lifecycle
       - run: npm run verify:terminal-native-lifecycle
@@ -58,6 +70,12 @@ jobs:
         run: go test ./...
       - run: npm run verify:security-boundary
       - run: npm run verify:transactional-operations
+      - run: npm run verify:operations
+      - run: npm run verify:operation-journal
+      - run: npm run verify:crash-kill
+      - run: npm run verify:state-corruption
+      - run: npm run verify:mcp-security
+      - run: npm run verify:mcp-contract
       - run: npm run verify:native-helper
       - run: npm run verify:terminal
       - run: npm run verify:mcp-value

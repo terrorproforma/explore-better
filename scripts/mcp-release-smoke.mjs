@@ -90,8 +90,11 @@ assert.match(publisherInstall.run, /^set -euo pipefail\s/);
 const releaseWorkflowText = await fs.readFile(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 const releaseWorkflow = yaml.load(releaseWorkflowText);
 assert(!releaseWorkflowText.includes("--clobber"), "Release uploads must never overwrite existing assets, including during a publication race.");
-const protection = releaseWorkflow.jobs.build.steps.find((step) => step.name === "Protect published release assets");
-const upload = releaseWorkflow.jobs.build.steps.find((step) => step.name === "Create or update draft GitHub release");
+// Only the publish job may hold a repository write token; the build job (npm ci, packaging) stays read-only.
+assert.equal(releaseWorkflow.jobs.build.permissions?.contents, "read", "The release build job must not receive a repository write token.");
+assert.equal(releaseWorkflow.jobs.publish.permissions?.contents, "write");
+const protection = releaseWorkflow.jobs.publish.steps.find((step) => step.name === "Protect published release assets");
+const upload = releaseWorkflow.jobs.publish.steps.find((step) => step.name === "Create or update draft GitHub release");
 assert.equal(protection.shell, "pwsh");
 assert.equal(upload.shell, "pwsh");
 

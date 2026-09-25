@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { currentSourceState, recordArtifactProvenance } from "./verify-provenance.mjs";
 
 const root = process.cwd();
 const artifacts = path.join(root, "artifacts");
@@ -10,7 +11,34 @@ const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const acceptanceDir = path.join(artifacts, "acceptance", stamp);
 const full = process.argv.includes("--full");
 const refreshStale = process.argv.includes("--refresh-stale");
+// --strict: summary audits fail (instead of warning) on evidence from a different commit.
+const strict = process.argv.includes("--strict") || process.env.EB_VERIFY_STRICT === "1";
 const auditNpmVersion = "11.6.2";
+
+// Per-suite timeout overrides: --suite-timeout=<suite>=<ms> (repeatable) or
+// EB_VERIFY_SUITE_TIMEOUTS="<suite>=<ms>,<suite>=<ms>". These win over the defaults below.
+function parseSuiteTimeouts() {
+  const entries = [
+    ...String(process.env.EB_VERIFY_SUITE_TIMEOUTS || "").split(","),
+    ...process.argv.filter((arg) => arg.startsWith("--suite-timeout=")).map((arg) => arg.slice("--suite-timeout=".length))
+  ];
+  const overrides = new Map();
+  for (const entry of entries) {
+    const separator = entry.lastIndexOf("=");
+    if (separator <= 0) continue;
+    const ms = Number(entry.slice(separator + 1));
+    if (Number.isFinite(ms) && ms > 0) overrides.set(entry.slice(0, separator).trim(), ms);
+  }
+  return overrides;
+}
+const suiteTimeoutOverrides = parseSuiteTimeouts();
+// Suites whose own internal waits can exceed the generic defaults. Killing them
+// mid-run could leave external state half-applied, so give them room to finish.
+const suiteTimeoutDefaults = new Map([["shell-current-user", 600000]]);
+
+function suiteTimeout(name, fallbackMs) {
+  return suiteTimeoutOverrides.get(name) ?? suiteTimeoutDefaults.get(name) ?? fallbackMs;
+}
 
 for (const stream of [process.stdout, process.stderr]) {
   stream.on("error", (error) => {
@@ -125,17 +153,54 @@ async function packageVerificationSuites() {
   return suites;
 }
 
-function workspaceNodeProcesses() {
+// Snapshot of every process (pid, parent, creation time) flagging node/electron
+// processes whose command line references this workspace.
+function processSnapshot() {
   if (process.platform !== "win32") return [];
   const escaped = root.replace(/'/g, "''");
-  const command = `$items = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(node|electron).*' -and $_.CommandLine -like '*${escaped}*' }; @($items | Select-Object ProcessId,ParentProcessId,CommandLine) | ConvertTo-Json -Compress`;
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", command], { encoding: "utf8", windowsHide: true });
+  const command = `$items = Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ P = [int]$_.ProcessId; PP = [int]$_.ParentProcessId; C = $(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }); W = [bool]($_.Name -match '^(node|electron).*' -and $_.CommandLine -like '*${escaped}*') } }; @($items) | ConvertTo-Json -Compress`;
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", command], { encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   try {
     const value = JSON.parse(result.stdout || "[]");
-    return Array.isArray(value) ? value : value ? [value] : [];
+    const items = Array.isArray(value) ? value : value ? [value] : [];
+    return items.map((item) => ({
+      pid: Number(item.P),
+      ppid: Number(item.PP),
+      createdMs: Number(item.C) ? Number(item.C) / 10000 - 11644473600000 : 0,
+      workspace: item.W === true
+    }));
   } catch {
     return [];
   }
+}
+
+// Workspace node/electron processes left behind by one suite: new since the suite
+// started and descended from it. Ancestry follows live parents (a parent counts only
+// if it was created before its child, which rules out reused PIDs); a chain that ends
+// at the exited suite PID, or at an orphan root created after the suite started, is
+// owned by the suite. Processes under any other live parent (a user's own shell,
+// editor or running app) are left alone.
+function suiteLeftoverProcesses(snapshot, before, suitePid, suiteStartedMs) {
+  const byPid = new Map(snapshot.map((item) => [item.pid, item]));
+  const owned = [];
+  for (const item of snapshot) {
+    if (!item.workspace || before.has(item.pid) || item.pid === process.pid || item.createdMs < suiteStartedMs - 1000) continue;
+    let node = item;
+    for (let depth = 0; depth < 64; depth += 1) {
+      if (node.ppid === suitePid) {
+        owned.push(item.pid);
+        break;
+      }
+      const parent = byPid.get(node.ppid);
+      if (!parent || parent.createdMs > node.createdMs) {
+        if (node.createdMs >= suiteStartedMs - 1000) owned.push(item.pid);
+        break;
+      }
+      if (parent.pid === process.pid) break;
+      node = parent;
+    }
+  }
+  return owned;
 }
 
 function stopTree(pid) {
@@ -155,7 +220,8 @@ function freeLoopbackPort() {
   });
 }
 
-async function runSuite([name, script, timeoutMs, extraArgs = []]) {
+async function runSuite([name, script, defaultTimeoutMs, extraArgs = []], sourceState) {
+  const timeoutMs = suiteTimeout(name, defaultTimeoutMs);
   if (name === "perf-guard") {
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
@@ -163,12 +229,19 @@ async function runSuite([name, script, timeoutMs, extraArgs = []]) {
     await new Promise((resolve) => setTimeout(resolve, 8000));
   }
   const suitePort = await freeLoopbackPort();
-  return new Promise((resolve) => {
-    const before = new Set(workspaceNodeProcesses().map((item) => Number(item.ProcessId)));
+  const result = await new Promise((resolve) => {
+    const before = new Set(processSnapshot().filter((item) => item.workspace).map((item) => item.pid));
     const started = Date.now();
     const child = spawn(process.execPath, [path.join(root, script), ...extraArgs], {
       cwd: root,
-      env: { ...process.env, PORT: String(suitePort), EB_ACCEPTANCE_DIR: acceptanceDir },
+      env: {
+        ...process.env,
+        PORT: String(suitePort),
+        EB_ACCEPTANCE_DIR: acceptanceDir,
+        EB_VERIFY_COMMIT: sourceState.commit || "",
+        EB_VERIFY_DIRTY: sourceState.dirty ? "1" : "0",
+        EB_VERIFY_STRICT: strict ? "1" : "0"
+      },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true
     });
@@ -193,13 +266,24 @@ async function runSuite([name, script, timeoutMs, extraArgs = []]) {
     });
     child.once("exit", (code) => {
       clearTimeout(timeout);
-      for (const item of workspaceNodeProcesses()) {
-        const pid = Number(item.ProcessId);
-        if (!before.has(pid) && pid !== process.pid) stopTree(pid);
-      }
-      resolve({ name, script, status: code === 0 && !timedOut ? "pass" : "fail", code, timedOut, durationMs: Date.now() - started, stdout: stdout.slice(-100000), stderr: stderr.slice(-100000) });
+      const leftovers = suiteLeftoverProcesses(processSnapshot(), before, child.pid, started);
+      for (const pid of leftovers) stopTree(pid);
+      resolve({ name, script, status: code === 0 && !timedOut ? "pass" : "fail", code, timedOut, timeoutMs, durationMs: Date.now() - started, startedMs: started, leftoverProcessesStopped: leftovers.length, stdout: stdout.slice(-100000), stderr: stderr.slice(-100000) });
     });
   });
+  if (sourceState.commit) {
+    result.artifactsRecorded = await recordArtifactProvenance(artifacts, result.startedMs ?? Date.now(), name, sourceState).catch(() => []);
+  }
+  delete result.startedMs;
+  return result;
+}
+
+async function readAuditProvenance(fileName) {
+  try {
+    return JSON.parse(await fs.readFile(path.join(artifacts, fileName), "utf8")).provenance || null;
+  } catch {
+    return null;
+  }
 }
 
 async function acquireLock() {
@@ -265,6 +349,8 @@ async function main() {
   await fs.mkdir(acceptanceDir, { recursive: true });
   const results = [];
   const startedAt = new Date().toISOString();
+  const sourceState = currentSourceState(root);
+  let provenanceIssues = [];
   try {
     const auditStarted = Date.now();
     const auditCommand = await npmAuditInvocation();
@@ -298,7 +384,24 @@ async function main() {
       if (seenScripts.has(suiteKey)) continue;
       seenScripts.add(suiteKey);
       console.log(`\n[verify:all] ${suite[0]}`);
-      results.push(await runSuite(suite));
+      results.push(await runSuite(suite, sourceState));
+    }
+    // Summary audits accept evidence up to 72h old; surface anything they consumed
+    // that was produced by a different commit than this run.
+    for (const [suite, fileName] of [["speed-health", "speed-health-latest.json"], ["goal", "goal-stress-audit-latest.json"]]) {
+      if (!results.some((item) => item.name === suite)) continue;
+      const provenance = await readAuditProvenance(fileName);
+      for (const item of provenance?.mismatched || []) provenanceIssues.push({ audit: suite, ...item });
+    }
+    provenanceIssues = provenanceIssues.filter((item, index, all) => all.findIndex((other) => other.name === item.name) === index);
+    if (provenanceIssues.length) {
+      const banner = "!".repeat(78);
+      console.warn(`\n${banner}\n[verify:all] ${provenanceIssues.length} artifact(s) consumed by the summary audits were produced at a different commit than ${sourceState.commit?.slice(0, 12) || "HEAD"}${sourceState.dirty ? " (dirty tree)" : ""}:`);
+      for (const item of provenanceIssues) console.warn(`  - ${item.detail}`);
+      console.warn(strict
+        ? "[verify:all] --strict: treating different-commit evidence as a failure."
+        : "[verify:all] Re-run the producing suites (verify:all --full or --refresh-stale), or pass --strict to fail on this.");
+      console.warn(banner);
     }
   } finally {
     await lock.close();
@@ -311,17 +414,19 @@ async function main() {
     profile: refreshStale ? "refresh-stale" : full ? "full" : "core",
     acceptanceDir,
     machine: { node: process.version, platform: process.platform, arch: process.arch },
+    source: { commit: sourceState.commit, dirty: sourceState.dirty, strict },
     summary: { pass: results.filter((item) => item.status === "pass").length, fail: results.filter((item) => item.status === "fail").length },
+    provenance: { differentCommitArtifacts: provenanceIssues },
     results
   };
   await fs.writeFile(path.join(acceptanceDir, "release-readiness.json"), `${JSON.stringify(report, null, 2)}\n`);
   await fs.writeFile(path.join(artifacts, "verify-all-latest.json"), `${JSON.stringify(report, null, 2)}\n`);
-  const markdown = [`# Explore Better Verification`, ``, `Generated: ${report.generatedAt}`, `Profile: ${report.profile}`, `Summary: ${report.summary.pass} pass, ${report.summary.fail} fail`, ``, `| Status | Suite | Duration |`, `| --- | --- | ---: |`, ...results.map((item) => `| ${item.status.toUpperCase()} | ${item.name} | ${(item.durationMs / 1000).toFixed(1)} s |`)].join("\n");
+  const markdown = [`# Explore Better Verification`, ``, `Generated: ${report.generatedAt}`, `Profile: ${report.profile}`, `Source: ${sourceState.commit || "unknown"}${sourceState.dirty ? " (dirty)" : ""}`, `Summary: ${report.summary.pass} pass, ${report.summary.fail} fail`, ...(provenanceIssues.length ? [`Different-commit evidence: ${provenanceIssues.map((item) => item.name).join(", ")}`] : []), ``, `| Status | Suite | Duration |`, `| --- | --- | ---: |`, ...results.map((item) => `| ${item.status.toUpperCase()} | ${item.name} | ${(item.durationMs / 1000).toFixed(1)} s |`)].join("\n");
   await fs.writeFile(path.join(acceptanceDir, "release-readiness.md"), `${markdown}\n`);
   await fs.writeFile(path.join(artifacts, "verify-all-latest.md"), `${markdown}\n`);
   console.log(`\nverify:all: ${report.summary.pass} pass, ${report.summary.fail} fail`);
   console.log(`Evidence: ${acceptanceDir}`);
-  if (report.summary.fail) process.exitCode = 1;
+  if (report.summary.fail || (strict && provenanceIssues.length)) process.exitCode = 1;
 }
 
 main().catch((error) => {
