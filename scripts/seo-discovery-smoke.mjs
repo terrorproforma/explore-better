@@ -149,6 +149,34 @@ async function main() {
   const sitemapUrls = [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map((match) => match[1]);
   add(checks, "sitemap-canonical-pages", pages.every((page) => sitemapUrls.includes(page.canonical)), sitemapUrls.join(", "));
   add(checks, "sitemap-absolute-urls", sitemapUrls.length > 0 && sitemapUrls.every((url) => url.startsWith(canonicalRoot)), `${sitemapUrls.length} absolute URL(s)`);
+  const lastmods = [...sitemap.matchAll(/<lastmod>([^<]+)<\/lastmod>/g)].map((match) => match[1]);
+  add(checks, "sitemap-lastmod", lastmods.length === sitemapUrls.length && lastmods.every((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)) && !/<changefreq>|<priority>/.test(sitemap), `${new Set(lastmods).size} distinct lastmod date(s); no changefreq/priority`);
+
+  const packageVersion = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8")).version;
+  const releaseJson = JSON.parse(await fs.readFile(path.join(siteRoot, "release.json"), "utf8"));
+  const staleVersions = [];
+  const softwareVersions = (html) => [...html.matchAll(/"softwareVersion":\s*"([^"]+)"/g)].map((match) => match[1]);
+  for (const name of ["home", "mcp"]) {
+    const versions = softwareVersions(htmlByPage.get(name));
+    if (!versions.length || versions.some((value) => value !== packageVersion)) staleVersions.push(`${name} softwareVersion ${versions.join("/") || "missing"}`);
+  }
+  if (releaseJson.version !== packageVersion) staleVersions.push(`release.json ${releaseJson.version}`);
+  if (!htmlByPage.get("mcp-file-manager").includes(`releases/tag/v${packageVersion}`)) staleVersions.push("mcp-file-manager MCPB link");
+  const releaseTags = (text) => [...text.matchAll(/releases\/(?:tag|download)\/v(\d+\.\d+\.\d+)/g)].map((match) => match[1]);
+  for (const [label, text] of [["home", htmlByPage.get("home")], ["llms.txt", await fs.readFile(path.join(siteRoot, "llms.txt"), "utf8")]]) {
+    const tags = releaseTags(text);
+    if (!tags.length || tags.some((value) => value !== packageVersion)) staleVersions.push(`${label} release links ${[...new Set(tags)].join("/") || "missing"}`);
+  }
+  const fullVersion = /Current public version: (\d+\.\d+\.\d+)/.exec(await fs.readFile(path.join(siteRoot, "llms-full.txt"), "utf8"))?.[1];
+  if (fullVersion !== packageVersion) staleVersions.push(`llms-full.txt ${fullVersion || "missing"}`);
+  add(checks, "release-version-sync", staleVersions.length === 0, staleVersions.join("; ") || `All published version strings match ${packageVersion}`);
+
+  const generatedMeta = pages.filter((page) => !["home", "mcp"].includes(page.name)).filter((page) => {
+    const html = htmlByPage.get(page.name);
+    return !(html.includes('<meta property="og:image:width" content="1440" />') && html.includes('<meta property="og:image:height" content="900" />') &&
+      html.includes('<meta name="twitter:card" content="summary_large_image" />') && html.includes(`"isPartOf":{"@id":"${canonicalRoot}#website"}`));
+  }).map((page) => page.name);
+  add(checks, "generated-social-meta", generatedMeta.length === 0, generatedMeta.join(", ") || "Image size, large card, and WebSite link present on generated pages");
 
   const llms = await fs.readFile(path.join(siteRoot, "llms.txt"), "utf8");
   const llmsFull = await fs.readFile(path.join(siteRoot, "llms-full.txt"), "utf8");
@@ -193,6 +221,16 @@ async function main() {
         add(checks, `${pageSpec.name}-${viewport.name}-h1`, snapshot.h1 === pageSpec.h1, snapshot.h1 || "missing");
         add(checks, `${pageSpec.name}-${viewport.name}-overflow`, snapshot.scrollWidth <= snapshot.clientWidth + 1, `${snapshot.scrollWidth}/${snapshot.clientWidth}px`);
         add(checks, `${pageSpec.name}-${viewport.name}-images`, snapshot.brokenImages.length === 0, snapshot.brokenImages.join(", ") || "All loaded images valid");
+        if (viewport.name === "mobile") {
+          const toggle = page.locator("[data-nav-toggle]");
+          let navigable = false;
+          if (await toggle.isVisible().catch(() => false)) {
+            await toggle.click();
+            navigable = (await toggle.getAttribute("aria-expanded")) === "true" && (await page.locator("[data-nav] a").first().isVisible());
+            await page.keyboard.press("Escape");
+          }
+          add(checks, `${pageSpec.name}-mobile-navigation`, navigable, navigable ? "Menu toggle opens the primary navigation" : "No working mobile navigation");
+        }
         if (pageSpec.name === "mcp") {
           add(checks, `mcp-${viewport.name}-proof-content`, snapshot.visibleText.includes("Yes, this is valuable as MCP.") && snapshot.visibleText.includes("Proved against PowerShell."), "Direct answer and evidence are crawlable text");
         }
