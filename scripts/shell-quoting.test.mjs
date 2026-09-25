@@ -44,7 +44,7 @@ before(async () => {
   });
   const constants = ["powerShellUtf8Prelude", "processCloseGraceMs"].map((name) => topLevelConst(serverSource, name));
   const functions = [
-    "sanitizeCommand", "powerShellUtf8Output", "runPowerShellPayload", "spawnDetachedStarted", "cmdCommandLine",
+    "isStateRecord", "sanitizeCommand", "powerShellUtf8Output", "runPowerShellPayload", "spawnDetachedStarted", "cmdCommandLine",
     "launchDetached", "windowsTerminalDirectoryArguments", "killProcessTree", "boundedOutputCollector", "runProcess",
     "shellQuote", "applyCommandTemplate", "limitedAppend", "runExternalCommand"
   ].map((name) => topLevelFunction(serverSource, name));

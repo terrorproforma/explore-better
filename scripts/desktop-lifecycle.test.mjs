@@ -294,14 +294,15 @@ function nativeCleanupHarness({ stateReady = Promise.resolve(), killError = null
   server.listen = () => { server.listening = true; calls.push("http-opened"); queueMicrotask(() => server.emit("listening")); };
   server.close = callback => { server.listening = false; calls.push("http-closed"); callback(); };
   const context = { server, nativeFilesystemHelperPath: () => "fixture-helper-never-executed",
-    readCachedState: () => stateReady, syncBackgroundIndexWatchersFromState: async () => {},
+    readCachedState: () => stateReady, syncBackgroundIndexWatchersFromState: async () => {}, scheduleCacheMaintenance() {},
     monotonicMs: () => 0, host: "fixture", port: 0, console: { log() {}, warn() {} },
     setTimeout(callback) { const id = {}; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
     spawn() {
       const child = new EventEmitter();
-      Object.assign(child, { exitCode: null, signalCode: null, stdout: new EventEmitter(), stderr: new EventEmitter(), kills: 0,
-        stdin: { destroyed: false, end() { calls.push("helper-input-ended"); } },
+      const stream = () => Object.assign(new EventEmitter(), { setEncoding() {} });
+      Object.assign(child, { exitCode: null, signalCode: null, stdout: stream(), stderr: stream(), kills: 0,
+        stdin: Object.assign(new EventEmitter(), { destroyed: false, end() { calls.push("helper-input-ended"); } }),
         kill() { child.kills++; if (killError) throw killError; return true; },
         finish() { child.exitCode = 0; child.emit("exit", 0); child.emit("close", 0); } });
       children.push(child);
