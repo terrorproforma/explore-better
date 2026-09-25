@@ -256,6 +256,25 @@ try {
     const description = await ui(page, { type: "describe", request: { type: "semantic", actionId: "tab.select", pane: "left", inputs: { index: 1 } } });
     assert.ok(description.paths.includes(target), JSON.stringify(description));
   });
+  await test("tab-group-restore-disposes-replaced-terminals", async page => {
+    await page.locator('[data-terminal-toggle="left"]').click();
+    await page.waitForFunction(() => window.__terminal.creates === 1);
+    await view(page, "tabGroups"); await page.locator("#tab-group-name").fill("Async fixture group"); await submit(page, "tab-group");
+    await page.locator("[data-tab-group-restore]").first().click();
+    await page.waitForFunction(() => window.__terminal.disposes.includes("fixture-1"));
+    await page.waitForFunction(() => window.__terminal.creates === 2);
+  });
+  await test("basket-copy-refuses-virtual-view-target", async page => {
+    const copies = [];
+    await page.route("**/api/copy", async route => { copies.push(route.request().postDataJSON()); await route.fulfill({ json: { copied: [] } }); });
+    await select(page, "alpha.txt"); await view(page, "basket");
+    await page.locator('[data-basket-action="add"]').click();
+    await page.locator('[data-basket-action="open"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-list="left"]')?.textContent.includes("alpha.txt"));
+    await page.locator('[data-basket-action="copy"]').click();
+    await page.waitForFunction(() => /Open a folder to copy basket items into/.test(document.getElementById("toast")?.textContent || ""));
+    assert.equal(copies.length, 0, JSON.stringify(copies));
+  });
   const source = await fs.readFile(path.join(root, "public", "app.js"), "utf8");
   try {
     const start = source.indexOf("function queueEarlyTerminalEvent("), end = source.indexOf("function handleTerminalEvent(", start);
