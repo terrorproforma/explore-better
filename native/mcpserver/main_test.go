@@ -384,6 +384,25 @@ func TestServedProtocolVersionsMatchContractAndSDK(t *testing.T) {
 			t.Fatalf("protocol version %q is not a handshake version supported by the SDK", v)
 		}
 	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, &mcp.ServerOptions{SupportedProtocolVersions: handshakeProtocolVersions})
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+	params := serverSession.InitializeParams()
+	if params == nil || params.ProtocolVersion != handshakeProtocolVersions[0] || params.ClientInfo == nil {
+		t.Fatalf("a current SDK client did not negotiate the handshake protocol: %+v", params)
+	}
 }
 
 func TestRootsCacheRefreshesOnlyAfterInvalidation(t *testing.T) {
