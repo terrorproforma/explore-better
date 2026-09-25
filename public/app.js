@@ -6513,28 +6513,11 @@ async function sortPaneByColumn(paneName, sortKey, direction = null) {
   scheduleStateSave();
 }
 
-function fileRenderLimits(viewMode) {
-  if (viewMode === "tiles") {
-    return { initial: 180, chunk: 180 };
-  }
-  if (viewMode === "compact") {
-    return { initial: 900, chunk: 900 };
-  }
-  return { initial: 650, chunk: 650 };
-}
-
 function renderEntriesMarkup(entries, paneName, tab, renderer, start = 0, end = entries.length) {
   return entries
     .slice(start, end)
     .map((entry, offset) => renderer(entry, paneName, tab, start + offset, entries.length))
     .join("");
-}
-
-function renderFileRenderProgress(rendered, total) {
-  return `<div class="file-render-progress" data-render-progress>
-    <strong>${rendered.toLocaleString()}</strong>
-    <span>/ ${total.toLocaleString()} rendered</span>
-  </div>`;
 }
 
 function virtualRowHeight(viewMode) {
@@ -6781,40 +6764,6 @@ function unobserveLazyThumbnailImages(paneName, root) {
     return;
   }
   root.querySelectorAll(".tile-thumb-image[data-thumb-src]").forEach((image) => observer.unobserve(image));
-}
-
-function appendEntriesMarkup(list, html) {
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  const images = [...template.content.querySelectorAll(".tile-thumb-image[data-thumb-src]")];
-  list.append(template.content);
-  return images;
-}
-
-function scheduleProgressiveFileRender(paneName, token, entries, renderer, startIndex, chunkSize) {
-  const list = document.querySelector(`[data-list="${paneName}"]`);
-  const tab = tabOf(paneName);
-  if (!list || app.renderTokens[paneName] !== token) {
-    return;
-  }
-  const nextIndex = Math.min(startIndex + chunkSize, entries.length);
-  const progress = list.querySelector("[data-render-progress]");
-  progress?.remove();
-  const lazyImages = appendEntriesMarkup(
-    list,
-    renderEntriesMarkup(entries, paneName, tab, renderer, startIndex, nextIndex)
-  );
-  hydrateLazyThumbnailImages(paneName, list, lazyImages);
-  const focusedPath = tab.focusedPath;
-  const focusedInChunk =
-    focusedPath && entries.slice(startIndex, nextIndex).some((entry) => samePath(entry.path, focusedPath));
-  if (focusedInChunk) {
-    scrollFocusedEntryIntoView(paneName);
-  }
-  if (nextIndex < entries.length) {
-    list.insertAdjacentHTML("beforeend", renderFileRenderProgress(nextIndex, entries.length));
-    requestAnimationFrame(() => scheduleProgressiveFileRender(paneName, token, entries, renderer, nextIndex, chunkSize));
-  }
 }
 
 const paneTabOverflowFrames = { left: 0, right: 0 };
@@ -7068,18 +7017,10 @@ function renderPane(paneName) {
     }
     return;
   }
-  const limits = fileRenderLimits(tab.viewMode);
-  const initialLimit = Math.min(limits.initial, entries.length);
-  list.innerHTML =
-    renderEntriesMarkup(entries, paneName, tab, renderer, 0, initialLimit) +
-    (initialLimit < entries.length ? renderFileRenderProgress(initialLimit, entries.length) : "");
+  // Lists above virtualRenderThreshold are virtualized, so the rest fit in one pass.
+  list.innerHTML = renderEntriesMarkup(entries, paneName, tab, renderer);
   syncPaneActiveDescendant(paneName);
   hydrateLazyThumbnails(paneName);
-  if (initialLimit < entries.length) {
-    requestAnimationFrame(() =>
-      scheduleProgressiveFileRender(paneName, renderToken, entries, renderer, initialLimit, limits.chunk)
-    );
-  }
   if (paneName === app.activePane) {
     updateSelectionReadout();
   }
@@ -7398,6 +7339,15 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
   const linkedPreviousPath = options.linkedPreviousPath || previousPath;
   const previousSelected = new Set(tab.selected || []);
   const previousFocusedPath = tab.focusedPath;
+  const activityState = app.paneLoads[paneName];
+  const previousActivity = {
+    phase: activityState.phase,
+    text: activityState.text,
+    detail: activityState.detail,
+    count: activityState.count,
+    total: activityState.total,
+    wallMs: activityState.wallMs
+  };
   const load = beginPaneLoad(paneName, {
     detail: `${paneName === "left" ? "Left" : "Right"} pane loading ${resolvedTargetPath}`
   });
@@ -7465,6 +7415,9 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
       return false;
     }
     if (options.autoRefresh && paneEntryInteractionRecent(paneName)) {
+      // Skipped refresh: put the badge back; finishPaneLoad re-renders it.
+      const wasBusy = previousActivity.phase === "loading" || previousActivity.phase === "hydrating";
+      Object.assign(app.paneLoads[paneName], wasBusy ? { phase: "idle", text: "Ready", detail: "Ready" } : previousActivity);
       return false;
     }
     const partial = isWindowedListing(data);
@@ -7797,6 +7750,19 @@ function updateSizeAnalysisActionState() {
   }
 }
 
+function discardPartialSizeAnalysisReport() {
+  // A cancelled or failed stream leaves its last progress snapshot behind; it
+  // must not be treated as a finished report for this path.
+  if (!app.sizeAnalysis.report?.partial) {
+    return;
+  }
+  app.sizeAnalysis.report = null;
+  app.sizeAnalysis.treemapRects = [];
+  app.sizeAnalysis.treemapHover = null;
+  app.sizeAnalysis.treemapSelection = null;
+  app.sizeAnalysis.treemapFocusPath = "";
+}
+
 function cancelSizeAnalysis(message = "Scan canceled") {
   const controller = app.sizeAnalysis.controller;
   const wasLoading = app.sizeAnalysis.loading === true;
@@ -7806,6 +7772,7 @@ function cancelSizeAnalysis(message = "Scan canceled") {
   if (controller && !controller.signal.aborted) {
     controller.abort();
   }
+  discardPartialSizeAnalysisReport();
   renderSizeAnalysisDialog(message);
   if (wasLoading) {
     setStatus(message);
@@ -8225,7 +8192,7 @@ function renderSizeAnalysisViewState() {
 }
 
 function queueSizeAnalysisTreemapDraw() {
-  requestAnimationFrame(() => requestAnimationFrame(() => drawSizeTreemap(app.sizeAnalysis.report)));
+  requestAnimationFrame(scheduleSizeAnalysisTreemapDraw);
 }
 
 function setSizeAnalysisViewMode(mode) {
@@ -8402,14 +8369,16 @@ function renderSizeAnalysisDialog(message = "") {
   extensions.innerHTML = topExtensions.length
     ? topExtensions.slice(0, 9).map((item) => sizeAnalysisExtensionRow(item, totalBytes)).join("")
     : `<div class="empty-state">No extensions</div>`;
-  requestAnimationFrame(() => drawSizeTreemap(report));
+  scheduleSizeAnalysisTreemapDraw();
 }
 
 function openSizeAnalysisDialog(paneName = app.activePane, viewMode = app.sizeAnalysis.viewMode) {
   app.sizeAnalysis.paneName = paneName;
   app.sizeAnalysis.viewMode = viewMode === "map" ? "map" : "overview";
   const defaultPath = sizeAnalysisDefaultPath(paneName);
-  const hasCurrentReport = Boolean(app.sizeAnalysis.report?.path && samePath(app.sizeAnalysis.report.path, defaultPath));
+  const hasCurrentReport = Boolean(
+    app.sizeAnalysis.report?.path && !app.sizeAnalysis.report.partial && samePath(app.sizeAnalysis.report.path, defaultPath)
+  );
   if (app.sizeAnalysis.report?.path && !samePath(app.sizeAnalysis.report.path, defaultPath)) {
     app.sizeAnalysis.report = null;
     app.sizeAnalysis.treemapRects = [];
@@ -8475,6 +8444,7 @@ async function runSizeAnalysis() {
     }
     app.sizeAnalysis.controller = null;
     app.sizeAnalysis.loading = false;
+    discardPartialSizeAnalysisReport();
     if (isAbortError(error)) {
       renderSizeAnalysisDialog("Scan canceled");
       setStatus("Size analysis canceled");
@@ -8499,21 +8469,27 @@ function sizeAnalysisTreemapItems(report) {
     .sort((left, right) => sizeAnalysisTreemapValue(right) - sizeAnalysisTreemapValue(left));
 }
 
-function sizeAnalysisPathContains(folderPath, itemPath) {
-  const folder = normalizedPathKey(folderPath);
-  const item = normalizedPathKey(itemPath);
-  if (!folder || !item) {
-    return false;
+let sizeAnalysisTreemapHierarchyCache = { report: null, sizeMode: "", colorMode: "", hierarchy: null };
+
+// The hierarchy is treated as read-only by its consumers, so one build per
+// (report, sizeMode, colorMode) serves navigation, hover redraws and focus.
+function sizeAnalysisTreemapHierarchy(report) {
+  const cache = sizeAnalysisTreemapHierarchyCache;
+  const { sizeMode, colorMode } = app.sizeAnalysis;
+  if (cache.report === report && cache.sizeMode === sizeMode && cache.colorMode === colorMode) {
+    return cache.hierarchy;
   }
-  return item === folder || item.startsWith(`${folder}\\`) || item.startsWith(`${folder}/`);
+  const hierarchy = buildSizeAnalysisTreemapHierarchy(report);
+  sizeAnalysisTreemapHierarchyCache = { report, sizeMode, colorMode, hierarchy };
+  return hierarchy;
 }
 
-function sizeAnalysisTreemapHierarchy(report) {
+function buildSizeAnalysisTreemapHierarchy(report) {
   const sourceRoot = report?.tree;
   if (!sourceRoot || sizeAnalysisTreemapTotal(report) <= 0) {
     return null;
   }
-  const folderNodes = [];
+  const foldersByKey = new Map();
   const cloneFolder = (source, parent = null) => {
     const node = {
       name: source.name || source.path || "Folder",
@@ -8529,26 +8505,45 @@ function sizeAnalysisTreemapHierarchy(report) {
       virtualRemainder: false,
       folderChildren: [],
       fileChildren: [],
-      children: []
+      children: [],
+      mergedFolders: null
     };
-    folderNodes.push(node);
+    // Parents are registered before their children, so a folder keeps its key
+    // over the server's "Other" bucket, which reuses the parent's path.
+    const key = normalizedPathKey(node.path);
+    if (!foldersByKey.has(key)) foldersByKey.set(key, node);
     node.folderChildren = (Array.isArray(source.children) ? source.children : [])
       .filter((child) => sizeAnalysisTreemapValue(child) > 0)
       .map((child) => cloneFolder(child, node));
+    node.mergedFolders = node.folderChildren.find((child) => normalizedPathKey(child.path) === key) || null;
     return node;
   };
   const root = cloneFolder(sourceRoot);
-  for (const file of sizeAnalysisTreemapItems(report)) {
-    const fileParent = file.parent || parentPathOf(file.path || "");
-    let owner = root;
-    for (const folder of folderNodes) {
-      if (
-        sizeAnalysisPathContains(folder.path, fileParent) &&
-        normalizedPathKey(folder.path).length > normalizedPathKey(owner.path).length
-      ) {
-        owner = folder;
+  const rootKey = normalizedPathKey(root.path);
+  const ownerForParent = (fileParent) => {
+    let current = fileParent;
+    let key = normalizedPathKey(current);
+    let descended = false;
+    while (key) {
+      const folder = foldersByKey.get(key);
+      if (folder) {
+        // A file below an unlisted subfolder of a folder that has an "Other"
+        // bucket lives in one of the merged folders; nesting it there keeps
+        // its bytes from being counted twice.
+        return descended && folder.mergedFolders ? folder.mergedFolders : folder;
       }
+      if (key === rootKey) break;
+      const next = parentPathOf(current);
+      const nextKey = normalizedPathKey(next);
+      if (!nextKey || nextKey === key) break;
+      current = next;
+      key = nextKey;
+      descended = true;
     }
+    return root;
+  };
+  for (const file of sizeAnalysisTreemapItems(report)) {
+    const owner = ownerForParent(file.parent || parentPathOf(file.path || ""));
     file.mapSize = sizeAnalysisTreemapValue(file);
     owner.fileChildren.push(file);
   }
@@ -8617,6 +8612,7 @@ function sizeAnalysisTreemapHierarchy(report) {
     );
     delete folder.folderChildren;
     delete folder.fileChildren;
+    delete folder.mergedFolders;
   };
   finishFolder(root);
   return root;
@@ -8908,14 +8904,14 @@ function setSizeAnalysisTreemapHover(item) {
   }
   app.sizeAnalysis.treemapHover = item || null;
   setSizeAnalysisMapDetail(item || null);
-  requestAnimationFrame(() => drawSizeTreemap(app.sizeAnalysis.report));
+  scheduleSizeAnalysisTreemapDraw();
 }
 
 function setSizeAnalysisTreemapSelection(item) {
   app.sizeAnalysis.treemapSelection = item || null;
   setSizeAnalysisMapDetail(app.sizeAnalysis.treemapHover || app.sizeAnalysis.treemapSelection);
   renderSizeAnalysisMapNavigation(app.sizeAnalysis.report);
-  requestAnimationFrame(() => drawSizeTreemap(app.sizeAnalysis.report));
+  scheduleSizeAnalysisTreemapDraw();
 }
 
 function updateSizeAnalysisTreemapHover(event) {
@@ -8959,6 +8955,19 @@ async function openSizeAnalysisTreemapItem(item = app.sizeAnalysis.treemapHover)
   }
 }
 
+let sizeAnalysisTreemapLayoutCache = { hierarchy: null, focused: null, width: 0, height: 0, rects: null, treemapRects: null };
+let sizeAnalysisTreemapDrawFrame = 0;
+
+function scheduleSizeAnalysisTreemapDraw() {
+  if (sizeAnalysisTreemapDrawFrame) {
+    return;
+  }
+  sizeAnalysisTreemapDrawFrame = requestAnimationFrame(() => {
+    sizeAnalysisTreemapDrawFrame = 0;
+    drawSizeTreemap(app.sizeAnalysis.report);
+  });
+}
+
 function drawSizeTreemap(report) {
   const canvas = document.getElementById("size-analysis-treemap");
   if (!canvas) {
@@ -8971,20 +8980,37 @@ function drawSizeTreemap(report) {
   const availableHeight = panel ? panel.clientHeight - (head?.offsetHeight || 0) - (detailRow?.offsetHeight || 0) - 18 : 0;
   const height = Math.max(160, Math.min(560, availableHeight || Math.round(width * 0.36)));
   const ratio = window.devicePixelRatio || 1;
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
-  canvas.width = Math.round(width * ratio);
-  canvas.height = Math.round(height * ratio);
+  // Assigning canvas.width reallocates the backing store even when unchanged,
+  // so only touch the size when it actually differs (hover redraws reuse it).
+  const cssWidth = `${width}px`;
+  const cssHeight = `${height}px`;
+  if (canvas.style.width !== cssWidth) canvas.style.width = cssWidth;
+  if (canvas.style.height !== cssHeight) canvas.style.height = cssHeight;
+  const pixelWidth = Math.round(width * ratio);
+  const pixelHeight = Math.round(height * ratio);
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
   const ctx = canvas.getContext("2d");
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.globalAlpha = 1;
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "#101716";
   ctx.fillRect(0, 0, width, height);
   const hierarchy = sizeAnalysisTreemapHierarchy(report);
   const focused = sizeAnalysisTreemapFocusNode(hierarchy);
-  renderSizeAnalysisMapNavigation(report, hierarchy);
+  const layoutCache = sizeAnalysisTreemapLayoutCache;
+  const layoutCurrent =
+    layoutCache.hierarchy === hierarchy &&
+    layoutCache.focused === focused &&
+    layoutCache.width === width &&
+    layoutCache.height === height &&
+    layoutCache.treemapRects === app.sizeAnalysis.treemapRects;
+  if (!layoutCurrent) {
+    renderSizeAnalysisMapNavigation(report, hierarchy);
+  }
   const measuredTotal = sizeAnalysisTreemapTotal(report);
   if (!focused?.children?.length || measuredTotal <= 0) {
+    sizeAnalysisTreemapLayoutCache = { hierarchy: null, focused: null, width: 0, height: 0, rects: null, treemapRects: null };
     app.sizeAnalysis.treemapRects = [];
     ctx.fillStyle = "#dbe6e1";
     ctx.font = "600 14px Segoe UI, sans-serif";
@@ -8997,7 +9023,25 @@ function drawSizeTreemap(report) {
     );
     return;
   }
-  const rects = splitHierarchicalSizeTreemap(focused.children, { x: 0, y: 0, w: width, h: height });
+  const rects = layoutCurrent
+    ? layoutCache.rects
+    : splitHierarchicalSizeTreemap(focused.children, { x: 0, y: 0, w: width, h: height });
+  if (!layoutCurrent) {
+    layoutSizeAnalysisTreemapRects(report, rects);
+    sizeAnalysisTreemapLayoutCache = {
+      hierarchy,
+      focused,
+      width,
+      height,
+      rects,
+      treemapRects: app.sizeAnalysis.treemapRects
+    };
+  }
+  describeSizeAnalysisTreemap(canvas, focused);
+  paintSizeAnalysisTreemapRects(ctx, rects);
+}
+
+function layoutSizeAnalysisTreemapRects(report, rects) {
   const hoverKey = app.sizeAnalysis.treemapHover?.key || "";
   const selectedKey = app.sizeAnalysis.treemapSelection?.key || "";
   app.sizeAnalysis.treemapRects = rects.map(({ item, rect, depth }) => ({
@@ -9028,6 +9072,9 @@ function drawSizeTreemap(report) {
     app.sizeAnalysis.treemapSelection = null;
     setSizeAnalysisMapDetail(null);
   }
+}
+
+function describeSizeAnalysisTreemap(canvas, focused) {
   const groupCount = app.sizeAnalysis.treemapRects.filter((item) => item.treemapGroup).length;
   const mappedFileCount = app.sizeAnalysis.treemapRects.length - groupCount;
   canvas.setAttribute(
@@ -9040,6 +9087,9 @@ function drawSizeTreemap(report) {
   if (mapCount) {
     mapCount.textContent = `${groupCount.toLocaleString()} folders / ${mappedFileCount.toLocaleString()} files`;
   }
+}
+
+function paintSizeAnalysisTreemapRects(ctx, rects) {
   rects.forEach((item, index) => {
     const { item: node, rect, depth } = item;
     if (!node || rect.w < 0.7 || rect.h < 0.7) return;
@@ -9106,8 +9156,17 @@ function drawSizeTreemap(report) {
   });
 }
 
+let clipboardPathKeyCache = { paths: null, keys: null };
+
 function clipboardHasPath(itemPath) {
-  return app.fileClipboard.mode === "move" && app.fileClipboard.paths.some((pathItem) => samePath(pathItem, itemPath));
+  if (app.fileClipboard.mode !== "move") {
+    return false;
+  }
+  const paths = app.fileClipboard.paths;
+  if (clipboardPathKeyCache.paths !== paths) {
+    clipboardPathKeyCache = { paths, keys: new Set(paths.map(normalizedPathKey)) };
+  }
+  return clipboardPathKeyCache.keys.has(normalizedPathKey(itemPath));
 }
 
 function emptyFileClipboard() {
@@ -9276,8 +9335,27 @@ function copyNamesTargetsForPane(paneName = app.activePane) {
   const tab = tabOf(paneName);
   const selection = selectedPaths(paneName);
   const paths = selection.length ? selection : [tab.path].filter(Boolean);
+  // Selected paths are normally the entries' own path strings, so an exact
+  // lookup covers Select All in huge folders; normalized keys are only built
+  // if some path does not match verbatim.
+  const indexEntries = (keyOf) => {
+    const index = new Map();
+    for (const item of tab.entries) {
+      const key = keyOf(item.path);
+      if (!index.has(key)) index.set(key, item);
+    }
+    return index;
+  };
+  const exactEntries = indexEntries((itemPath) => itemPath);
+  let normalizedEntries = null;
+  const entryFor = (itemPath) => {
+    const exact = exactEntries.get(itemPath);
+    if (exact) return exact;
+    normalizedEntries ||= indexEntries(normalizedPathKey);
+    return normalizedEntries.get(normalizedPathKey(itemPath));
+  };
   return paths.map((itemPath) => {
-    const entry = tab.entries.find((item) => samePath(item.path, itemPath));
+    const entry = entryFor(itemPath);
     return {
       path: itemPath,
       name: entry?.name || labelForPath(itemPath),
@@ -9614,17 +9692,26 @@ async function runChecksumsReport() {
     return showToast("Select files first");
   }
   renderChecksumsDialog("Hashing...");
+  const session = app.checksums;
+  const optionsVersion = session.optionsVersion || 0;
   const report = await request("/api/checksums", {
     method: "POST",
     body: JSON.stringify({
-      paths: app.checksums.targets.map((target) => target.path),
+      paths: session.targets.map((target) => target.path),
       ...checksumOptionsFromForm()
     })
   });
-  app.checksums.report = report;
+  if (!checksumSessionCurrent(session, optionsVersion)) {
+    return null;
+  }
+  session.report = report;
   renderChecksumsDialog();
   setStatus(checksumSummaryText(report));
   return report;
+}
+
+function checksumSessionCurrent(session, optionsVersion) {
+  return app.checksums === session && (session.optionsVersion || 0) === optionsVersion;
 }
 
 async function copyChecksumManifest() {
@@ -9670,6 +9757,8 @@ async function verifyChecksumManifest() {
     return showToast("Select one checksum manifest file first");
   }
   renderChecksumsDialog("Verifying...");
+  const session = app.checksums;
+  const optionsVersion = session.optionsVersion || 0;
   const report = await request("/api/checksums/verify", {
     method: "POST",
     body: JSON.stringify({
@@ -9677,7 +9766,10 @@ async function verifyChecksumManifest() {
       ...checksumOptionsFromForm()
     })
   });
-  app.checksums.report = report;
+  if (!checksumSessionCurrent(session, optionsVersion)) {
+    return null;
+  }
+  session.report = report;
   renderChecksumsDialog();
   setStatus(checksumSummaryText(report));
   return report;
@@ -9686,6 +9778,7 @@ async function verifyChecksumManifest() {
 function resetChecksumReportForOptions() {
   if (app.checksums) {
     app.checksums.report = null;
+    app.checksums.optionsVersion = (app.checksums.optionsVersion || 0) + 1;
     renderChecksumsDialog("Options changed");
   }
 }
@@ -9747,19 +9840,18 @@ function startNativeFileDrag(event, paths) {
   }
 }
 
-function selectedPathsForDrag(paneName, entryPath, row) {
+function selectedPathsForDrag(paneName, entryPath) {
   const tab = tabOf(paneName);
   app.activePane = paneName;
   if (!tab.selected.has(entryPath)) {
     tab.selected = new Set([entryPath]);
     tab.focusedPath = entryPath;
     tab.anchorPath = entryPath;
-    row?.classList.add("selected", "focused");
-    row?.setAttribute("aria-selected", "true");
   } else {
     tab.focusedPath = entryPath;
     tab.anchorPath = entryPath;
   }
+  updatePaneSelectionDom(paneName);
   updateActivePaneChrome();
   renderInspector();
   return selectedPaths(paneName);
@@ -9840,7 +9932,7 @@ function handleEntryDragStart(event) {
     return;
   }
   hideContextMenu();
-  const paths = selectedPathsForDrag(paneName, row.dataset.entryPath, row);
+  const paths = selectedPathsForDrag(paneName, row.dataset.entryPath);
   if (!paths.length) {
     event.preventDefault();
     return;
@@ -9861,6 +9953,14 @@ function handleEntryDragStart(event) {
   document.body.classList.add("is-dragging-files");
   updateSelectionReadout();
   const nativeDragStarted = startNativeFileDrag(event, paths);
+  if (nativeDragStarted) {
+    // The HTML drag was cancelled in favour of an OS drag, so no dragend will
+    // arrive to clear this transfer. Drops back into the app arrive as Windows
+    // files and go through pathsFromExternalDrop; remember the source pane so
+    // a move still refreshes it.
+    app.nativeDragSource = { paneName, paths };
+    clearDragTransfer({ keepStatus: true });
+  }
   setStatus(
     nativeDragStarted
       ? `Drag ${itemWord(paths.length, "item")}: drop in Explore Better or Windows`
@@ -10075,6 +10175,15 @@ async function handleExternalFileDrop(event, paneName) {
     setStatus("Drop paths unavailable");
     return;
   }
+  const nativeSource = app.nativeDragSource;
+  app.nativeDragSource = null;
+  const droppedKeys = new Set(paths.map(normalizedPathKey));
+  const sourcePane =
+    nativeSource &&
+    nativeSource.paths.length === paths.length &&
+    nativeSource.paths.every((itemPath) => droppedKeys.has(normalizedPathKey(itemPath)))
+      ? nativeSource.paneName
+      : null;
   const reason = invalidDropReason({ paths }, targetDir, mode);
   if (reason) {
     showToast(reason);
@@ -10085,6 +10194,7 @@ async function handleExternalFileDrop(event, paneName) {
     paths: pathsForDrop({ paths }, targetDir, mode),
     mode,
     targetDir,
+    sourcePane,
     targetPane: paneName
   });
 }
@@ -10451,7 +10561,15 @@ function parseSelectSizeValue(value) {
 }
 
 function entryComparableSize(entry) {
-  const value = Number(entry?.size);
+  // Unsized folders (and missing sizes) are unknown, not 0 bytes.
+  if (entry?.isDirectory && !entry.folderSizeKnown) {
+    return null;
+  }
+  const raw = entry?.size;
+  if (raw === null || raw === undefined || raw === "") {
+    return null;
+  }
+  const value = Number(raw);
   return Number.isFinite(value) ? value : null;
 }
 
@@ -10949,9 +11067,16 @@ function selectionSetDraftFromPane(paneName = app.activePane, existing = null) {
   };
 }
 
-function selectionSetStats(selectionSet = currentSelectionSet(), paneName = app.activePane) {
-  const entries = new Map(tabOf(paneName).entries.map((entry) => [normalizedPathKey(entry.path), entry]));
-  const selected = new Set([...tabOf(paneName).selected].map(normalizedPathKey));
+function selectionSetPaneIndex(paneName = app.activePane) {
+  const tab = tabOf(paneName);
+  return {
+    entries: new Set(tab.entries.map((entry) => normalizedPathKey(entry.path))),
+    selected: new Set([...tab.selected].map(normalizedPathKey))
+  };
+}
+
+function selectionSetStats(selectionSet = currentSelectionSet(), paneName = app.activePane, paneIndex = selectionSetPaneIndex(paneName)) {
+  const { entries, selected } = paneIndex;
   const paths = selectionSet?.paths || [];
   const present = paths.filter((itemPath) => entries.has(normalizedPathKey(itemPath)));
   const selectedPresent = present.filter((itemPath) => selected.has(normalizedPathKey(itemPath)));
@@ -10992,16 +11117,17 @@ function renderSelectionSetsDialog(message = null) {
     app.activeSelectionSetId = sets[0].id;
   }
   const active = currentSelectionSet();
+  const paneIndex = selectionSetPaneIndex(app.activePane);
   const summary = document.getElementById("selection-set-summary");
   if (summary) {
-    const stats = active ? selectionSetStats(active) : null;
+    const stats = active ? selectionSetStats(active, app.activePane, paneIndex) : null;
     summary.textContent =
       message || (active ? `${stats.present}/${stats.total} visible / ${sets.length} saved` : `${sets.length} saved`);
   }
   list.innerHTML = sets.length
     ? sets
         .map((selectionSet) => {
-          const stats = selectionSetStats(selectionSet);
+          const stats = selectionSetStats(selectionSet, app.activePane, paneIndex);
           const selected = selectionSet.id === active?.id ? " active" : "";
           return `<button type="button" class="${selected}" data-select-selection-set="${escapeHtml(selectionSet.id)}">
             <span>${escapeHtml(`${stats.present}/${stats.total}`)}</span>
@@ -11021,8 +11147,7 @@ function renderSelectionSetsDialog(message = null) {
     detail.innerHTML = `<div class="empty-state">Save the current pane selection to reuse it later.</div>`;
     return;
   }
-  const currentEntries = new Map(tabOf(app.activePane).entries.map((entry) => [normalizedPathKey(entry.path), entry]));
-  const currentSelected = new Set([...tabOf(app.activePane).selected].map(normalizedPathKey));
+  const { entries: currentEntries, selected: currentSelected } = paneIndex;
   const rows = (active.items || active.paths.map((itemPath) => ({ path: itemPath, name: labelForPath(itemPath) })))
     .slice(0, 200)
     .map((item, index) => {
@@ -26299,6 +26424,8 @@ function wireEvents() {
 
     const sortButton = event.target.closest("[data-sort]");
     if (sortButton) {
+      // A click that ends a column resize lands on the grip inside the button.
+      if (event.target.closest("[data-column-resize]")) return;
       const paneName = sortButton.dataset.pane;
       await sortPaneByColumn(paneName, sortButton.dataset.sort);
       return;
