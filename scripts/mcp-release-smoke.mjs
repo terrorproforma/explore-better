@@ -108,6 +108,8 @@ try {
     await fs.writeFile(path.join(workflowTemp, name), "Ordinary isolated fixture bytes.\n");
   }
   const releaseResponse = (draft, extra = {}) => ({ status: 200, content: JSON.stringify({ tag_name: tag, draft, ...extra }) });
+  // The tag endpoint only returns published releases, so drafts are found by listing.
+  const listResponse = (...releases) => ({ status: 200, list: true, content: JSON.stringify(releases.map((draft) => ({ tag_name: tag, draft }))) });
   const cases = [
     { name: "guard-missing", step: protection, responses: [{ status: 404 }], calls: ["http:404"] },
     { name: "guard-draft", step: protection, responses: [releaseResponse(true)], calls: ["http:200"] },
@@ -117,16 +119,19 @@ try {
     { name: "guard-transport", step: protection, responses: [{ transportError: true }], calls: ["http:transport"], error: "Fixture transport failure" },
     { name: "guard-wrong-tag", step: protection, responses: [releaseResponse(true, { tag_name: "v9.9.9" })], calls: ["http:200"], error: "invalid or mismatched" },
     { name: "guard-invalid-draft", step: protection, responses: [releaseResponse("true")], calls: ["http:200"], error: "invalid or mismatched" },
-    { name: "create-draft", step: upload, responses: [{ status: 404 }, releaseResponse(true)], calls: ["http:404", "create", "http:200", "upload"] },
-    { name: "create-fails", step: upload, responses: [{ status: 404 }], createExit: 1, calls: ["http:404", "create"], error: "Could not create draft" },
+    { name: "create-draft", step: upload, responses: [{ status: 404 }, listResponse(), { status: 404 }, listResponse(true)], calls: ["http:404", "list:200", "create", "http:404", "list:200", "upload"] },
+    { name: "create-fails", step: upload, responses: [{ status: 404 }, listResponse()], createExit: 1, calls: ["http:404", "list:200", "create"], error: "Could not create draft" },
+    { name: "list-fails", step: upload, responses: [{ status: 404 }, { status: 500, list: true }], calls: ["http:404", "list:500"], error: "Release listing failed" },
+    { name: "duplicate-drafts", step: upload, responses: [{ status: 404 }, listResponse(true, true)], calls: ["http:404", "list:200"], error: "Multiple draft releases" },
+    { name: "existing-draft-listed", step: upload, responses: [{ status: 404 }, listResponse(false, true)], calls: ["http:404", "list:200", "upload"] },
     { name: "upload-forbidden", step: upload, responses: [{ status: 403 }], calls: ["http:403"], error: "HTTP 403" },
     { name: "upload-unavailable", step: upload, responses: [{ status: 503 }], calls: ["http:503"], error: "HTTP 503" },
     { name: "upload-public", step: upload, responses: [releaseResponse(false)], calls: ["http:200"], error: "not a verified draft" },
     { name: "retry-draft", step: upload, responses: [releaseResponse(true)], calls: ["http:200", "upload"] },
     { name: "upload-fails", step: upload, responses: [releaseResponse(true)], uploadExit: 1, calls: ["http:200", "upload"], error: "Could not upload assets" },
-    { name: "published-after-create", step: upload, responses: [{ status: 404 }, releaseResponse(false)], calls: ["http:404", "create", "http:200"], error: "not a verified draft" },
-    { name: "missing-after-create", step: upload, responses: [{ status: 404 }, { status: 404 }], calls: ["http:404", "create", "http:404"], error: "not a verified draft" },
-    { name: "lookup-fails-after-create", step: upload, responses: [{ status: 404 }, { status: 500 }], calls: ["http:404", "create", "http:500"], error: "HTTP 500" },
+    { name: "published-after-create", step: upload, responses: [{ status: 404 }, listResponse(), releaseResponse(false)], calls: ["http:404", "list:200", "create", "http:200"], error: "not a verified draft" },
+    { name: "missing-after-create", step: upload, responses: [{ status: 404 }, listResponse(), { status: 404 }, listResponse()], calls: ["http:404", "list:200", "create", "http:404", "list:200"], error: "not a verified draft" },
+    { name: "lookup-fails-after-create", step: upload, responses: [{ status: 404 }, listResponse(), { status: 500 }], calls: ["http:404", "list:200", "create", "http:500"], error: "HTTP 500" },
     { name: "upload-wrong-tag", step: upload, responses: [releaseResponse(true, { tag_name: "v9.9.9" })], calls: ["http:200"], error: "invalid or mismatched" }
   ];
   for (const fixture of cases) {
@@ -143,14 +148,16 @@ function Write-FixtureTrace($value) {
 }
 function Invoke-WebRequest {
   param($Uri, $Headers, [switch]$SkipHttpErrorCheck, $TimeoutSec, $ErrorAction)
-  if (-not $SkipHttpErrorCheck -or $Uri -ne 'https://api.fixture.invalid/repos/fixture/repo/releases/tags/v1.2.3') { throw 'Unexpected fixture HTTP request.' }
+  $isList = $Uri -eq 'https://api.fixture.invalid/repos/fixture/repo/releases?per_page=100'
+  if (-not $SkipHttpErrorCheck -or ($Uri -ne 'https://api.fixture.invalid/repos/fixture/repo/releases/tags/v1.2.3' -and -not $isList)) { throw 'Unexpected fixture HTTP request.' }
   if ($script:responseIndex -ge $fixture.responses.Count) { throw 'Unexpected extra HTTP request.' }
   $response = $fixture.responses[$script:responseIndex++]
+  if ([bool]$response.list -ne $isList) { throw "Fixture expected a $(if ($response.list) { 'listing' } else { 'tag' }) request but received $Uri." }
   if ($response.transportError) {
     Write-FixtureTrace @{ call = 'http:transport' }
     throw 'Fixture transport failure'
   }
-  Write-FixtureTrace @{ call = "http:$($response.status)" }
+  Write-FixtureTrace @{ call = "$(if ($isList) { 'list' } else { 'http' }):$($response.status)" }
   return [pscustomobject]@{ StatusCode = $response.status; Content = $response.content }
 }
 function gh {
