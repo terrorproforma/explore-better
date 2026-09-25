@@ -400,3 +400,18 @@ test("child backend shutdown IPC waits for cleanup and reports failures through 
     assert.equal(errors.length, fail ? 1 : 0);
   }
 });
+
+test("child backend stops once when its desktop parent disconnects without asking", async () => {
+  const child = new EventEmitter(), exits = [];
+  child.send = () => {};
+  child.exit = code => exits.push(code);
+  let stops = 0;
+  const context = { invokedPath: "fixture", modulePath: "fixture", process: child, console: { error() {} },
+    startServer: async () => {}, stopServer: async () => { stops++; } };
+  vm.runInNewContext(backend.slice(backend.indexOf("if (invokedPath === modulePath) {")), context);
+  child.emit("disconnect");
+  child.emit("message", { type: "explore-better:shutdown" });
+  await tick();
+  assert.equal(stops, 1);
+  assert.deepEqual(exits, [0]);
+});

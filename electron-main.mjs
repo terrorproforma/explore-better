@@ -49,9 +49,29 @@ const appIconPath = app.isPackaged
   : path.join(__dirname, "public", "assets", "app-icon.png");
 const publicUpdateFeedUrl = "https://github.com/terrorproforma/explore-better/releases/latest/download";
 const publicUpdateReleaseUrl = "https://github.com/terrorproforma/explore-better/releases/latest";
+// Installed builds must not let an inherited environment redirect updates;
+// feed overrides are for development and the scripted smoke runs.
+const updateEnvOverridesAllowed = !app.isPackaged || process.argv.includes("--smoke");
+
+function updateFeedOverride(value) {
+  if (!value || !updateEnvOverridesAllowed) return "";
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "https:") return value;
+    if (parsed.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)) return value;
+  } catch {
+    // Invalid feed URLs are ignored below.
+  }
+  console.warn("Ignoring update feed override: it must be an https URL (or http on loopback).");
+  return "";
+}
+
 const updateFeedUrl =
-  process.env.EXPLORE_BETTER_UPDATE_URL || process.env.EB_UPDATE_URL || (app.isPackaged ? publicUpdateFeedUrl : "");
-const updateConfigPath = process.env.EXPLORE_BETTER_UPDATE_CONFIG_PATH || process.env.EB_UPDATE_CONFIG_PATH || "";
+  updateFeedOverride(process.env.EXPLORE_BETTER_UPDATE_URL || process.env.EB_UPDATE_URL || "") ||
+  (app.isPackaged ? publicUpdateFeedUrl : "");
+const updateConfigPath = updateEnvOverridesAllowed
+  ? process.env.EXPLORE_BETTER_UPDATE_CONFIG_PATH || process.env.EB_UPDATE_CONFIG_PATH || ""
+  : "";
 const userDataDir = process.env.EXPLORE_BETTER_USER_DATA_DIR || process.env.EB_USER_DATA_DIR || "";
 
 if (userDataDir) {
@@ -136,7 +156,9 @@ const disableGpuMode =
 
 if (disableGpuMode) {
   app.disableHardwareAcceleration();
-  app.commandLine.appendSwitch("no-sandbox");
+  // Disabling the GPU must not cost users the renderer sandbox; only the
+  // headless smoke and terminal broker processes run unsandboxed.
+  if (smokeMode || terminalBrokerMode) app.commandLine.appendSwitch("no-sandbox");
   app.commandLine.appendSwitch("disable-gpu");
   app.commandLine.appendSwitch("disable-gpu-sandbox");
   app.commandLine.appendSwitch("in-process-gpu");
@@ -145,7 +167,8 @@ if (disableGpuMode) {
 
 const expectedSmokeUpdateEvent = process.env.EXPLORE_BETTER_UPDATE_EXPECTED_EVENT || process.env.EB_UPDATE_EXPECTED_EVENT || "available";
 const forceDevUpdateConfig =
-  process.env.EXPLORE_BETTER_FORCE_DEV_UPDATE_CONFIG === "1" || process.env.EB_FORCE_DEV_UPDATE_CONFIG === "1";
+  updateEnvOverridesAllowed &&
+  (process.env.EXPLORE_BETTER_FORCE_DEV_UPDATE_CONFIG === "1" || process.env.EB_FORCE_DEV_UPDATE_CONFIG === "1");
 const backendWatchdogIntervalMs = Math.max(
   500,
   Number(process.env.EXPLORE_BETTER_BACKEND_WATCHDOG_MS || process.env.EB_BACKEND_WATCHDOG_MS || 2500)
@@ -223,14 +246,24 @@ function isLikelyPathArgument(value) {
   return Boolean(value && !value.startsWith("--") && value !== "." && value !== __dirname);
 }
 
-function shellTargetFromArgv(argv = process.argv) {
+function resolveShellArgument(value, workingDirectory) {
+  // Explorer passes drive roots as "C:\", which Windows argv parsing turns
+  // into C:" (the backslash escapes the closing quote). Undo that, and treat a
+  // bare drive letter as the drive root rather than the drive's current directory.
+  let target = value.endsWith('"') ? value.slice(0, -1) : value;
+  if (!target) return "";
+  if (/^[a-z]:$/i.test(target)) target = `${target}\\`;
+  return workingDirectory ? path.resolve(workingDirectory, target) : path.resolve(target);
+}
+
+function shellTargetFromArgv(argv = process.argv, workingDirectory = "") {
   const repoPath = path.resolve(__dirname).toLowerCase();
   return (
     argv
       .slice(1)
       .filter(isLikelyPathArgument)
-      .map((value) => path.resolve(value))
-      .find((value) => value.toLowerCase() !== repoPath) || null
+      .map((value) => resolveShellArgument(value, workingDirectory))
+      .find((value) => value && value.toLowerCase() !== repoPath) || null
   );
 }
 
@@ -302,7 +335,10 @@ function nativeDragPaths(paths = []) {
     return [];
   }
   const seen = new Set();
+  // Bound the synchronous existence checks before doing them; a huge
+  // selection must not stall the main process.
   return paths
+    .slice(0, 500)
     .map((item) => String(item || "").trim())
     .filter(Boolean)
     .map((item) => path.resolve(item))
@@ -313,8 +349,7 @@ function nativeDragPaths(paths = []) {
       }
       seen.add(key);
       return true;
-    })
-    .slice(0, 500);
+    });
 }
 
 function redactedUpdateFeedUrl() {
@@ -825,6 +860,16 @@ function dispatchMcpUiAction(action) {
   });
 }
 
+function rejectPendingMcpUiRequests(message) {
+  for (const pending of mcpUiRequests.values()) {
+    clearTimeout(pending.timeout);
+    const error = new Error(message);
+    error.code = "UI_UNAVAILABLE";
+    pending.reject(error);
+  }
+  mcpUiRequests.clear();
+}
+
 function scheduleMcpHeadlessExit(clientCount = mcpBridgeService?.status().clients || 0) {
   clearTimeout(mcpHeadlessExitTimer);
   mcpHeadlessExitTimer = null;
@@ -959,6 +1004,7 @@ ipcMain.handle("explore-better:mcp-client-remove", async (event, client) => {
 });
 
 ipcMain.on("explore-better:start-file-drag", (event, paths) => {
+  if (!rendererIsTrusted(event)) return;
   try {
     startNativeFileDrag(event.sender, paths);
   } catch (error) {
@@ -1099,20 +1145,6 @@ async function ensureServer() {
 async function startDesktopServer() {
   await ensureDesktopPort();
   if (desktopClosing) throw new Error("Explore Better is closing.");
-  if (process.platform === "win32" && !process.defaultApp) {
-    try {
-      const integrationModule = embeddedServerModule || (await import("./server.mjs"));
-      if (desktopClosing) throw new Error("Explore Better is closing.");
-      integrationModule.setDesktopExecutablePath?.(process.execPath);
-      embeddedServerModule = integrationModule;
-      const repair = await integrationModule.repairCurrentUserShellIntegrationTarget?.();
-      if (repair?.repaired) {
-        console.log(`Explore Better shell integration repaired: ${repair.mode} -> ${repair.target}`);
-      }
-    } catch (error) {
-      console.warn(`Could not repair Explore Better shell integration: ${error.message}`);
-    }
-  }
   if (await serverIsReady()) {
     rememberBackendEvent("ready", "Backend already answered health check.", { kind: "existing" });
     return;
@@ -1183,7 +1215,11 @@ async function recoverBackend(reason = "watchdog") {
   backendRecoveryPromise = (async () => {
     backendRestartCount += 1;
     rememberBackendEvent("recovering", `Recovering backend after ${reason}.`, { reason });
-    await stopChildBackendProcess();
+    // A wedged child is force-killed and reported as an unclean stop; that is
+    // expected during recovery and must not abort the restart.
+    await stopChildBackendProcess().catch((error) => {
+      console.warn(`Backend recovery stopped the previous child uncleanly: ${error?.message || error}`);
+    });
     if (embeddedServer) {
       await closeEmbeddedServer();
     }
@@ -1196,7 +1232,11 @@ async function recoverBackend(reason = "watchdog") {
     rememberBackendEvent("recovered", `Backend recovered after ${reason}.`, { reason });
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.webContents.isCrashed()) await mainWindow.loadURL(listerUrl());
-      else await desktopEvents.send("backend-recovered", await backendStatus());
+      // The backend is healthy either way; a renderer that fails to refresh
+      // must not turn the recovery itself into an error.
+      else desktopEvents.send("backend-recovered", await backendStatus()).catch((error) => {
+        if (!desktopClosing) console.error(error);
+      });
     }
     return backendStatus();
   })()
@@ -1404,6 +1444,91 @@ async function exitSmoke(code) {
   app.exit(code);
 }
 
+let shellIntegrationRepairStarted = false;
+
+// Repairing the per-user shell integration spawns several reg.exe processes;
+// run it once the window is visible instead of delaying every launch.
+function repairShellIntegrationInBackground() {
+  if (shellIntegrationRepairStarted || process.platform !== "win32" || process.defaultApp) return;
+  shellIntegrationRepairStarted = true;
+  (async () => {
+    const integrationModule = embeddedServerModule || (await import("./server.mjs"));
+    if (desktopClosing) return;
+    integrationModule.setDesktopExecutablePath?.(process.execPath);
+    embeddedServerModule = integrationModule;
+    const repair = await integrationModule.repairCurrentUserShellIntegrationTarget?.();
+    if (repair?.repaired) {
+      console.log(`Explore Better shell integration repaired: ${repair.mode} -> ${repair.target}`);
+    }
+  })().catch((error) => {
+    console.warn(`Could not repair Explore Better shell integration: ${error?.message || error}`);
+  });
+}
+
+// The app's own document may use the async clipboard (preference snippets,
+// terminal copy/paste); every other permission stays denied.
+function trustedClipboardPermission(permission, requestingUrl) {
+  if (permission !== "clipboard-sanitized-write" && permission !== "clipboard-read") return false;
+  try {
+    return new URL(requestingUrl).origin === new URL(baseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+const rendererCrashReloadLimit = 3;
+const rendererCrashReloadWindowMs = 60_000;
+
+function rendererCrashReloadAllowed(history, now = Date.now()) {
+  while (history.length && now - history[0] > rendererCrashReloadWindowMs) history.shift();
+  if (history.length >= rendererCrashReloadLimit) return false;
+  history.push(now);
+  return true;
+}
+
+// A crashed renderer (OOM, GPU fault) otherwise leaves a permanently blank
+// window. Reload it a bounded number of times, then ask the user.
+function recoverCrashedRenderer(windowRef, reason, history) {
+  if (reason === "clean-exit" || desktopClosing || !windowRef || windowRef.isDestroyed()) return;
+  if (rendererCrashReloadAllowed(history)) {
+    console.warn(`Explore Better renderer stopped (${reason || "unknown"}); reloading.`);
+    windowRef.loadURL(listerUrl()).catch((error) => console.error(error));
+    return;
+  }
+  console.error(`Explore Better renderer stopped (${reason || "unknown"}) repeatedly; not reloading automatically.`);
+  if (smokeMode) return;
+  dialog
+    .showMessageBox(windowRef, {
+      type: "error",
+      buttons: ["Reload", "Close window"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "Explore Better stopped responding",
+      message: "The Explore Better window stopped unexpectedly several times.",
+      detail: `Reason: ${reason || "unknown"}. You can try reloading it or close the window.`,
+      noLink: true
+    })
+    .then(({ response }) => {
+      if (desktopClosing || windowRef.isDestroyed()) return;
+      if (response === 0) {
+        history.length = 0;
+        history.push(Date.now());
+        windowRef.loadURL(listerUrl()).catch((error) => console.error(error));
+      } else {
+        windowRef.close();
+      }
+    })
+    .catch((error) => console.error(error));
+}
+
+function reportStartupFailure(error) {
+  console.error(error);
+  if (!smokeMode && !desktopClosing) {
+    dialog.showErrorBox("Explore Better could not start", String(error?.message || error || "Unknown startup error."));
+  }
+  app.quit();
+}
+
 async function showLister(targetPath = null, shellMode = null) {
   await ensureServer();
   await ensureMcpBridge();
@@ -1484,9 +1609,11 @@ async function showLister(targetPath = null, shellMode = null) {
     if (choice === 1) event.preventDefault();
     else autoUpdateInstallRequested = false;
   });
-  mainWindow.webContents.session.setPermissionCheckHandler(() => false);
-  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
-    callback(false);
+  mainWindow.webContents.session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) =>
+    trustedClipboardPermission(permission, requestingOrigin)
+  );
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    callback(trustedClipboardPermission(permission, details?.requestingUrl));
   });
   mainWindow.webContents.on("before-input-event", (event, input) => {
     const action = desktopShortcutAction(input);
@@ -1496,18 +1623,24 @@ async function showLister(targetPath = null, shellMode = null) {
     event.preventDefault();
     dispatchDesktopShortcut(mainWindow, action);
   });
-  mainWindow.webContents.on("render-process-gone", () => {
+  const rendererWindow = mainWindow;
+  const rendererCrashReloads = [];
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
     desktopEvents.cancel(rendererWebContents, "The desktop renderer stopped.");
     terminalService?.disposeWebContents(rendererWebContentsId);
+    rejectPendingMcpUiRequests("The Explore Better renderer stopped.");
+    recoverCrashedRenderer(rendererWindow, details?.reason, rendererCrashReloads);
   });
   mainWindow.once("ready-to-show", () => {
     if (!smokeMode) {
       mainWindow?.show();
     }
+    repairShellIntegrationInBackground();
   });
   mainWindow.on("closed", () => {
     desktopEvents.cancel(rendererWebContents);
     terminalService?.disposeWebContents(rendererWebContentsId);
+    rejectPendingMcpUiRequests("The Explore Better window closed.");
     mainWindow = null;
     mcpRendererContext = { ...mcpRendererContext, live: false, selection: [], focusedPath: "", ui: normalizeMcpUiContext({}) };
     handleMcpConnectionCount(mcpBridgeService?.status().clients || 0);
@@ -1710,12 +1843,13 @@ if (terminalBrokerMode) {
   app.quit();
 } else {
   app.setAppUserModelId("ExploreBetter.LocalFileManager");
-  app.on("second-instance", (_event, argv) => {
+  app.on("second-instance", (_event, argv, workingDirectory) => {
     if (argv.includes("--ai-host")) {
       ensureMcpBridge().catch(console.error);
       return;
     }
-    showLister(shellTargetFromArgv(argv), shellModeFromArgv(argv)).catch((error) => {
+    // Relative paths belong to the launching process's directory, not ours.
+    showLister(shellTargetFromArgv(argv, workingDirectory), shellModeFromArgv(argv)).catch((error) => {
       console.error(error);
     });
   });
@@ -1851,14 +1985,12 @@ if (terminalBrokerMode) {
       ensureServer()
         .then(() => ensureMcpBridge())
         .catch((error) => {
+          // Headless AI host: no window was promised, so no modal dialog.
           console.error(error);
           app.quit();
         });
     } else {
-      showLister(shellTargetFromArgv(), shellModeFromArgv()).catch((error) => {
-        console.error(error);
-        app.quit();
-      });
+      showLister(shellTargetFromArgv(), shellModeFromArgv()).catch(reportStartupFailure);
     }
   });
   app.on("activate", () => {
