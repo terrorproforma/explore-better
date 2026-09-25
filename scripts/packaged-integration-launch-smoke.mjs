@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
+import { powerShellLiteral } from "../lib/shell-quote.mjs";
 
 const workspace = process.cwd();
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -57,15 +58,17 @@ backend.setDesktopExecutablePath(desktopExecutable);
 try {
   await backend.startServer();
   const generated = await requestJson(baseUrl, "/api/integration/generate", { method: "POST" });
-  const folderDefault = await fs.readFile(generated.folderDefaultRegPath, "utf8");
+  // .reg files are UTF-16LE with a BOM; scripts are UTF-8 with a BOM and hold single-quoted literals.
+  const folderDefault = (await fs.readFile(generated.folderDefaultRegPath)).toString("utf16le").replace(/^\uFEFF/, "");
   const launcher = await fs.readFile(generated.scriptPath, "utf8");
   const shortcuts = await fs.readFile(generated.shortcutScriptPath, "utf8");
   const escapedExecutable = desktopExecutable.replaceAll("\\", "\\\\");
+  const executableLiteral = powerShellLiteral(desktopExecutable);
 
   assert(folderDefault.includes(escapedExecutable), "The default folder handler did not target the packaged desktop executable.");
   assert(!folderDefault.includes("powershell.exe"), "The packaged default folder handler still routes through PowerShell.");
-  assert(launcher.includes(`$DesktopApp = "${escapedExecutable}"`), "The fallback launcher did not retain the packaged executable.");
-  assert(shortcuts.includes(`$DesktopApp = "${escapedExecutable}"`), "Generated shortcuts did not retain the packaged executable.");
+  assert(launcher.includes(`$DesktopApp = ${executableLiteral}`), "The fallback launcher did not retain the packaged executable.");
+  assert(shortcuts.includes(`$DesktopApp = ${executableLiteral}`), "Generated shortcuts did not retain the packaged executable.");
   assert(shortcuts.includes("$shortcut.TargetPath = $DesktopApp"), "Generated shortcuts do not launch the packaged executable directly.");
   console.log("Packaged integration launch smoke passed: default handlers and shortcuts use the desktop executable directly.");
 } finally {

@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, existsSync, watch } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, realpathSync, watch as watchPathRaw } from "node:fs";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -8,9 +8,14 @@ import { createRequire } from "node:module";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { StringDecoder } from "node:string_decoder";
+import { powerShellLiteral as quotePowerShellLiteral, cmdQuote } from "./lib/shell-quote.mjs";
+import { writeFileAtomic as writeFileAtomicShared } from "./lib/atomic-write.mjs";
 import { pathSnapshot, validSnapshot, decodeEditableText, encodeEditableText, readEditableTextFile, assertSafeDestination, physicalPath, insidePath, durableWrite, replaceFileTransaction, sameFileIdentity } from "./filesystem-integrity.mjs";
+import * as shellRegistry from "./lib/shell-registry.mjs";
 
 const require = createRequire(import.meta.url);
 const yauzl = require("yauzl");
@@ -30,6 +35,7 @@ const contentSecurityPolicy = [
   "base-uri 'none'",
   "connect-src 'self'",
   "font-src 'self' data:",
+  "form-action 'none'",
   "frame-ancestors 'none'",
   "img-src 'self' data: blob:",
   "media-src 'self' blob:",
@@ -44,6 +50,19 @@ const modelWorkerContentSecurityPolicy = [
   "object-src 'none'",
   "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'"
 ].join("; ");
+const rawPlainTextExtensions = new Set([".js", ".mjs", ".cjs", ".css"]);
+const rawForbiddenFetchDestinations = new Set(["script", "worker", "sharedworker", "serviceworker", "style"]);
+
+// libuv aborts the whole process (fs-event.c assertion) when a watched Windows
+// path is an 8.3 short name and change events arrive under the long name, so
+// every watcher starts from the canonical long path.
+function watch(target, options, listener) {
+  let canonical = target;
+  try {
+    canonical = realpathSync.native(target);
+  } catch {}
+  return watchPathRaw(canonical, options, listener);
+}
 
 function isLoopbackHostname(value) {
   const hostname = String(value || "").trim().replace(/^\[|\]$/g, "").toLowerCase();
@@ -173,21 +192,25 @@ const cacheMaintenanceFileLimit = 2000;
 const cancellableOperationTypes = new Set(["copy", "move", "delete", "recycle", "transfer", "sync", "script"]);
 const interruptedOperationStatuses = new Set(["queued", "running", "paused"]);
 const operationStatuses = new Set(["queued", "running", "paused", "completed", "failed", "canceled"]);
+// Failure-injection hooks (EB_TEST_*) are only honoured when the test harness opts in explicitly,
+// so a stray environment variable can never make a production build fail or slow down operations.
+const testHooksEnabled = process.env.EXPLORE_BETTER_TEST_HOOKS === "1";
+const testHookEnv = (name) => (testHooksEnabled ? process.env[name] : undefined);
 const testOperationDelayMs = Math.max(
   0,
-  Math.min(Number(process.env.EB_TEST_OPERATION_DELAY_MS || 0), 30000)
+  Math.min(Number(testHookEnv("EB_TEST_OPERATION_DELAY_MS") || 0), 30000)
 );
 const testOperationDelayAfterItems = Math.max(
   0,
-  Math.min(Number(process.env.EB_TEST_OPERATION_DELAY_AFTER_ITEMS || 0), 100000)
+  Math.min(Number(testHookEnv("EB_TEST_OPERATION_DELAY_AFTER_ITEMS") || 0), 100000)
 );
 const testStateWriteDelayMs = Math.max(
   0,
-  Math.min(Number(process.env.EB_TEST_STATE_WRITE_DELAY_MS || 0), 30000)
+  Math.min(Number(testHookEnv("EB_TEST_STATE_WRITE_DELAY_MS") || 0), 30000)
 );
-const testForceCrossVolumeMove = process.env.EB_TEST_FORCE_CROSS_VOLUME_MOVE === "1";
-const testFailSourceRemoval = process.env.EB_TEST_FAIL_SOURCE_REMOVAL === "1";
-const testFailStagingRename = process.env.EB_TEST_FAIL_STAGING_RENAME === "1";
+const testForceCrossVolumeMove = testHookEnv("EB_TEST_FORCE_CROSS_VOLUME_MOVE") === "1";
+const testFailSourceRemoval = testHookEnv("EB_TEST_FAIL_SOURCE_REMOVAL") === "1";
+const testFailStagingRename = testHookEnv("EB_TEST_FAIL_STAGING_RENAME") === "1";
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -586,7 +609,8 @@ function sendJson(res, status, payload) {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
-    "cache-control": "no-store"
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff"
   });
   res.end(body);
 }
@@ -678,8 +702,29 @@ function cookieValue(req, name) {
   return "";
 }
 
+function capabilityMatches(value) {
+  const supplied = Buffer.from(String(value || ""));
+  const expected = Buffer.from(apiCapability);
+  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+}
+
+function requestTargetPathname(requestTarget) {
+  // Only origin-form targets are accepted, so the boundary and router see the same pathname.
+  if (!requestTarget.startsWith("/")) return null;
+  try {
+    const parsed = new URL(requestTarget, "http://request-target.invalid");
+    return parsed.host === "request-target.invalid" ? parsed.pathname : null;
+  } catch {
+    return null;
+  }
+}
+
 function validateRequestBoundary(req) {
-  const isApiRequest = String(req.url || "").split("?", 1)[0].startsWith("/api/");
+  const requestPathname = requestTargetPathname(String(req.url || ""));
+  if (requestPathname === null) {
+    return { status: 400, message: "The request target must be an origin-form path." };
+  }
+  const isApiRequest = requestPathname.startsWith("/api/");
   const authority = String(req.headers.host || "");
   let requestOrigin;
   try {
@@ -721,8 +766,12 @@ function validateRequestBoundary(req) {
     }
   }
 
-  const suppliedCapability = cookieValue(req, apiCapabilityCookieName) || String(req.headers["x-explore-better-capability"] || "");
-  if (isApiRequest && (requireDirectApiCapability || originHeader || fetchSite) && suppliedCapability !== apiCapability) {
+  if (
+    isApiRequest &&
+    (requireDirectApiCapability || originHeader || fetchSite) &&
+    !capabilityMatches(cookieValue(req, apiCapabilityCookieName)) &&
+    !capabilityMatches(req.headers["x-explore-better-capability"])
+  ) {
     return { status: 403, message: "The launch capability is missing or invalid." };
   }
   return null;
@@ -1138,62 +1187,67 @@ function sanitizeStoredOperations(operations) {
   return retainOperationHistory(clean);
 }
 
+function isStateRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// Sanitize a stored list without letting one null or malformed row fail the whole state load.
+function sanitizeStateList(items, sanitizer, limit = Infinity, { allowStrings = false } = {}) {
+  const clean = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    if (clean.length >= limit) {
+      break;
+    }
+    if (!isStateRecord(item) && !(allowStrings && typeof item === "string" && item)) {
+      continue;
+    }
+    try {
+      clean.push(sanitizer(item));
+    } catch {
+      // Skip the malformed row and keep the rest of the list.
+    }
+  }
+  return clean;
+}
+
+function stateRecords(items) {
+  return (Array.isArray(items) ? items : []).filter(isStateRecord);
+}
+
 function mergeState(rawState) {
   const base = defaultState();
-  const raw = rawState && typeof rawState === "object" ? rawState : {};
+  const raw = isStateRecord(rawState) ? rawState : {};
   return {
     ...base,
     ...raw,
     layout: sanitizeLayoutSnapshot(raw.layout || base.layout),
-    settings: sanitizeSettings({ ...base.settings, ...(raw.settings || {}) }),
-    integration: { ...base.integration, ...(raw.integration || {}) },
-    favorites: Array.isArray(raw.favorites) ? raw.favorites : base.favorites,
+    settings: sanitizeSettings({ ...base.settings, ...(isStateRecord(raw.settings) ? raw.settings : {}) }),
+    integration: { ...base.integration, ...(isStateRecord(raw.integration) ? raw.integration : {}) },
+    favorites: Array.isArray(raw.favorites) ? stateRecords(raw.favorites) : base.favorites,
     aliases: Array.isArray(raw.aliases) ? uniquePathAliases(raw.aliases).slice(0, 100) : base.aliases,
     recentLocations: Array.isArray(raw.recentLocations)
-      ? raw.recentLocations.map(sanitizeRecentLocation).slice(0, 20)
+      ? sanitizeStateList(raw.recentLocations, sanitizeRecentLocation, 20, { allowStrings: true })
       : base.recentLocations,
     fileBasket: Array.isArray(raw.fileBasket) ? uniqueCollectionItems(raw.fileBasket).slice(0, 1000) : [],
-    collections: Array.isArray(raw.collections)
-      ? raw.collections.map(sanitizeSavedCollection).slice(0, 50)
-      : [],
-    paneSnapshots: Array.isArray(raw.paneSnapshots)
-      ? raw.paneSnapshots.map(sanitizePaneSnapshot).slice(0, 50)
-      : [],
-    selectionSets: Array.isArray(raw.selectionSets)
-      ? raw.selectionSets.map(sanitizeSelectionSet).slice(0, 100)
-      : [],
+    collections: sanitizeStateList(raw.collections, sanitizeSavedCollection, 50),
+    paneSnapshots: sanitizeStateList(raw.paneSnapshots, sanitizePaneSnapshot, 50),
+    selectionSets: sanitizeStateList(raw.selectionSets, sanitizeSelectionSet, 100),
     labels: Array.isArray(raw.labels) ? uniquePathLabels(raw.labels).slice(0, 2500) : [],
-    folderFormats: Array.isArray(raw.folderFormats)
-      ? raw.folderFormats.map(sanitizeFolderFormat).slice(0, 50)
-      : [],
-    displayPresets: Array.isArray(raw.displayPresets)
-      ? raw.displayPresets.map(sanitizeDisplayPreset).slice(0, 50)
-      : [],
-    filterPresets: Array.isArray(raw.filterPresets)
-      ? raw.filterPresets.map(sanitizeFilterPreset).slice(0, 50)
-      : [],
-    syncProfiles: Array.isArray(raw.syncProfiles)
-      ? raw.syncProfiles.map(sanitizeSyncProfile).slice(0, 50)
-      : [],
-    openWithPresets: Array.isArray(raw.openWithPresets)
-      ? raw.openWithPresets.map(sanitizeOpenWithPreset).slice(0, 50)
-      : [],
-    searchPresets: Array.isArray(raw.searchPresets)
-      ? raw.searchPresets.map(sanitizeSearchPreset).slice(0, 50)
-      : [],
-    selectPresets: Array.isArray(raw.selectPresets)
-      ? raw.selectPresets.map(sanitizeSelectPreset).slice(0, 50)
-      : [],
-    bulkRenamePresets: Array.isArray(raw.bulkRenamePresets)
-      ? raw.bulkRenamePresets.map(sanitizeBulkRenamePreset).slice(0, 50)
-      : [],
-    layouts: Array.isArray(raw.layouts) ? raw.layouts.map(sanitizeSavedLayout).slice(0, 30) : [],
-    tabGroups: Array.isArray(raw.tabGroups) ? raw.tabGroups.map(sanitizeTabGroup).slice(0, 50) : [],
+    folderFormats: sanitizeStateList(raw.folderFormats, sanitizeFolderFormat, 50),
+    displayPresets: sanitizeStateList(raw.displayPresets, sanitizeDisplayPreset, 50),
+    filterPresets: sanitizeStateList(raw.filterPresets, sanitizeFilterPreset, 50),
+    syncProfiles: sanitizeStateList(raw.syncProfiles, sanitizeSyncProfile, 50),
+    openWithPresets: sanitizeStateList(raw.openWithPresets, sanitizeOpenWithPreset, 50),
+    searchPresets: sanitizeStateList(raw.searchPresets, sanitizeSearchPreset, 50),
+    selectPresets: sanitizeStateList(raw.selectPresets, sanitizeSelectPreset, 50),
+    bulkRenamePresets: sanitizeStateList(raw.bulkRenamePresets, sanitizeBulkRenamePreset, 50),
+    layouts: sanitizeStateList(raw.layouts, sanitizeSavedLayout, 30),
+    tabGroups: sanitizeStateList(raw.tabGroups, sanitizeTabGroup, 50),
     backgroundIndexes: Array.isArray(raw.backgroundIndexes)
       ? uniqueBackgroundIndexRoots(raw.backgroundIndexes).slice(0, 50)
       : [],
-    scripts: Array.isArray(raw.scripts) ? raw.scripts.map(sanitizeScriptSnippet).slice(0, 100) : base.scripts,
-    commands: Array.isArray(raw.commands) ? raw.commands.map(sanitizeCommand) : base.commands,
+    scripts: Array.isArray(raw.scripts) ? sanitizeStateList(raw.scripts, sanitizeScriptSnippet, 100) : base.scripts,
+    commands: Array.isArray(raw.commands) ? sanitizeStateList(raw.commands, sanitizeCommand) : base.commands,
     operations: sanitizeStoredOperations(raw.operations)
   };
 }
@@ -1473,7 +1527,7 @@ function recoverInterruptedOperationsOnStartup(state) {
   const reason = "Operation interrupted by app restart before completion.";
   let changed = false;
   nextState.operations = (nextState.operations || []).map((operation) => {
-    if (!interruptedOperationStatuses.has(operation?.status)) {
+    if (!interruptedOperationStatuses.has(operation?.status) || operationControls.has(operation.id)) {
       return operation;
     }
     changed = true;
@@ -1517,10 +1571,16 @@ function operationHistoryNeedsPersist(state, normalizedState) {
   return JSON.stringify(rawOperations) !== JSON.stringify(normalizedOperations);
 }
 
+// Callers hold the state chain (see loadStateIntoCache), so the recovery write is serialized.
 async function cacheStateAfterStartupRecovery(state, stat = null, contentHash = "") {
   const recovery = recoverInterruptedOperationsOnStartup(state);
   if (recovery.changed || operationHistoryNeedsPersist(state, recovery.state)) {
-    return writeState(recovery.state);
+    try {
+      return await writeState(recovery.state, { merged: true });
+    } catch (error) {
+      console.warn(`Could not persist recovered operation history: ${error.message}`);
+      startupOperationRecoveryChecked = false;
+    }
   }
   return updateStateCache(recovery.state, stat, contentHash);
 }
@@ -1559,79 +1619,189 @@ async function statStateFile() {
   }
 }
 
-async function restoreStateFromBackup(reason) {
+const stateChainContext = new AsyncLocalStorage();
+const transientStateReadCodes = new Set(["EBUSY", "EPERM", "EACCES", "EMFILE", "ENFILE", "EAGAIN"]);
+let stateWriteCount = 0;
+
+// Serialize every state.json load/write; nested calls from inside the chain run directly.
+function runInStateChain(task) {
+  if (stateChainContext.getStore()) {
+    return task();
+  }
+  const run = () => stateChainContext.run(true, task);
+  stateChain = stateChain.then(run, run);
+  return stateChain;
+}
+
+async function withTransientStateRetry(action, attempts = 5) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      if (!transientStateReadCodes.has(error?.code) || attempt >= attempts - 1) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+}
+
+function parseStoredState(text) {
+  const state = parseStateText(text);
+  if (!isStateRecord(state)) {
+    throw new SyntaxError("State file does not contain a JSON object.");
+  }
+  return state;
+}
+
+async function quarantineStateFile(file) {
+  const target = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
   try {
-    const text = await fs.readFile(stateBackupFile, "utf8");
-    const backupState = parseStateText(text);
-    console.warn(`Restoring state from backup after read failure: ${reason?.message || reason}`);
-    await fs.mkdir(appDataRoot, { recursive: true });
-    await fs.copyFile(stateBackupFile, stateFile).catch(() => {});
-    const stat = await statStateFile();
-    return cacheStateAfterStartupRecovery(backupState, stat, stateContentHash(text));
-  } catch {
+    await renamePathWithRetry(file, target);
+    console.warn(`Kept unreadable state file as ${target}`);
+    return target;
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`Could not set aside unreadable state file ${file}: ${error.message}`);
+    }
     return null;
   }
 }
 
-async function readCachedState() {
-  await ensureStateCacheWatcher();
-  const stat = await statStateFile();
-  const key = stateCacheKeyFromStat(stat);
-  if (stateCache.state && stateCache.key === key && !stateCache.dirty) {
-    if (stat && Date.now() - Number(stateCache.checkedAt || 0) >= stateCacheContentCheckTtlMs) {
-      try {
-        const text = await fs.readFile(stateFile, "utf8");
-        const contentHash = stateContentHash(text);
-        if (contentHash !== stateCache.contentHash) {
-          return cacheStateAfterStartupRecovery(parseStateText(text), stat, contentHash);
-        }
-        stateCache.checkedAt = Date.now();
-      } catch (error) {
-        if (error.code !== "ENOENT") {
-          console.warn(`Could not verify state file cache: ${error.message}`);
-        }
-        stateCache.dirty = true;
-      }
+// Returns { state } when the backup was restored, otherwise why it could not be used.
+async function restoreStateFromBackup(reason) {
+  let text;
+  let backupState;
+  try {
+    text = await withTransientStateRetry(() => fs.readFile(stateBackupFile, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`Could not read state backup: ${error.message}`);
     }
-    if (!stateCache.dirty) {
-      return stateCache.state;
-    }
-  }
-  if (!stat) {
-    const backupState = await restoreStateFromBackup(new Error("state file missing"));
-    if (backupState) {
-      return backupState;
-    }
-    return cacheStateAfterStartupRecovery(defaultState(), null);
+    return { state: null, corrupt: false, missing: error.code === "ENOENT", error };
   }
   try {
-    const text = await fs.readFile(stateFile, "utf8");
-    return cacheStateAfterStartupRecovery(parseStateText(text), stat, stateContentHash(text));
+    backupState = parseStoredState(text);
+  } catch (error) {
+    console.warn(`State backup is unreadable: ${error.message}`);
+    return { state: null, corrupt: true, missing: false, error };
+  }
+  console.warn(`Restoring state from backup after read failure: ${reason?.message || reason}`);
+  await fs.mkdir(appDataRoot, { recursive: true });
+  await fs.copyFile(stateBackupFile, stateFile).catch(() => {});
+  const stat = await statStateFile();
+  return { state: await cacheStateAfterStartupRecovery(backupState, stat, stateContentHash(text)) };
+}
+
+async function stateCacheIsCurrent(stat) {
+  const key = stateCacheKeyFromStat(stat);
+  if (!stateCache.state || stateCache.key !== key) {
+    return false;
+  }
+  if (stateCache.dirty) {
+    // The folder watcher also fires for our own atomic renames; the post-write key identifies those.
+    if (!stat || key !== stateCache.selfWriteKey) {
+      return false;
+    }
+    stateCache.dirty = false;
+  }
+  if (stat && Date.now() - Number(stateCache.checkedAt || 0) >= stateCacheContentCheckTtlMs) {
+    try {
+      const text = await fs.readFile(stateFile, "utf8");
+      if (stateContentHash(text) !== stateCache.contentHash) {
+        return false;
+      }
+      stateCache.checkedAt = Date.now();
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        console.warn(`Could not verify state file cache: ${error.message}`);
+      }
+      return false;
+    }
+  }
+  return !stateCache.dirty;
+}
+
+async function loadStateWithoutPrimary(reason) {
+  const restored = await restoreStateFromBackup(reason);
+  if (restored.state) {
+    return restored.state;
+  }
+  if (restored.corrupt) {
+    await quarantineStateFile(stateBackupFile);
+  } else if (!restored.missing) {
+    // A locked backup may hold the only good copy: never replace it with defaults.
+    return transientStateFallback(restored.error);
+  }
+  // Defaults stay in memory until the next real change is saved.
+  return cacheStateAfterStartupRecovery(defaultState(), null);
+}
+
+function transientStateFallback(error) {
+  console.warn(`Could not read state file: ${error.message}`);
+  if (stateCache.state && !stateCache.fallback) {
+    // Keep serving the last good state and retry the read next time.
+    stateCache.dirty = true;
+    stateCache.key = null;
+    return stateCache.state;
+  }
+  const fallbackState = mergeState(defaultState());
+  stateCache = {
+    key: null,
+    state: fallbackState,
+    labelMap: labelMapFromState(fallbackState),
+    dirty: true,
+    watcher: stateCache.watcher,
+    contentHash: stateContentHash(JSON.stringify(fallbackState)),
+    checkedAt: Date.now(),
+    fallback: true
+  };
+  return fallbackState;
+}
+
+async function loadStateIntoCache() {
+  let stat;
+  try {
+    stat = await withTransientStateRetry(() => fs.stat(stateFile));
   } catch (error) {
     if (error.code === "ENOENT") {
-      const backupState = await restoreStateFromBackup(error);
-      if (backupState) {
-        return backupState;
-      }
-      return cacheStateAfterStartupRecovery(defaultState(), null);
+      stat = null;
+    } else {
+      return transientStateFallback(error);
     }
-    console.warn(`Could not read state file: ${error.message}`);
-    const backupState = await restoreStateFromBackup(error);
-    if (backupState) {
-      return backupState;
-    }
-    const fallbackState = mergeState(defaultState());
-    stateCache = {
-      key: null,
-      state: fallbackState,
-      labelMap: labelMapFromState(fallbackState),
-      dirty: true,
-      watcher: stateCache.watcher,
-      contentHash: stateContentHash(JSON.stringify(fallbackState)),
-      checkedAt: Date.now()
-    };
-    return fallbackState;
   }
+  if (await stateCacheIsCurrent(stat)) {
+    return stateCache.state;
+  }
+  if (!stat) {
+    return loadStateWithoutPrimary(new Error("state file missing"));
+  }
+  let text;
+  try {
+    text = await withTransientStateRetry(() => fs.readFile(stateFile, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return loadStateWithoutPrimary(error);
+    }
+    return transientStateFallback(error);
+  }
+  let parsed;
+  try {
+    parsed = parseStoredState(text);
+  } catch (error) {
+    console.warn(`State file is unreadable: ${error.message}`);
+    await quarantineStateFile(stateFile);
+    return loadStateWithoutPrimary(error);
+  }
+  return cacheStateAfterStartupRecovery(parsed, stat, stateContentHash(text));
+}
+
+async function readCachedState() {
+  await ensureStateCacheWatcher();
+  if (await stateCacheIsCurrent(await statStateFile())) {
+    return stateCache.state;
+  }
+  return runInStateChain(loadStateIntoCache);
 }
 
 async function readState(options = {}) {
@@ -1651,11 +1821,10 @@ async function readLabelMap() {
   return (await readLabelState()).labelMap;
 }
 
-async function writeState(state) {
-  const nextState = mergeState({
-    ...state,
-    updatedAt: new Date().toISOString()
-  });
+async function writeState(state, { merged = false } = {}) {
+  const updatedAt = new Date().toISOString();
+  const nextState = merged ? { ...state, updatedAt } : mergeState({ ...state, updatedAt });
+  stateWriteCount += 1;
   await fs.mkdir(appDataRoot, { recursive: true });
   const text = JSON.stringify(nextState, null, 2);
   const tempFile = path.join(
@@ -1674,7 +1843,9 @@ async function writeState(state) {
     throw error;
   }
   const stat = await statStateFile();
-  return cloneState(updateStateCache(nextState, stat, stateContentHash(text)));
+  const cached = updateStateCache(nextState, stat, stateContentHash(text));
+  stateCache.selfWriteKey = stateCache.key;
+  return cloneState(cached);
 }
 
 function transientPathRenameError(error) {
@@ -1699,17 +1870,25 @@ async function renamePathWithRetry(source, dest, attempts = 8) {
 }
 
 async function mutateState(mutator) {
-  const run = async () => {
+  return runInStateChain(async () => {
     const state = await readState();
+    if (stateCache.fallback) {
+      throw new Error("Explore Better settings are temporarily unreadable, so this change was not saved. Try again.");
+    }
+    const current = stateCache.state;
     const result = await mutator(state);
-    const saved = await writeState(state);
+    const nextState = mergeState({ ...state, updatedAt: current?.updatedAt });
+    // Skip the fsync'd rewrite when the change normalizes to the stored state.
+    const saved =
+      current && JSON.stringify(nextState) === JSON.stringify(current)
+        ? cloneState(current)
+        : await writeState(nextState, { merged: true });
     return result === undefined ? saved : result;
-  };
-  stateChain = stateChain.then(run, run);
-  return stateChain;
+  });
 }
 
-function sanitizeFavorite(favorite) {
+function sanitizeFavorite(value) {
+  const favorite = isStateRecord(value) ? value : {};
   return {
     id: String(favorite.id || crypto.randomUUID()),
     name: String(favorite.name || labelFromPath(favorite.path)),
@@ -1804,26 +1983,40 @@ function uniquePathLabels(labels) {
   return [...byPath.values()].slice(0, 2500);
 }
 
-function pathShiftedByTransfer(labelPath, sourcePath, destPath) {
-  const labelResolved = resolveUserPath(labelPath);
-  const sourceResolved = resolveUserPath(sourcePath);
-  const destResolved = resolveUserPath(destPath);
-  if (!isInsidePath(labelResolved, sourceResolved)) {
-    return null;
+// Returns the earliest transfer whose source is the label path or one of its ancestors.
+function transferForLabelPath(labelPath, transferIndexBySource) {
+  let best = null;
+  let candidate = labelPath;
+  for (;;) {
+    const match = transferIndexBySource.get(pathIdentity(candidate));
+    if (match && (!best || match.index < best.index)) {
+      best = match;
+    }
+    const parent = path.dirname(candidate);
+    if (parent === candidate) {
+      return best;
+    }
+    candidate = parent;
   }
-  const relative = path.relative(sourceResolved, labelResolved);
-  return relative ? path.join(destResolved, relative) : destResolved;
 }
 
 async function updateLabelsForTransfers(items, mode = "move") {
   const transfers = (Array.isArray(items) ? items : [])
     .filter((item) => item?.source && item?.dest)
-    .map((item) => ({
+    .map((item, index) => ({
+      index,
       source: resolveUserPath(item.source),
       dest: resolveUserPath(item.dest)
     }));
   if (!transfers.length) {
     return;
+  }
+  const transferIndexBySource = new Map();
+  for (const transfer of transfers) {
+    const key = pathIdentity(transfer.source);
+    if (!transferIndexBySource.has(key)) {
+      transferIndexBySource.set(key, transfer);
+    }
   }
 
   await mutateState((state) => {
@@ -1832,15 +2025,15 @@ async function updateLabelsForTransfers(items, mode = "move") {
     const now = new Date().toISOString();
 
     for (const label of state.labels || []) {
-      const matchingTransfer = transfers.find((item) =>
-        pathShiftedByTransfer(label.path, item.source, item.dest)
-      );
+      const labelPath = resolveUserPath(label.path);
+      const matchingTransfer = transferForLabelPath(labelPath, transferIndexBySource);
       if (!matchingTransfer) {
         nextLabels.push(label);
         continue;
       }
 
-      const shiftedPath = pathShiftedByTransfer(label.path, matchingTransfer.source, matchingTransfer.dest);
+      const relative = path.relative(matchingTransfer.source, labelPath);
+      const shiftedPath = relative ? path.join(matchingTransfer.dest, relative) : matchingTransfer.dest;
       const shiftedLabel = sanitizePathLabel({
         ...label,
         path: shiftedPath,
@@ -2584,8 +2777,9 @@ function sanitizeBulkRenamePreset(bulkRenamePreset) {
   };
 }
 
-function sanitizeCommand(command) {
+function sanitizeCommand(value) {
   const allowedKinds = new Set(["powershell", "cmd"]);
+  const command = isStateRecord(value) ? value : {};
   return {
     id: String(command.id || crypto.randomUUID()),
     name: String(command.name || "Untitled Command").trim().slice(0, 80),
@@ -2596,7 +2790,8 @@ function sanitizeCommand(command) {
   };
 }
 
-function sanitizeScriptSnippet(snippet) {
+function sanitizeScriptSnippet(value) {
+  const snippet = isStateRecord(value) ? value : {};
   return {
     id: String(snippet.id || crypto.randomUUID()),
     name: String(snippet.name || "Untitled Script").trim().slice(0, 80),
@@ -2662,21 +2857,28 @@ function operationLabel(type, body) {
   return type;
 }
 
-function retryString(value, maxLength = 1200) {
+const retryPathMaxLength = 32767;
+const retryMaxItems = 100_000;
+
+function retryString(value, maxLength = retryPathMaxLength) {
   return String(value || "").trim().slice(0, maxLength);
 }
 
-function retryStringArray(value, maxItems = 500, maxLength = 1200) {
+function retryStringArray(value, maxItems = retryMaxItems, maxLength = retryPathMaxLength) {
   return (Array.isArray(value) ? value : [])
     .map((item) => retryString(item, maxLength))
     .filter(Boolean)
     .slice(0, maxItems);
 }
 
+function retryListTooLarge(value) {
+  return Array.isArray(value) && value.length > retryMaxItems;
+}
+
 function retryItemPolicies(value) {
   const source = value && typeof value === "object" ? value : {};
   const policies = {};
-  for (const [itemPath, policy] of Object.entries(source).slice(0, 500)) {
+  for (const [itemPath, policy] of Object.entries(source).slice(0, retryMaxItems)) {
     if (conflictModes.has(policy)) {
       const cleanPath = retryString(itemPath);
       if (cleanPath) {
@@ -2710,6 +2912,9 @@ function retryBodyForOperation(type, body = {}) {
     return null;
   }
   const source = body && typeof body === "object" ? body : {};
+  if (retryListTooLarge(source.paths) || retryListTooLarge(source.items)) {
+    return null;
+  }
   const paths = retryStringArray(source.paths);
 
   if (type === "copy" || type === "move") {
@@ -2747,7 +2952,7 @@ function retryBodyForOperation(type, body = {}) {
   if (type === "sync") {
     const leftPath = retryString(source.leftPath);
     const rightPath = retryString(source.rightPath);
-    const items = retryStringArray(source.items, 1000);
+    const items = retryStringArray(source.items);
     return leftPath && rightPath && items.length
       ? {
           leftPath,
@@ -2877,6 +3082,26 @@ function boundedLogLines(logs, maxLines = 50, maxLineLength = 1000) {
   });
 }
 
+const operationPersistIntervalMs = 1000;
+
+// Replace journal rows of active operations with their live in-memory progress.
+function overlayLiveOperations(operations) {
+  if (!operationControls.size || !Array.isArray(operations)) {
+    return operations;
+  }
+  return operations.map((operation) => {
+    const live = operationControls.get(operation?.id)?.operation;
+    return (live && sanitizeStoredOperation(live)) || operation;
+  });
+}
+
+function stateWithLiveOperations(state) {
+  if (state && typeof state === "object") {
+    state.operations = overlayLiveOperations(state.operations);
+  }
+  return state;
+}
+
 async function saveOperation(operation) {
   await mutateState((state) => {
     const operations = Array.isArray(state.operations) ? state.operations : [];
@@ -2929,7 +3154,7 @@ async function waitForOperationCondition(operationId, status = "", timeoutMs = 1
     // Subscribe before reading: a transaction may finish while the async state
     // read is in flight, leaving its earlier snapshot behind the notification.
     if (!settled) readState().then((state) => {
-      const current = state.operations.find((operation) => operation.id === operationId) || null;
+      const current = overlayLiveOperations(state.operations).find((operation) => operation.id === operationId) || null;
       if (current && (!status || current.status === status)) waiter.finish(current);
     }, (error) => waiter.finish(null, error));
   });
@@ -3024,9 +3249,37 @@ async function enqueueOperation(type, label, runner, options = {}) {
     waiters: [],
     lastProgressEventAt: 0,
     lastProgressPercent: -1,
-    lastProgressPhase: ""
+    lastProgressPhase: "",
+    lastPersistAt: Date.now(),
+    persistTimer: null,
+    persistDirty: false
   };
   operationControls.set(operation.id, control);
+
+  // Live progress stays in memory (served through overlayLiveOperations); the journal is
+  // rewritten at most once per interval, and immediately for status changes and transactions.
+  const persistNow = async () => {
+    clearTimeout(control.persistTimer);
+    control.persistTimer = null;
+    control.persistDirty = false;
+    control.lastPersistAt = Date.now();
+    await saveOperation(operation);
+  };
+  const persistSoon = () => {
+    control.persistDirty = true;
+    if (control.persistTimer) {
+      return;
+    }
+    const delay = Math.max(0, operationPersistIntervalMs - (Date.now() - control.lastPersistAt));
+    control.persistTimer = setTimeout(() => {
+      control.persistTimer = null;
+      if (!control.persistDirty || operationControls.get(operation.id) !== control) {
+        return;
+      }
+      persistNow().catch((error) => console.warn(`Could not persist operation progress: ${error.message}`));
+    }, delay);
+    control.persistTimer.unref?.();
+  };
 
   const waitIfPaused = async () => {
     throwIfOperationCanceled(controller.signal);
@@ -3042,8 +3295,11 @@ async function enqueueOperation(type, label, runner, options = {}) {
     if (controller.signal.aborted || operation.status === "canceled") {
       markCanceledOperation(operation);
       appendOperationEvent(operation, { kind: "canceled", phase: "Canceled", message: "Operation canceled before it started." });
-      await saveOperation(operation);
-      operationControls.delete(operation.id);
+      try {
+        await persistNow();
+      } finally {
+        operationControls.delete(operation.id);
+      }
       return operation;
     }
     operation.status = "running";
@@ -3054,7 +3310,6 @@ async function enqueueOperation(type, label, runner, options = {}) {
       relatedOperationId: options.relatedOperationId || options.retryOf || null,
       correlationId: options.correlationId || null
     });
-    await saveOperation(operation);
     const updateProgress = async (progress) => {
       operation.progress = {
         ...(operation.progress || {}),
@@ -3078,12 +3333,15 @@ async function enqueueOperation(type, label, runner, options = {}) {
         control.lastProgressPercent = Math.max(control.lastProgressPercent, percent);
         control.lastProgressPhase = phase;
       }
-      await saveOperation(operation);
+      persistSoon();
     };
     const updateRecovery = async (details) => {
       if (!details || typeof details !== "object") {
         return;
       }
+      // Transaction journals (and the checkpoint that retires one) guard destructive steps,
+      // so they must be durable before the runner continues.
+      const durable = Boolean(details.transaction || operation.result?.transaction);
       if (Object.prototype.hasOwnProperty.call(details, "undo")) {
         operation.undo = details.undo || null;
         const { undo, ...resultDetails } = details;
@@ -3091,9 +3349,14 @@ async function enqueueOperation(type, label, runner, options = {}) {
       } else {
         operation.result = details;
       }
-      await saveOperation(operation);
+      if (durable) {
+        await persistNow();
+      } else {
+        persistSoon();
+      }
     };
     try {
+      await persistNow();
       const result = await runner({
         updateProgress,
         updateRecovery,
@@ -3118,7 +3381,7 @@ async function enqueueOperation(type, label, runner, options = {}) {
         message: type === "undo" ? "Undo completed." : options.retryOf ? "Retry completed." : "Operation completed.",
         relatedOperationId: options.relatedOperationId || options.retryOf || null
       });
-      await saveOperation(operation);
+      await persistNow();
       return operation;
     } catch (error) {
       operation.finishedAt = new Date().toISOString();
@@ -3126,7 +3389,7 @@ async function enqueueOperation(type, label, runner, options = {}) {
         markCanceledOperation(operation, operation.finishedAt);
         operation.result = bestCanceledOperationResult(operation.result, error.details);
         appendOperationEvent(operation, { kind: "canceled", phase: "Canceled", message: "Operation canceled." });
-        await saveOperation(operation);
+        await persistNow();
         return operation;
       }
       operation.status = "failed";
@@ -3137,9 +3400,10 @@ async function enqueueOperation(type, label, runner, options = {}) {
         operation.progress.updatedAt = operation.finishedAt;
       }
       appendOperationEvent(operation, { kind: "failed", phase: "Failed", message: operation.error });
-      await saveOperation(operation);
+      await persistNow();
       throw error;
     } finally {
+      clearTimeout(control.persistTimer);
       operationControls.delete(operation.id);
     }
   };
@@ -3206,6 +3470,33 @@ async function enqueueRetryableOperation(type, body, runner, options = {}) {
     ...options,
     retry: retryRequestForOperation(type, body)
   });
+}
+
+function renameComparableName(itemPath) {
+  const name = path.basename(itemPath);
+  return process.platform === "win32" ? name.replace(/[. ]+$/, "").toLowerCase() : name;
+}
+
+async function renameTargetTaken(src, dest) {
+  const existing = await fs.lstat(dest, { bigint: true }).catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)));
+  if (!existing) {
+    return false;
+  }
+  const source = await fs.lstat(src, { bigint: true });
+  const sameName = renameComparableName(src) === renameComparableName(dest);
+  if (!existing.ino) {
+    return !sameName;
+  }
+  return !(sameFileIdentity(source, existing) && (existing.nlink <= 1n || sameName));
+}
+
+async function assertRenameTargetAvailable(src, dest) {
+  if (await renameTargetTaken(src, dest)) {
+    const error = new Error("A file or folder with that name already exists.");
+    error.code = "EEXIST";
+    error.status = 409;
+    throw error;
+  }
 }
 
 async function runRetryableOperation(type, body, options = {}) {
@@ -3282,10 +3573,10 @@ async function runRetryableOperation(type, body, options = {}) {
     return enqueueRetryableOperation(type, body, () => extractZipArchive(body), options);
   }
   if (type === "shortcut-create") {
-    return enqueueRetryableOperation(type, body, () => createWindowsShortcuts(body), options);
+    return enqueueRetryableOperation(type, body, (hooks) => createWindowsShortcuts(body, hooks), options);
   }
   if (type === "link-create") {
-    return enqueueRetryableOperation(type, body, () => createFilesystemLinks(body), options);
+    return enqueueRetryableOperation(type, body, (hooks) => createFilesystemLinks(body, hooks), options);
   }
   if (type === "attributes-set") {
     return enqueueRetryableOperation(type, body, () => applyWindowsAttributes(body), options);
@@ -3335,6 +3626,7 @@ async function runRetryableOperation(type, body, options = {}) {
     const dest = path.join(path.dirname(src), cleanEntryName(body.name));
     return enqueueRetryableOperation(type, body, async (hooks) => {
       await hooks.updateProgress?.({ unit: "items", total: 1, completed: 0, phase: "Renaming", currentPath: src });
+      await assertRenameTargetAvailable(src, dest);
       await fs.rename(src, dest);
       await hooks.updateProgress?.({ unit: "items", total: 1, completed: 1, phase: "Updating labels", currentPath: dest });
       await checkpointRecovery(hooks, {
@@ -3374,11 +3666,44 @@ async function runRetryableOperation(type, body, options = {}) {
   throw new Error("This operation cannot be retried.");
 }
 
+const pendingOperationRetries = new Map();
+
+function claimOperationRetry(id, kind, indexes = []) {
+  const claims = pendingOperationRetries.get(id) || [];
+  const conflict = claims.some((claim) =>
+    claim.kind === kind
+      ? kind !== "selected" || claim.indexes.some((index) => indexes.includes(index))
+      : kind !== "retry" && claim.kind !== "retry"
+  );
+  if (conflict) {
+    throw new Error("A retry of this operation is already in progress.");
+  }
+  const claim = { kind, indexes };
+  pendingOperationRetries.set(id, [...claims, claim]);
+  return () => {
+    const remaining = (pendingOperationRetries.get(id) || []).filter((item) => item !== claim);
+    if (remaining.length) {
+      pendingOperationRetries.set(id, remaining);
+    } else {
+      pendingOperationRetries.delete(id);
+    }
+  };
+}
+
 async function retryRecordedOperation(operationId, options = {}) {
   const id = String(operationId || "");
   if (!id) {
     throw new Error("Operation id is required.");
   }
+  const release = claimOperationRetry(id, "retry");
+  try {
+    return await retryRecordedOperationClaimed(id, options);
+  } finally {
+    release();
+  }
+}
+
+async function retryRecordedOperationClaimed(id, options) {
   const state = await readState();
   const original = state.operations.find((item) => item.id === id);
   if (!original) {
@@ -3416,6 +3741,15 @@ async function retryRemainingRecordedOperation(operationId) {
   if (!id) {
     throw new Error("Operation id is required.");
   }
+  const release = claimOperationRetry(id, "remaining");
+  try {
+    return await retryRemainingRecordedOperationClaimed(id);
+  } finally {
+    release();
+  }
+}
+
+async function retryRemainingRecordedOperationClaimed(id) {
   const state = await readState();
   const original = state.operations.find((item) => item.id === id);
   if (!original) {
@@ -3461,7 +3795,7 @@ function selectedRecoveryIndexes(value) {
       indexes
         .map((item) => Number(item))
         .filter((item) => Number.isInteger(item) && item >= 0)
-        .slice(0, 500)
+        .slice(0, retryMaxItems)
     )
   ];
 }
@@ -3491,6 +3825,15 @@ async function retrySelectedRemainingRecordedOperation(operationId, indexes) {
   if (!selectedIndexes.length) {
     throw new Error("Select at least one remaining item to retry.");
   }
+  const release = claimOperationRetry(id, "selected", selectedIndexes);
+  try {
+    return await retrySelectedRemainingRecordedOperationClaimed(id, selectedIndexes);
+  } finally {
+    release();
+  }
+}
+
+async function retrySelectedRemainingRecordedOperationClaimed(id, selectedIndexes) {
   const state = await readState();
   const original = state.operations.find((item) => item.id === id);
   if (!original) {
@@ -3666,20 +4009,48 @@ function elevatedRetryWarnings(type) {
 function elevatedHelperScriptContent() {
   return `param(
   [Parameter(Mandatory = $true)]
-  [string]$PayloadPath
+  [string]$PayloadPath,
+  [string]$PayloadSha256 = ""
 )
 $ErrorActionPreference = "Stop"
 $runDir = Split-Path -Parent $PayloadPath
 $manifestPath = Join-Path -Path $runDir -ChildPath "manifest.json"
+$payloadBytes = [IO.File]::ReadAllBytes($PayloadPath)
+$sha256 = [Security.Cryptography.SHA256]::Create()
+$actualHash = ([BitConverter]::ToString($sha256.ComputeHash($payloadBytes)) -replace '-','').ToLowerInvariant()
+$sha256.Dispose()
+if ($PayloadSha256 -and $actualHash -ne $PayloadSha256.ToLowerInvariant()) {
+  throw "Payload hash mismatch. The elevated retry payload may have changed after preparation."
+}
 if (Test-Path -LiteralPath $manifestPath) {
   $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
   $expectedHash = ([string]$manifest.payloadSha256).ToLowerInvariant()
-  $actualHash = (Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($expectedHash -and $actualHash -ne $expectedHash) {
     throw "Payload hash mismatch. The elevated retry payload may have changed after preparation."
   }
 }
-$payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$payload = [Text.Encoding]::UTF8.GetString($payloadBytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
+
+function Remove-ItemTreeNoFollow {
+  param([Parameter(Mandatory = $true)][string]$LiteralPath)
+  $item = Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
+  $attributes = $item.Attributes
+  $isDirectory = [bool]($attributes -band [IO.FileAttributes]::Directory)
+  $isLink = [bool]($attributes -band [IO.FileAttributes]::ReparsePoint)
+  if (-not $isLink -and ($attributes -band [IO.FileAttributes]::ReadOnly)) {
+    $item.Attributes = $attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+  }
+  if ($isDirectory -and -not $isLink) {
+    foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)) {
+      Remove-ItemTreeNoFollow -LiteralPath $child.FullName
+    }
+  }
+  if ($isDirectory) {
+    [IO.Directory]::Delete($item.FullName, $false)
+  } else {
+    [IO.File]::Delete($item.FullName)
+  }
+}
 
 function Get-UniquePath {
   param(
@@ -3713,7 +4084,7 @@ foreach ($item in @($payload.items)) {
   $source = [string]$item.path
   try {
     if ($type -eq "delete") {
-      Remove-Item -LiteralPath $source -Recurse -Force -ErrorAction Stop
+      Remove-ItemTreeNoFollow -LiteralPath $source
       $results += [pscustomobject]@{ path = $source; action = "delete"; ok = $true }
       continue
     }
@@ -3756,7 +4127,7 @@ if ($errors.Count -gt 0) {
 }
 
 function powerShellLiteral(value) {
-  return `'${String(value ?? "").replaceAll("'", "''")}'`;
+  return quotePowerShellLiteral(value);
 }
 
 async function writeElevatedRetryHelper(payload) {
@@ -3784,7 +4155,8 @@ async function writeElevatedRetryHelper(payload) {
   const launcher = `$ErrorActionPreference = "Stop"
 $script = ${powerShellLiteral(scriptPath)}
 $payload = ${powerShellLiteral(payloadPath)}
-Start-Process -FilePath "powershell.exe" -Verb RunAs -WindowStyle Hidden -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script, "-PayloadPath", $payload)
+$payloadSha256 = '${payloadSha256}'
+Start-Process -FilePath "powershell.exe" -Verb RunAs -WindowStyle Hidden -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"' + $script + '"'), "-PayloadPath", ('"' + $payload + '"'), "-PayloadSha256", $payloadSha256)
 `;
 
   await fs.mkdir(runDir, { recursive: true });
@@ -4037,17 +4409,29 @@ async function resumeOperation(operationId) {
 }
 
 async function readJson(req) {
-  let body = "";
+  // The limit is 2M decoded characters; 3 UTF-8 bytes per UTF-16 unit bounds the raw bytes.
+  const tooLarge = () => Object.assign(new Error("Request body is too large."), { status: 413 });
+  const chunks = [];
+  let size = 0;
   for await (const chunk of req) {
-    body += chunk;
-    if (body.length > 2_000_000) {
-      throw new Error("Request body is too large.");
+    size += chunk.length;
+    if (size > 6_000_000) {
+      throw tooLarge();
     }
+    chunks.push(chunk);
+  }
+  const body = Buffer.concat(chunks, size).toString("utf8");
+  if (body.length > 2_000_000) {
+    throw tooLarge();
   }
   if (!body.trim()) {
     return {};
   }
-  return JSON.parse(body);
+  try {
+    return JSON.parse(body);
+  } catch (error) {
+    throw Object.assign(new Error(`Request body is not valid JSON: ${error.message}`), { status: 400 });
+  }
 }
 
 function resolveUserPath(value) {
@@ -4057,6 +4441,9 @@ function resolveUserPath(value) {
   const text = String(value);
   if (text.startsWith("~/") || text.startsWith("~\\")) {
     return path.resolve(path.join(os.homedir(), text.slice(2)));
+  }
+  if (process.platform === "win32" && /^[A-Za-z]:$/.test(text)) {
+    return path.resolve(`${text}\\`);
   }
   return path.resolve(text);
 }
@@ -4544,9 +4931,7 @@ async function flushFolderDimensionsCache(cache, entries = []) {
       updatedAt: new Date().toISOString(),
       entries: cache.entries
     };
-    const temp = `${cache.file}.${process.pid}.${Date.now()}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(payload, null, 2), "utf8");
-    await fs.rename(temp, cache.file);
+    await writeFileAtomicShared(cache.file, JSON.stringify(payload));
     cache.writeMs = elapsedMs(writeStart);
     cache.dirty = false;
   }
@@ -4628,9 +5013,83 @@ function parseAttribLine(line) {
   };
 }
 
+function runProcessBuffered(file, args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(file, args, { windowsHide: true, env: options.env || process.env });
+    const chunks = [];
+    let settled = false;
+    const finish = (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ code, stdout: Buffer.concat(chunks) });
+    };
+    const timeout = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {}
+      finish(-1);
+    }, Number(options.timeoutMs || 30000));
+    timeout.unref?.();
+    child.stdout.on("data", (chunk) => chunks.push(chunk));
+    child.stderr.resume();
+    child.on("error", () => finish(-1));
+    child.on("exit", (code) => finish(code));
+  });
+}
+
+const windowsAttributeLetters = [
+  [0x1, "R"],
+  [0x2, "H"],
+  [0x4, "S"],
+  [0x20, "A"],
+  [0x400, "L"],
+  [0x800, "C"],
+  [0x4000, "E"],
+  [0x2000, "I"]
+];
+
+// attrib.exe writes names in the OEM code page with best-fit substitution, so
+// directories containing non-ASCII names are read through PowerShell as UTF-8.
+async function powerShellAttributeMap(dir) {
+  const script =
+    "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; " +
+    "Get-ChildItem -LiteralPath $env:EXPLORE_BETTER_ATTRIBUTE_DIR -Force -ErrorAction SilentlyContinue | " +
+    'ForEach-Object { "{0}`t{1}" -f [int]$_.Attributes, $_.Name }';
+  const result = await runProcessBuffered(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    { env: { ...process.env, EXPLORE_BETTER_ATTRIBUTE_DIR: dir }, timeoutMs: 60000 }
+  );
+  if (result.code !== 0) {
+    return null;
+  }
+  const map = new Map();
+  for (const line of result.stdout.toString("utf8").split(/\r?\n/)) {
+    const tab = line.indexOf("\t");
+    const value = Number(line.slice(0, tab));
+    const name = line.slice(tab + 1);
+    if (tab <= 0 || !Number.isInteger(value) || !name) {
+      continue;
+    }
+    const flags = windowsAttributeLetters.filter(([bit]) => (value & bit) !== 0).map(([, letter]) => letter).join("");
+    map.set(pathIdentity(path.join(dir, name)), flags);
+  }
+  return map;
+}
+
 async function windowsAttributeMap(dir) {
   if (process.platform !== "win32") {
     return new Map();
+  }
+  const names = await fs.readdir(dir).catch(() => null);
+  if (names?.some((name) => /[^\x20-\x7e]/.test(name))) {
+    const unicodeMap = await powerShellAttributeMap(dir);
+    if (unicodeMap) {
+      return unicodeMap;
+    }
   }
   const result = await runProcess("attrib.exe", ["/d", path.join(dir, "*")]);
   if (result.code !== 0 && !result.stdout) {
@@ -4639,11 +5098,27 @@ async function windowsAttributeMap(dir) {
   const map = new Map();
   for (const line of result.stdout.split(/\r?\n/)) {
     const record = parseAttribLine(line);
-    if (record?.path) {
+    if (record?.path && !/[^\x20-\x7e]|\?/.test(record.path)) {
       map.set(pathIdentity(record.path), record.flags);
     }
   }
   return map;
+}
+
+// Querying the item itself avoids enumerating its parent, and the flags are read
+// without matching the echoed name, which attrib.exe may have transcoded lossily.
+async function windowsAttributeFlagsForPath(itemPath) {
+  if (process.platform !== "win32") {
+    return "";
+  }
+  const result = await runProcess("attrib.exe", [itemPath]);
+  for (const line of String(result.stdout || "").split(/\r?\n/)) {
+    const match = /^([A-Z ]*?)\s*([A-Za-z]:\\.*|\\\\.*)$/.exec(line.trimEnd());
+    if (match) {
+      return match[1].replace(/[^A-Z]/g, "");
+    }
+  }
+  return "";
 }
 
 async function nativeWindowsAttributeMap(dir, signal = null) {
@@ -5064,8 +5539,7 @@ async function statPathEntry(itemPath) {
   const name = path.basename(resolved) || resolved;
   const isDirectory = stats.isDirectory();
   const extension = isDirectory ? "" : path.extname(name).toLowerCase();
-  const attributeMap = await windowsAttributeMap(path.dirname(resolved));
-  const attributes = attributesForEntry(name, stats, attributeMap.get(pathIdentity(resolved)));
+  const attributes = attributesForEntry(name, stats, await windowsAttributeFlagsForPath(resolved));
   const linkMetadata = await linkMetadataForEntry(resolved, stats, lstat);
   const dimensions = await imageDimensionsForEntry(resolved, stats, extension);
   return {
@@ -5477,6 +5951,10 @@ function dropDirectoryListingCacheForWatchKey(watchKey) {
   }
 }
 
+// Mutation maps also carry each path's parent (for listing invalidation); this
+// records which keys are the mutated paths themselves.
+const directoryListingMutationTargets = new WeakMap();
+
 function addDirectoryListingMutationPath(dirs, itemPath) {
   if (typeof itemPath !== "string") {
     return;
@@ -5488,6 +5966,12 @@ function addDirectoryListingMutationPath(dirs, itemPath) {
   try {
     const resolved = resolveUserPath(text);
     dirs.set(pathIdentity(resolved), resolved);
+    let targets = directoryListingMutationTargets.get(dirs);
+    if (!targets) {
+      targets = new Set();
+      directoryListingMutationTargets.set(dirs, targets);
+    }
+    targets.add(pathIdentity(resolved));
     if (!isRoot(resolved)) {
       const parent = path.dirname(resolved);
       dirs.set(pathIdentity(parent), parent);
@@ -5557,21 +6041,23 @@ function invalidateDirectoryListingCachesForOperation(type, body, output, error 
   return invalidateDirectoryListingCachesForDirs(dirs, `operation:${type}`);
 }
 
-function backgroundIndexRootMatchesMutation(root, mutationPath) {
+function backgroundIndexRootMatchesMutation(root, mutationPath, includeAncestor = true) {
   if (!root?.path || root.enabled === false || typeof mutationPath !== "string") {
     return false;
   }
   try {
     const rootPath = resolveUserPath(root.path);
     const itemPath = resolveUserPath(mutationPath);
-    return isInsidePath(itemPath, rootPath) || isInsidePath(rootPath, itemPath);
+    return isInsidePath(itemPath, rootPath) || (includeAncestor && isInsidePath(rootPath, itemPath));
   } catch {
     return false;
   }
 }
 
 async function invalidateBackgroundIndexesForDirs(dirs, reason = "mutation", source = "operation") {
-  const affectedPaths = [...dirs.values()].filter(Boolean);
+  const targets = directoryListingMutationTargets.get(dirs);
+  const affectedEntries = [...dirs].filter(([, itemPath]) => Boolean(itemPath));
+  const affectedPaths = affectedEntries.map(([, itemPath]) => itemPath);
   if (!affectedPaths.length) {
     return { reason, affected: 0, roots: [] };
   }
@@ -5580,7 +6066,9 @@ async function invalidateBackgroundIndexesForDirs(dirs, reason = "mutation", sou
   const roots = Array.isArray(state.backgroundIndexes) ? state.backgroundIndexes : [];
   const affectedRoots = [];
   for (const root of roots) {
-    const matches = affectedPaths.filter((itemPath) => backgroundIndexRootMatchesMutation(root, itemPath));
+    const matches = affectedEntries
+      .filter(([key, itemPath]) => backgroundIndexRootMatchesMutation(root, itemPath, !targets || targets.has(key)))
+      .map(([, itemPath]) => itemPath);
     if (!matches.length) {
       continue;
     }
@@ -5656,14 +6144,7 @@ async function safelyInvalidateBackgroundIndexesForOperation(type, body, output,
 }
 
 function directoryListingCacheWatcherForDir(dir) {
-  const watchKey = pathIdentity(dir);
-  let record = folderWatchers.get(watchKey);
-  if (!record) {
-    record = createFolderWatcher(dir, watchKey);
-  }
-  record.lastAccess = Date.now();
-  pruneFolderWatchers();
-  return record;
+  return folderWatcherRecordForDir(dir);
 }
 
 function directoryListingCacheHitPayload(cached, context) {
@@ -5773,7 +6254,20 @@ async function coalescedDirectoryListing(context, loader) {
   if (existing) {
     existing.joined += 1;
     const joinedAt = monotonicMs();
-    const listing = await existing.promise;
+    let listing;
+    try {
+      listing = await existing.promise;
+    } catch (error) {
+      // The shared load ran under the first requester's signal; a joiner that is
+      // still wanted retries with its own loader instead of inheriting the abort.
+      if (!isAbortError(error) || context.signal?.aborted) {
+        throw error;
+      }
+      if (directoryListingInFlight.get(inFlightKey) === existing) {
+        directoryListingInFlight.delete(inFlightKey);
+      }
+      return coalescedDirectoryListing(context, loader);
+    }
     return directoryListingInFlightHitPayload(listing, context, existing, joinedAt);
   }
   const entry = {
@@ -5890,7 +6384,14 @@ async function buildDirectoryListingFromDisk(params) {
     ]);
   } catch (error) {
     if (isAccessError(error)) {
-      return accessDeniedListing(dir, error, timingStart, { ...options, redirectedFrom: redirected ? requestedOriginal : null });
+      return accessDeniedListing(dir, error, timingStart, {
+        showHidden,
+        includeDimensions,
+        includeLinks,
+        includeAttributes,
+        includeSignature,
+        redirectedFrom: redirected ? requestedOriginal : null
+      });
     }
     throw error;
   }
@@ -5949,7 +6450,13 @@ async function buildDirectoryListingFromDisk(params) {
   }
   const statMs = elapsedMs(statStart);
   const dimensionsCacheStart = monotonicMs();
-  const dimensionsCacheSummary = includeDimensions ? await flushFolderDimensionsCache(dimensionsCacheState, statResults) : null;
+  const dimensionsCacheSummary = includeDimensions
+    ? await flushFolderDimensionsCache(dimensionsCacheState, statResults).catch((error) => ({
+        root: metadataCacheRoot,
+        file: dimensionsCacheState?.file || null,
+        writeError: error?.message || String(error)
+      }))
+    : null;
   const dimensionsCacheMs = includeDimensions ? elapsedMs(dimensionsCacheStart) : 0;
 
   throwIfAborted(signal);
@@ -6104,7 +6611,8 @@ async function listDirectory(targetPath, options = {}) {
       dirStamp: directoryListingCacheStamp(targetStats),
       watcherAvailable,
       skipReason: watcherAvailable ? "miss" : watchRecord?.error || "watch-unavailable",
-      probeMs: 0
+      probeMs: 0,
+      signal
     };
     if (watcherAvailable) {
       labelState = await readLabelState();
@@ -6557,22 +7065,24 @@ function folderIndexCacheMatches(entry, stamp) {
   );
 }
 
+// Serializes once and appends a trailing "bytes" field holding the final file size.
+function serializeJsonWithBytes(payload) {
+  delete payload.bytes;
+  const body = JSON.stringify(payload);
+  const prefix = `${body.length > 2 ? "," : ""}"bytes":`;
+  const baseBytes = Buffer.byteLength(body) + prefix.length;
+  let bytes = baseBytes + 1;
+  while (String(bytes).length !== bytes - baseBytes) {
+    bytes += 1;
+  }
+  payload.bytes = bytes;
+  return `${body.slice(0, -1)}${prefix}${bytes}}`;
+}
+
 async function writeFolderIndex(index) {
   await fs.mkdir(indexRoot, { recursive: true });
   const target = folderIndexFileForPath(index.path);
-  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  let text = "";
-  let previousBytes = -1;
-  for (let pass = 0; pass < 4; pass += 1) {
-    text = JSON.stringify(index, null, 2);
-    const bytes = Buffer.byteLength(text);
-    if (bytes === previousBytes) break;
-    index.bytes = bytes;
-    previousBytes = bytes;
-  }
-  text = JSON.stringify(index, null, 2);
-  await fs.writeFile(temp, text, "utf8");
-  await fs.rename(temp, target);
+  await writeFileAtomicShared(target, serializeJsonWithBytes(index));
   try {
     const stat = await fs.stat(target);
     const stamp = folderIndexCacheStamp(stat);
@@ -6703,6 +7213,11 @@ async function readFolderIndexResult(targetPath) {
 }
 
 async function buildFolderIndex(targetPath, options = {}) {
+  return writeFolderIndex(await buildFolderIndexData(targetPath, options));
+}
+
+// Lists and compacts a folder without persisting a per-folder index file.
+async function buildFolderIndexData(targetPath, options = {}) {
   const buildStart = monotonicMs();
   const resolved = resolveUserPath(targetPath);
   const listing = await listDirectory(resolved, {
@@ -6733,16 +7248,18 @@ async function buildFolderIndex(targetPath, options = {}) {
     count: entries.length,
     listTiming: listing.timing,
     buildMs: elapsedMs(buildStart),
-    tokenIndex: buildBackgroundSearchTokenIndex(entries),
+    tokenIndex: options.tokenIndex === false ? null : buildBackgroundSearchTokenIndex(entries),
     entries
   };
-  return writeFolderIndex(index);
+  return index;
 }
 
 function pruneFolderIndexJobs() {
   const jobs = [...folderIndexJobs.values()].sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
   for (const job of jobs.slice(folderIndexJobLimit)) {
-    folderIndexJobs.delete(job.id);
+    if (job.status !== "running") {
+      folderIndexJobs.delete(job.id);
+    }
   }
 }
 
@@ -6880,8 +7397,17 @@ async function searchFolderIndex({ targetPath, query, limit = 120 } = {}) {
   };
 }
 
+// Root ids arrive in request bodies, so only plain ids are used verbatim as file
+// name parts; anything else is hashed to keep store files inside indexRoot.
 function backgroundIndexStoreId(rootId) {
-  return sanitizeReferenceId(rootId) || crypto.randomUUID();
+  const id = sanitizeReferenceId(rootId);
+  if (!id) {
+    return crypto.randomUUID();
+  }
+  if (/^[A-Za-z0-9_-]{1,120}$/.test(id)) {
+    return id;
+  }
+  return `h-${crypto.createHash("sha256").update(id).digest("hex").slice(0, 32)}`;
 }
 
 function backgroundIndexManifestFile(rootId) {
@@ -6892,11 +7418,9 @@ function backgroundIndexSearchFile(rootId) {
   return path.join(indexRoot, `background-${backgroundIndexStoreId(rootId)}-search.json`);
 }
 
-async function writeJsonAtomic(filePath, payload) {
+async function writeJsonAtomic(filePath, payload, text = null) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const temp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(temp, JSON.stringify(payload, null, 2), "utf8");
-  await fs.rename(temp, filePath);
+  await writeFileAtomicShared(filePath, text ?? JSON.stringify(payload));
   return payload;
 }
 
@@ -6923,9 +7447,41 @@ async function readJsonFile(filePath) {
   }
 }
 
+const transientJsonReadCodes = new Set(["EBUSY", "EMFILE", "ENFILE", "EAGAIN", "EPERM", "EACCES"]);
+
+async function readJsonTextWithRetry(filePath, attempts = 4) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fs.readFile(filePath, "utf8");
+    } catch (error) {
+      if (!transientJsonReadCodes.has(error?.code) || attempt >= attempts - 1) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+}
+
+// Only unparsable or schema-invalid files are quarantined; I/O failures (locks,
+// handle exhaustion, oversized files) leave a possibly valid cache in place.
 async function readRepairableJsonFile(filePath) {
+  let text;
   try {
-    const text = await fs.readFile(filePath, "utf8");
+    text = await readJsonTextWithRetry(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { data: null, missing: true, corrupt: false, error: null, quarantinedPath: null };
+    }
+    return {
+      data: null,
+      missing: false,
+      corrupt: false,
+      error: error.message || String(error),
+      readErrorCode: error.code || null,
+      quarantinedPath: null
+    };
+  }
+  try {
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return {
@@ -6938,9 +7494,6 @@ async function readRepairableJsonFile(filePath) {
     }
     return { data: parsed, missing: false, corrupt: false, error: null, quarantinedPath: null };
   } catch (error) {
-    if (error.code === "ENOENT") {
-      return { data: null, missing: true, corrupt: false, error: null, quarantinedPath: null };
-    }
     return {
       data: null,
       missing: false,
@@ -6968,17 +7521,22 @@ function clampDays(value, fallback) {
 }
 
 async function readJsonForCacheMaintenance(filePath) {
+  let text;
   try {
-    const text = await fs.readFile(filePath, "utf8");
+    text = await readJsonTextWithRetry(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { data: null, corrupt: false, missing: true, error: null };
+    }
+    return { data: null, corrupt: false, missing: false, error: error.message || String(error) };
+  }
+  try {
     const data = JSON.parse(text);
     if (!data || typeof data !== "object" || Array.isArray(data)) {
       return { data: null, corrupt: true, missing: false, error: "JSON root is not an object." };
     }
     return { data, corrupt: false, missing: false, error: null };
   } catch (error) {
-    if (error.code === "ENOENT") {
-      return { data: null, corrupt: false, missing: true, error: null };
-    }
     return { data: null, corrupt: true, missing: false, error: error.message || String(error) };
   }
 }
@@ -6991,12 +7549,11 @@ async function statOrNull(filePath) {
   }
 }
 
-async function readdirFilesOrEmpty(dirPath, limit) {
+async function readdirFilesOrEmpty(dirPath) {
   try {
     const dirents = await fs.readdir(dirPath, { withFileTypes: true });
     return dirents
       .filter((dirent) => dirent.isFile())
-      .slice(0, limit)
       .map((dirent) => path.join(dirPath, dirent.name));
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -7058,6 +7615,8 @@ async function deleteOwnedCacheFile(filePath, rootPath) {
   await fs.rm(filePath, { force: true });
 }
 
+const cacheMaintenanceTempMinAgeMs = 10 * 60 * 1000;
+
 async function cacheMaintenanceDecision(filePath, cacheKind, rootPath, context) {
   const stat = await statOrNull(filePath);
   if (!stat?.isFile?.()) {
@@ -7080,18 +7639,12 @@ async function cacheMaintenanceDecision(filePath, cacheKind, rootPath, context) 
     return { ...base, reason: "quarantined-cache", delete: true };
   }
   if (name.endsWith(".tmp")) {
-    return { ...base, reason: "stale-temp-file", delete: age.ageMs >= Math.min(context.maxAgeMs, 60 * 60 * 1000) };
+    // Temp files younger than ten minutes may belong to a write still in progress.
+    const tempAgeMs = Math.max(cacheMaintenanceTempMinAgeMs, Math.min(context.maxAgeMs, 60 * 60 * 1000));
+    return { ...base, reason: "stale-temp-file", delete: age.ageMs >= tempAgeMs };
   }
   if (!name.endsWith(".json")) {
     return null;
-  }
-
-  const read = await readJsonForCacheMaintenance(filePath);
-  if (read.corrupt) {
-    return { ...base, reason: "corrupt-json", readError: read.error, delete: true };
-  }
-  if (!read.data) {
-    return { ...base, reason: "missing-cache-file", delete: false };
   }
 
   if (cacheKind === "index" && isBackgroundCacheFile(filePath)) {
@@ -7104,6 +7657,14 @@ async function cacheMaintenanceDecision(filePath, cacheKind, rootPath, context) 
       return { ...base, reason: "active-background-root-preserved", delete: false, protected: true, rootId };
     }
     return { ...base, reason: "active-background-root", delete: false, protected: true, rootId };
+  }
+
+  const read = await readJsonForCacheMaintenance(filePath);
+  if (read.corrupt) {
+    return { ...base, reason: "corrupt-json", readError: read.error, delete: true };
+  }
+  if (!read.data) {
+    return { ...base, reason: read.error ? "cache-read-error" : "missing-cache-file", readError: read.error, delete: false };
   }
 
   if (cacheKind === "index") {
@@ -7146,15 +7707,17 @@ async function cacheMaintenanceDecision(filePath, cacheKind, rootPath, context) 
 async function cacheMaintenanceReport(options = {}) {
   const opts = cacheMaintenanceOptions(options, options.method || "GET");
   const state = await readState();
-  const activeBackgroundRootIds = new Set((state.backgroundIndexes || []).map((root) => root.id).filter(Boolean));
+  const activeBackgroundRootIds = new Set(
+    (state.backgroundIndexes || []).map((root) => root.id).filter(Boolean).map(backgroundIndexStoreId)
+  );
   const context = {
     nowMs: Date.now(),
     maxAgeMs: opts.maxAgeMs,
     activeBackgroundRootIds
   };
   const dimensionsRoot = path.join(metadataCacheRoot, "Dimensions");
-  const indexFiles = (await readdirFilesOrEmpty(indexRoot, opts.fileLimit)).filter(cacheFileLooksMaintenanceEligible);
-  const metadataFiles = (await readdirFilesOrEmpty(dimensionsRoot, opts.fileLimit)).filter(cacheFileLooksMaintenanceEligible);
+  const indexFiles = (await readdirFilesOrEmpty(indexRoot)).filter(cacheFileLooksMaintenanceEligible);
+  const metadataFiles = (await readdirFilesOrEmpty(dimensionsRoot)).filter(cacheFileLooksMaintenanceEligible);
   const decisions = [];
   for (const filePath of indexFiles) {
     const decision = await cacheMaintenanceDecision(filePath, "index", indexRoot, context);
@@ -7223,8 +7786,32 @@ async function cacheMaintenanceReport(options = {}) {
     byCache,
     byReason,
     items: opts.includeItems ? decisions.slice(0, opts.fileLimit) : undefined,
-    appliedItems: opts.includeItems ? appliedItems : undefined
+    appliedItems: opts.includeItems ? appliedItems.slice(0, opts.fileLimit) : undefined
   };
+}
+
+let cacheMaintenanceScheduled = false;
+
+// Applies the default maintenance policy shortly after startup and then daily.
+function scheduleCacheMaintenance() {
+  if (cacheMaintenanceScheduled || process.env.EXPLORE_BETTER_CACHE_MAINTENANCE === "0") {
+    return;
+  }
+  cacheMaintenanceScheduled = true;
+  let running = false;
+  const run = async () => {
+    if (running) return;
+    running = true;
+    try {
+      await cacheMaintenanceReport({ method: "POST", apply: true, includeItems: false });
+    } catch (error) {
+      console.warn(`Cache maintenance failed: ${error.message || error}`);
+    } finally {
+      running = false;
+    }
+  };
+  setTimeout(run, 2 * 60 * 1000).unref?.();
+  setInterval(run, 24 * 60 * 60 * 1000).unref?.();
 }
 
 function backgroundIndexJobSnapshot(job) {
@@ -7248,7 +7835,9 @@ function pruneBackgroundIndexJobs() {
     String(b.startedAt).localeCompare(String(a.startedAt))
   );
   for (const job of jobs.slice(backgroundIndexJobLimit)) {
-    backgroundIndexJobs.delete(job.id);
+    if (job.status !== "running") {
+      backgroundIndexJobs.delete(job.id);
+    }
   }
 }
 
@@ -7570,6 +8159,7 @@ async function backgroundIndexFreshness(root, store, manifest = null) {
   const entries = entryFreshnessStamps(store);
   const limitedFolders = folders.slice(0, folderLimit);
   const limitedEntries = entries.slice(0, entryLimit);
+  const entryTotal = Number.isFinite(store.freshnessEntryTotal) ? store.freshnessEntryTotal : entries.length;
   const base = {
     builtAt: store.builtAt || manifest?.builtAt || null,
     foldersChecked: 0,
@@ -7578,9 +8168,9 @@ async function backgroundIndexFreshness(root, store, manifest = null) {
     entrySamples: limitedEntries.length,
     folderSampleLimit: folderLimit,
     entrySampleLimit: entryLimit,
-    sampleLimited: folders.length > limitedFolders.length || entries.length > limitedEntries.length,
+    sampleLimited: folders.length > limitedFolders.length || entryTotal > limitedEntries.length,
     checkedFoldersTotal: folders.length,
-    checkedEntriesTotal: entries.length
+    checkedEntriesTotal: entryTotal
   };
 
   let result;
@@ -7880,23 +8470,35 @@ async function writeBackgroundIndexStore(root, manifest, entries) {
     tokenIndex,
     entries
   };
-  let text = "";
-  let previousBytes = -1;
-  for (let pass = 0; pass < 4; pass += 1) {
-    text = JSON.stringify(searchStore, null, 2);
-    const bytes = Buffer.byteLength(text);
-    if (bytes === previousBytes) break;
-    searchStore.bytes = bytes;
-    previousBytes = bytes;
-  }
+  const text = serializeJsonWithBytes(searchStore);
   const searchFile = backgroundIndexSearchFile(root.id);
-  await writeJsonAtomic(searchFile, searchStore);
+  await writeJsonAtomic(searchFile, searchStore, text);
   backgroundIndexSearchStoreCache.delete(searchFile);
+  try {
+    // Seed the store cache with the object just written so the first search
+    // after a build does not have to re-read and parse it.
+    const stamp = backgroundIndexSearchStoreCacheStamp(await fs.stat(searchFile));
+    if (stamp.size === searchStore.bytes) {
+      backgroundIndexSearchStoreCache.set(searchFile, {
+        result: { data: searchStore, missing: false, corrupt: false, error: null, quarantinedPath: null },
+        size: stamp.size,
+        mtimeMs: stamp.mtimeMs,
+        bytes: stamp.size,
+        lastUsedMs: Date.now()
+      });
+      pruneBackgroundIndexSearchStoreCache();
+    }
+  } catch {}
   backgroundIndexFreshnessCache.clear();
+  const freshnessEntries = entryFreshnessStamps(searchStore);
   return writeJsonAtomic(backgroundIndexManifestFile(root.id), {
     ...manifest,
     searchFile,
-    bytes: searchStore.bytes
+    bytes: searchStore.bytes,
+    // Lets the overview summarize and freshness-check without parsing the store.
+    searchSummary: { ...backgroundIndexStoreSummary(searchStore), version: searchStore.version },
+    freshnessEntries: freshnessEntries.slice(0, backgroundIndexFreshnessLimits().entryLimit),
+    freshnessEntryTotal: freshnessEntries.length
   });
 }
 
@@ -8002,8 +8604,11 @@ async function backgroundIndexContentForEntries(root, entries, remainingContentS
 }
 
 function backgroundIndexSearchEntry(root, folderPath, entry, content = null) {
-  const contentText = content?.indexed ? String(content.text || "") : "";
-  const searchText = [entry.searchText || "", contentText].filter(Boolean).join("\n").toLowerCase();
+  // Content is stored once, as the tail of searchText starting at contentOffset;
+  // stores from older versions carry a separate contentText field instead.
+  const metaText = String(entry.searchText || "").toLowerCase();
+  const contentText = content?.indexed ? String(content.text || "").toLowerCase() : "";
+  const searchText = metaText && contentText ? `${metaText}\n${contentText}` : metaText || contentText;
   return {
     rootId: root.id,
     rootName: root.name,
@@ -8036,9 +8641,16 @@ function backgroundIndexSearchEntry(root, folderPath, entry, content = null) {
     dimensionPixels: Number(entry.dimensionPixels || 0),
     contentIndexed: content?.indexed === true,
     contentBytes: Number(content?.bytes || 0),
-    contentText: contentText.toLowerCase(),
+    contentOffset: searchText.length - contentText.length,
     searchText
   };
+}
+
+function backgroundEntryContentText(entry) {
+  if (typeof entry?.contentText === "string") {
+    return entry.contentText;
+  }
+  return entry?.contentIndexed ? String(entry.searchText || "").slice(Number(entry.contentOffset) || 0) : "";
 }
 
 async function buildBackgroundIndexRoot(root, job, signal) {
@@ -8089,12 +8701,13 @@ async function buildBackgroundIndexRoot(root, job, signal) {
     let index;
     try {
       if (!(await guard(folderPath))) continue;
-      index = await buildFolderIndex(folderPath, {
+      index = await buildFolderIndexData(folderPath, {
         signal,
         showHidden: root.showHidden !== false,
         includeDimensions: root.includeDimensions === true,
         includeLinks: root.includeLinks === true,
-        priority: "background"
+        priority: "background",
+        tokenIndex: false
       });
     } catch (error) {
       if (isOperationCanceled(error) || isAbortError(error) || signal?.aborted) throw error;
@@ -8131,14 +8744,15 @@ async function buildBackgroundIndexRoot(root, job, signal) {
 
     const entries = Array.isArray(index.entries) ? index.entries : [];
     const entryCapacity = Math.max(0, root.maxEntries - aggregateEntries.length);
-    const eligibleEntries = entries.filter(entry => !entry.isSymlink && !entry.reparse && (!entry.linkType || entry.linkType === "Hard Link"));
-    const aggregateCandidates = eligibleEntries.slice(0, entryCapacity);
-    if (eligibleEntries.length > aggregateCandidates.length) {
+    // Links stay searchable by name and target, but their content lives outside
+    // the traversal contract, so only plain entries are content-indexed.
+    const aggregateCandidates = entries.slice(0, entryCapacity);
+    if (entries.length > aggregateCandidates.length) {
       truncated = true;
     }
     const contentResults = await backgroundIndexContentForEntries(
       root,
-      aggregateCandidates,
+      aggregateCandidates.filter(entry => !entry.isSymlink && !entry.reparse && (!entry.linkType || entry.linkType === "Hard Link")),
       Math.max(0, root.maxContentFiles - contentIndexed),
       signal
     );
@@ -8283,7 +8897,7 @@ async function deleteBackgroundIndexRoot(rootId) {
     state.backgroundIndexes = (state.backgroundIndexes || []).filter((root) => root.id !== id);
     return state.backgroundIndexes;
   });
-  closeBackgroundIndexWatcher(id);
+  closeBackgroundIndexWatcher(id, { forget: true });
   return { roots };
 }
 
@@ -8326,12 +8940,14 @@ async function startBackgroundIndexJob(rootId) {
       job.status = "complete";
       job.finishedAt = new Date().toISOString();
       job.stats = backgroundIndexStoreSummary(manifest);
-      await updateBackgroundIndexRoot(root.id, {
+      const updatedRoot = await updateBackgroundIndexRoot(root.id, {
         lastCompletedAt: job.finishedAt,
         lastError: null,
         lastStats: job.stats
       });
-      await syncBackgroundIndexWatcher(root, manifest).catch(() => null);
+      if (updatedRoot) {
+        await syncBackgroundIndexWatcher(updatedRoot, manifest).catch(() => null);
+      }
     })
     .catch(async (error) => {
       const canceled = isOperationCanceled(error);
@@ -8361,8 +8977,11 @@ function backgroundIndexWatcherEnabled(root) {
   return Boolean(root?.path && root.enabled !== false && root.watch !== false && root.autoRebuild !== false);
 }
 
-function closeBackgroundIndexWatcher(rootId) {
+function closeBackgroundIndexWatcher(rootId, { forget = false } = {}) {
   const id = sanitizeReferenceId(rootId);
+  if (id && forget) {
+    backgroundIndexAutoRebuilds.delete(id);
+  }
   const record = id ? backgroundIndexWatchers.get(id) : null;
   if (!record) {
     return;
@@ -8382,12 +9001,17 @@ function closeBackgroundIndexWatcher(rootId) {
 }
 
 function closeRemovedBackgroundIndexWatchers(roots = []) {
-  const active = new Set(
-    (Array.isArray(roots) ? roots : []).filter(backgroundIndexWatcherEnabled).map((root) => root.id)
-  );
+  const list = Array.isArray(roots) ? roots : [];
+  const active = new Set(list.filter(backgroundIndexWatcherEnabled).map((root) => root.id));
   for (const rootId of backgroundIndexWatchers.keys()) {
     if (!active.has(rootId)) {
-      closeBackgroundIndexWatcher(rootId);
+      closeBackgroundIndexWatcher(rootId, { forget: true });
+    }
+  }
+  const known = new Set(list.map((root) => root.id));
+  for (const rootId of backgroundIndexAutoRebuilds.keys()) {
+    if (!known.has(rootId)) {
+      backgroundIndexAutoRebuilds.delete(rootId);
     }
   }
 }
@@ -8400,7 +9024,8 @@ function backgroundIndexWatcherSnapshot(rootId) {
         available: record.watchers.length > 0,
         rootId: record.rootId,
         path: record.path,
-        watchedFolders: record.watchers.length,
+        watchedFolders: backgroundIndexWatchedFolderCount(record),
+        recursive: record.recursive === true,
         folderLimit: record.folderLimit,
         debounceMs: record.debounceMs,
         version: record.version,
@@ -8415,8 +9040,13 @@ function backgroundIndexWatcherSnapshot(rootId) {
     : null;
 }
 
-function backgroundIndexWatchFolders(root, manifest = null) {
+function backgroundIndexWatchedFolderCount(record) {
+  return record.recursive ? record.folderKeys.size : record.watchers.length;
+}
+
+function backgroundIndexWatchFolders(root, manifest = null, recursive = false) {
   const folderLimit = backgroundIndexWatchFolderLimit();
+  const cap = recursive ? Infinity : folderLimit;
   const seen = new Set();
   const folders = [];
   const sourceFolders = manifest?.version === 2 && Array.isArray(manifest.folders) && manifest.folders.length ? manifest.folders : [{ path: root.path }];
@@ -8432,7 +9062,7 @@ function backgroundIndexWatchFolders(root, manifest = null) {
     }
     seen.add(key);
     folders.push(resolved);
-    if (folders.length >= folderLimit) {
+    if (folders.length >= cap) {
       break;
     }
   }
@@ -8446,7 +9076,7 @@ function backgroundIndexWatcherSignature(root, folders) {
     root.enabled !== false ? "1" : "0",
     root.watch !== false ? "1" : "0",
     root.autoRebuild !== false ? "1" : "0",
-    folders.map(pathIdentity).join("|")
+    crypto.createHash("sha256").update(folders.map(pathIdentity).join("|")).digest("hex")
   ].join("::");
 }
 
@@ -8474,7 +9104,7 @@ async function runBackgroundIndexWatchRebuild(record) {
     reason: "watch-event",
     path: record.lastEventPath || root.path,
     watchVersion: record.version,
-    watchedFolders: record.watchers.length
+    watchedFolders: backgroundIndexWatchedFolderCount(record)
   });
   record.lastQueuedAt = new Date().toISOString();
   const result = await maybeAutoRebuildBackgroundIndex(root, freshness, "watch");
@@ -8486,6 +9116,10 @@ async function runBackgroundIndexWatchRebuild(record) {
   }
   record.error = result?.error || null;
 }
+
+const backgroundIndexRecursiveWatchSupported =
+  (process.platform === "win32" || process.platform === "darwin") &&
+  process.env.EXPLORE_BETTER_BACKGROUND_WATCH_RECURSIVE !== "0";
 
 function createBackgroundIndexWatcher(root, folders, folderLimit) {
   const debounceMs = backgroundIndexWatchDebounceMs();
@@ -8505,25 +9139,63 @@ function createBackgroundIndexWatcher(root, folders, folderLimit) {
     error: null,
     timer: null,
     cooldownTimer: null,
+    recursive: false,
+    folderKeys: null,
     watchers: []
   };
-  for (const folderPath of folders) {
+  const noteEvent = (eventPath) => {
+    record.version += 1;
+    record.eventCount += 1;
+    record.changedAtMs = Date.now();
+    record.lastEventPath = eventPath;
+    backgroundIndexFreshnessCache.clear();
+    scheduleBackgroundIndexWatchRebuild(record);
+  };
+  // One recursive handle on the root instead of a handle per indexed folder, so
+  // folders inside the root stay renameable. Events are filtered to the indexed
+  // folders (and their direct children) to keep the per-folder semantics.
+  if (backgroundIndexRecursiveWatchSupported) {
     try {
-      const watcher = watch(folderPath, { persistent: false }, (_eventType, filename) => {
-        record.version += 1;
-        record.eventCount += 1;
-        record.changedAtMs = Date.now();
-        record.lastEventPath = filename ? path.join(folderPath, String(filename)) : folderPath;
-        backgroundIndexFreshnessCache.clear();
-        scheduleBackgroundIndexWatchRebuild(record);
+      const folderKeys = new Set(folders.map(pathIdentity));
+      const ignoreAppData = !isInsidePath(root.path, appDataRoot);
+      const watcher = watch(root.path, { persistent: false, recursive: true }, (_eventType, filename) => {
+        if (!filename) {
+          noteEvent(root.path);
+          return;
+        }
+        const eventPath = path.join(root.path, String(filename));
+        if (ignoreAppData && isInsidePath(eventPath, appDataRoot)) {
+          return;
+        }
+        if (folderKeys.has(pathIdentity(path.dirname(eventPath))) || folderKeys.has(pathIdentity(eventPath))) {
+          noteEvent(eventPath);
+        }
       });
       watcher.on("error", (error) => {
         record.error = error.message || String(error);
       });
       watcher.unref?.();
-      record.watchers.push({ path: folderPath, watcher });
+      record.watchers.push({ path: root.path, watcher });
+      record.recursive = true;
+      record.folderKeys = folderKeys;
     } catch (error) {
       record.error = error.message || String(error);
+    }
+  }
+  if (!record.recursive) {
+    for (const folderPath of folders.slice(0, backgroundIndexWatchFolderLimit())) {
+      try {
+        const watcher = watch(folderPath, { persistent: false }, (_eventType, filename) => {
+          noteEvent(filename ? path.join(folderPath, String(filename)) : folderPath);
+        });
+        watcher.on("error", (error) => {
+          record.error = error.message || String(error);
+        });
+        watcher.unref?.();
+        record.watchers.push({ path: folderPath, watcher });
+      } catch (error) {
+        record.error = error.message || String(error);
+      }
     }
   }
   backgroundIndexWatchers.set(root.id, record);
@@ -8547,7 +9219,7 @@ async function syncBackgroundIndexWatcher(root, manifest = null) {
     };
   }
   const resolvedManifest = manifest || (await readBackgroundIndexManifest(root.id).catch(() => null));
-  const { folders, folderLimit } = backgroundIndexWatchFolders(root, resolvedManifest);
+  const { folders, folderLimit } = backgroundIndexWatchFolders(root, resolvedManifest, backgroundIndexRecursiveWatchSupported);
   const signature = backgroundIndexWatcherSignature(root, folders);
   const existing = backgroundIndexWatchers.get(root.id);
   if (existing?.signature === signature) {
@@ -8630,14 +9302,61 @@ async function maybeAutoRebuildBackgroundIndex(root, freshness, source) {
   }
 }
 
+// A store-shaped read built from the manifest's embedded summary and freshness
+// samples. Returns null (full store read) for manifests written by older
+// versions or when the search file on disk no longer matches the manifest.
+async function backgroundIndexManifestSearchRead(root, manifest) {
+  const summary = manifest?.searchSummary;
+  const samples = manifest?.freshnessEntries;
+  if (!summary || typeof summary !== "object" || !Array.isArray(samples)) {
+    return null;
+  }
+  const sampleTotal = Number(manifest.freshnessEntryTotal || 0);
+  if (samples.length < Math.min(sampleTotal, backgroundIndexFreshnessLimits().entryLimit)) {
+    return null;
+  }
+  const filePath = backgroundIndexSearchFile(root.id);
+  const stat = await statOrNull(filePath);
+  if (!stat?.isFile() || Number(stat.size) !== Number(summary.bytes)) {
+    return null;
+  }
+  const { version, ...searchSummary } = summary;
+  return {
+    data: {
+      version,
+      rootId: summary.rootId,
+      path: summary.path,
+      builtAt: summary.builtAt,
+      count: summary.count,
+      bytes: summary.bytes,
+      contentBytes: summary.contentBytes,
+      freshnessEntryTotal: sampleTotal,
+      entries: samples
+    },
+    summary: searchSummary,
+    missing: false,
+    corrupt: false,
+    error: null,
+    quarantinedPath: null,
+    cache: {
+      hit: true,
+      source: "background-manifest-summary",
+      file: filePath,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs
+    }
+  };
+}
+
 async function backgroundIndexOverview() {
   const state = await readState();
   closeRemovedBackgroundIndexWatchers(state.backgroundIndexes || []);
   const roots = await Promise.all(
     (state.backgroundIndexes || []).map(async (root) => {
       const manifestRead = await readBackgroundIndexManifestResult(root.id);
-      const searchRead = await readBackgroundIndexSearchStoreResult(root.id);
       const manifest = manifestRead.data;
+      const searchRead =
+        (await backgroundIndexManifestSearchRead(root, manifest)) || (await readBackgroundIndexSearchStoreResult(root.id));
       const store = searchRead.data;
       const watcher = await syncBackgroundIndexWatcher(root, manifest).catch((error) => ({
         enabled: backgroundIndexWatcherEnabled(root),
@@ -8650,7 +9369,7 @@ async function backgroundIndexOverview() {
       return {
         ...root,
         manifest: manifest ? backgroundIndexStoreSummary(manifest) : null,
-        search: store ? backgroundIndexStoreSummary(store) : null,
+        search: searchRead.summary || (store ? backgroundIndexStoreSummary(store) : null),
         indexRead: backgroundIndexReadSummary(manifestRead, searchRead),
         watcher,
         freshness: freshness
@@ -8766,7 +9485,8 @@ async function searchBackgroundIndexes({ query, limit = 200, rootId = "", rootPa
       }
       const searchable = String(entry.searchText || entry.name || "");
       if (!q || searchable.includes(q)) {
-        const contentHit = Boolean(q && entry.contentIndexed && String(entry.contentText || "").includes(q));
+        const contentText = q && entry.contentIndexed ? backgroundEntryContentText(entry) : "";
+        const contentHit = Boolean(contentText && contentText.includes(q));
         results.push({
           rootId: root.id,
           rootName: root.name,
@@ -8794,7 +9514,7 @@ async function searchBackgroundIndexes({ query, limit = 200, rootId = "", rootPa
           dimensionPixels: entry.dimensionPixels || 0,
           contentIndexed: entry.contentIndexed === true,
           matchSource: contentHit ? "content" : "metadata",
-          matchSnippet: contentHit ? backgroundContentSnippet(entry.contentText, q) : "",
+          matchSnippet: contentHit ? backgroundContentSnippet(contentText, q) : "",
           labelName: entry.labelName,
           labelNotes: entry.labelNotes
         });
@@ -8925,14 +9645,20 @@ function pruneFolderWatchers() {
   }
 }
 
-function createFolderWatcher(dir, key) {
+const folderWatcherRetryMs = 2000;
+
+// TTL pruning must also run while the renderer is idle and nothing accesses watchers.
+setInterval(() => pruneFolderWatchers(), 30000).unref?.();
+
+function createFolderWatcher(dir, key, version = 0) {
   const record = {
     key,
     path: dir,
-    version: 0,
+    version,
     changedAt: null,
     lastAccess: Date.now(),
     error: null,
+    errorAt: 0,
     watcher: null
   };
   try {
@@ -8942,17 +9668,37 @@ function createFolderWatcher(dir, key) {
       dropDirectoryListingInFlightForWatchKey(key);
     });
     watcher.on("error", (error) => {
+      // A failed watcher never recovers; release its handle and let the next
+      // access re-create it, keeping the version sequence for pollers.
       record.error = error.message;
+      record.errorAt = Date.now();
       record.version += 1;
       record.changedAt = Date.now();
-      dropDirectoryListingInFlightForWatchKey(key);
+      try {
+        watcher.close();
+      } catch {}
+      record.watcher = null;
+      if (folderWatchers.get(key) === record) {
+        dropDirectoryListingCacheForWatchKey(key);
+      }
     });
     watcher.unref?.();
     record.watcher = watcher;
   } catch (error) {
     record.error = error.message;
+    record.errorAt = Date.now();
   }
   folderWatchers.set(key, record);
+  pruneFolderWatchers();
+  return record;
+}
+
+function folderWatcherRecordForDir(dir, key = pathIdentity(dir)) {
+  let record = folderWatchers.get(key);
+  if (!record || (!record.watcher && Date.now() - Number(record.errorAt || 0) >= folderWatcherRetryMs)) {
+    record = createFolderWatcher(dir, key, Number(record?.version || 0));
+  }
+  record.lastAccess = Date.now();
   pruneFolderWatchers();
   return record;
 }
@@ -8961,13 +9707,7 @@ async function folderWatchStatus(targetPath, options = {}) {
   const requested = resolveUserPath(targetPath);
   const stats = await fs.stat(requested);
   const dir = stats.isDirectory() ? requested : path.dirname(requested);
-  const key = pathIdentity(dir);
-  let record = folderWatchers.get(key);
-  if (!record) {
-    record = createFolderWatcher(dir, key);
-  }
-  record.lastAccess = Date.now();
-  pruneFolderWatchers();
+  const record = folderWatcherRecordForDir(dir);
   const since = Number(options.since);
   const hasSince = Number.isFinite(since) && since >= 0;
   return {
@@ -9822,11 +10562,25 @@ async function removeCommittedMoveSource(source, dest, options = {}) {
     if (!validSnapshot(moveSnapshot?.source) || !validSnapshot(moveSnapshot?.destination) || moveSnapshot.source.contentDigest !== moveSnapshot.destination.contentDigest) {
       throw new Error("This move has no verified recovery snapshot. Keep both files and compare them before reconciling the move.");
     }
-    const [currentSource, currentDestination] = await Promise.all([
-      pathSnapshot(src, { signal: options.hooks?.signal }),
-      pathSnapshot(target, { signal: options.hooks?.signal })
-    ]);
-    if (currentSource.stateDigest !== moveSnapshot.source.stateDigest || currentDestination.stateDigest !== moveSnapshot.destination.stateDigest) {
+    const quickStates = options.quickStates;
+    let changed;
+    if (quickStates?.source && quickStates?.destination) {
+      // Same-process removal: both sides were content-hashed once and compared
+      // above, and their cheap state was captured before hashing, so any later
+      // write shows up as a changed identity, size, mtime, mode, or membership.
+      const [currentSource, currentDestination] = await Promise.all([
+        pathQuickState(src, options.hooks?.signal),
+        pathQuickState(target, options.hooks?.signal)
+      ]);
+      changed = currentSource !== quickStates.source || currentDestination !== quickStates.destination;
+    } else {
+      const [currentSource, currentDestination] = await Promise.all([
+        pathSnapshot(src, { signal: options.hooks?.signal }),
+        pathSnapshot(target, { signal: options.hooks?.signal })
+      ]);
+      changed = currentSource.stateDigest !== moveSnapshot.source.stateDigest || currentDestination.stateDigest !== moveSnapshot.destination.stateDigest;
+    }
+    if (changed) {
       throw new Error("The source or destination changed after this move was copied. Both paths were preserved; compare them before reconciling the move.");
     }
     if (testFailSourceRemoval) {
@@ -9856,10 +10610,34 @@ async function removeCommittedMoveSource(source, dest, options = {}) {
   }
 }
 
+// Metadata-only digest (no content reads) of a tree: relative names, kinds,
+// identity, mode, size, mtime, and link targets.
+async function pathQuickState(target, signal) {
+  const hash = crypto.createHash("sha256");
+  async function visit(itemPath, relative) {
+    throwIfAborted(signal);
+    const stats = await fs.lstat(itemPath);
+    const kind = stats.isSymbolicLink() ? "link" : stats.isDirectory() ? "directory" : stats.isFile() ? "file" : "other";
+    const value = kind === "link" ? await fs.readlink(itemPath) : "";
+    hash.update(JSON.stringify([relative, kind, String(stats.dev), String(stats.ino), stats.mode, stats.size, stats.mtimeMs, value]) + "\n");
+    if (kind === "directory") {
+      const names = (await fs.readdir(itemPath)).sort();
+      for (const name of names) await visit(path.join(itemPath, name), relative ? `${relative}/${name}` : name);
+    }
+  }
+  await visit(path.resolve(target), "");
+  return hash.digest("hex");
+}
+
 async function copyAcrossVolumesAndRemoveSource(source, dest, options = {}) {
+  // Each side is content-hashed exactly once: the source before the copy and the
+  // destination after the commit. The pre-removal re-check compares the cheap
+  // state captured before each hash instead of reading both trees again.
+  const sourceQuickState = await pathQuickState(source, options.hooks?.signal);
   const sourceSnapshot = await pathSnapshot(source, { signal: options.hooks?.signal });
   const progressState = options.progressState || createCopyProgressState(await scanCopyFootprints([source], options.hooks || {}));
   await copyToStagingAndCommit(source, dest, { ...options, progressState });
+  const destinationQuickState = await pathQuickState(dest, options.hooks?.signal);
   const destinationSnapshot = await pathSnapshot(dest, { signal: options.hooks?.signal });
   const moveSnapshot = { version: 1, source: sourceSnapshot, destination: destinationSnapshot };
   const remainingPaths = options.moveRecovery?.paths || [];
@@ -9869,7 +10647,7 @@ async function copyAcrossVolumesAndRemoveSource(source, dest, options = {}) {
     transaction: { version: 1, phase: "source-removal-pending", source, destinationPath: dest, stagingPath: null, moveSnapshot },
     recovery: { type: "move", sourceRemovalPending: true, destinationCommitted: true, pendingSource: source, committedDestination: dest, retry, canRetryRemaining: true, completed, remaining: [source, ...remainingPaths].map((item, index) => ({ path: item, index: index + completed.length })), remainingCount: remainingPaths.length + 1, completedCount: completed.length }
   });
-  await removeCommittedMoveSource(source, dest, { ...options, moveSnapshot });
+  await removeCommittedMoveSource(source, dest, { ...options, moveSnapshot, quickStates: { source: sourceQuickState, destination: destinationQuickState } });
 }
 
 async function copyOne(source, targetDir, options = {}) {
@@ -10000,6 +10778,11 @@ async function copyPaths(paths, targetDir, hooks = {}) {
       error,
       result: { copied: copied.map((item) => item.dest), items: copied }
     });
+    if (transactionFailure?.transaction) {
+      details.transaction = transactionFailure.transaction;
+      details.recovery = { ...details.recovery, transaction: transactionFailure.transaction };
+    }
+    error.details = details;
     throw error;
   }
 }
@@ -10011,8 +10794,6 @@ async function movePaths(paths, targetDir, hooks = {}) {
   const resolvedTargetDir = resolveUserPath(targetDir);
   for (const source of resolvedSources) {
     const stats = await fs.lstat(source);
-    await assertSafeDestination(source, resolvedTargetDir);
-    await assertSafeDestination(source, resolvedTargetDir);
     await assertSafeDestination(source, resolvedTargetDir);
     if (stats.isDirectory() && isInsidePath(resolvedTargetDir, source)) {
       throw new Error("A folder cannot be moved into itself or one of its descendants.");
@@ -10215,23 +10996,76 @@ async function deletePaths(paths, hooks = {}) {
   }
 }
 
-async function recycleOnePath(itemPath) {
-  const resolved = resolveUserPath(itemPath);
-  const stats = await fs.stat(resolved);
+const recycleBatchSize = 50;
+
+// Recycles a batch with one PowerShell process, stopping at the first failure.
+// Returns the recycled prefix and the failure (with its batch index), if any.
+async function recycleBatch(itemPaths) {
+  const items = [];
+  let statFailure = null;
+  for (const [index, itemPath] of itemPaths.entries()) {
+    try {
+      const stats = await fs.stat(itemPath);
+      items.push({ source: itemPath, isDirectory: stats.isDirectory(), size: stats.isFile() ? stats.size : null });
+    } catch (error) {
+      statFailure = { index, error };
+      break;
+    }
+  }
+  if (!items.length) {
+    return { recycled: [], failure: statFailure };
+  }
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName Microsoft.VisualBasic
 $payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $ui = [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs
 $recycle = [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
-if ($payload.isDirectory) {
-  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($payload.path, $ui, $recycle)
-} else {
-  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($payload.path, $ui, $recycle)
+$results = @()
+foreach ($item in @($payload.items)) {
+  try {
+    if ($item.isDirectory) {
+      [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory([string]$item.path, $ui, $recycle)
+    } else {
+      [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile([string]$item.path, $ui, $recycle)
+    }
+    $results += [pscustomobject]@{ ok = $true }
+  } catch {
+    $results += [pscustomobject]@{ ok = $false; error = $_.Exception.Message }
+    break
+  }
 }
+ConvertTo-Json -InputObject @{ results = @($results) } -Compress -Depth 4
 `;
-  await runPowerShellPayload(script, { path: resolved, isDirectory: stats.isDirectory() });
-  return { source: resolved, isDirectory: stats.isDirectory(), size: stats.isFile() ? stats.size : null };
+  let results = null;
+  let batchError = null;
+  try {
+    const parsed = parsePowerShellJson(
+      await runPowerShellPayload(script, { items: items.map((item) => ({ path: item.source, isDirectory: item.isDirectory })) }),
+      {}
+    );
+    results = parsed.results == null ? [] : [].concat(parsed.results);
+  } catch (error) {
+    batchError = error;
+  }
+  const recycled = [];
+  for (const [index, item] of items.entries()) {
+    const outcome = results?.[index];
+    if (outcome?.ok === true) {
+      recycled.push(item);
+      continue;
+    }
+    if (outcome && outcome.ok === false) {
+      return { recycled, failure: { index, error: new Error(String(outcome.error || "Recycle Bin operation failed.")) } };
+    }
+    // No per-item result (PowerShell itself failed): the item's location decides.
+    if (!(await pathExists(item.source))) {
+      recycled.push(item);
+      continue;
+    }
+    return { recycled, failure: { index, error: batchError || new Error("Recycle Bin operation failed.") } };
+  }
+  return { recycled, failure: statFailure };
 }
 
 async function recyclePaths(paths, hooks = {}) {
@@ -10241,27 +11075,33 @@ async function recyclePaths(paths, hooks = {}) {
   let activeIndex = 0;
   try {
     await hooks.updateProgress?.({ unit: "items", total, completed: 0, phase: "Preparing" });
-    for (const [index, itemPath] of resolvedSources.entries()) {
-      activeIndex = index;
+    for (let start = 0; start < resolvedSources.length; start += recycleBatchSize) {
+      activeIndex = start;
       await hooks.throwIfCanceled?.();
       await hooks.waitIfPaused?.();
+      const chunk = resolvedSources.slice(start, start + recycleBatchSize);
       await hooks.updateProgress?.({
         unit: "items",
         total,
-        completed: index,
+        completed: start,
         phase: "Recycling",
-        current: labelFromPath(itemPath),
-        currentPath: itemPath
+        current: labelFromPath(chunk[0]),
+        currentPath: chunk[0]
       });
-      const item = await recycleOnePath(itemPath);
-      recycled.push(item);
+      const batch = await recycleBatch(chunk);
+      recycled.push(...batch.recycled);
+      activeIndex = start + batch.recycled.length;
+      if (!batch.recycled.length) {
+        throw batch.failure.error;
+      }
+      const lastPath = batch.recycled.at(-1).source;
       await hooks.updateProgress?.({
         unit: "items",
         total,
-        completed: index + 1,
+        completed: recycled.length,
         phase: "Recycled",
-        current: labelFromPath(itemPath),
-        currentPath: itemPath
+        current: labelFromPath(lastPath),
+        currentPath: lastPath
       });
       await checkpointRecovery(
         hooks,
@@ -10270,7 +11110,7 @@ async function recyclePaths(paths, hooks = {}) {
           body: { paths },
           resolvedSources,
           completedItems: recycled.map((item) => ({ source: item.source })),
-          failedIndex: index + 1,
+          failedIndex: recycled.length,
           error: interruptedCheckpointError(),
           result: {
             recycled: recycled.map((item) => item.source),
@@ -10280,6 +11120,9 @@ async function recyclePaths(paths, hooks = {}) {
           }
         })
       );
+      if (batch.failure) {
+        throw batch.failure.error;
+      }
     }
     await hooks.updateProgress?.({ unit: "items", total, completed: recycled.length, phase: "Completed" });
     return {
@@ -10333,7 +11176,19 @@ async function trashPaths(paths, hooks = {}) {
         current: labelFromPath(resolvedSource),
         currentPath: resolvedSource
       });
-      const dest = await moveOne(resolvedSource, batchDir);
+      // Cross-volume trash copies with progress and cancel; the trash checkpoint
+      // below stays the recovery record, so the move-resume record is not written.
+      const dest = await moveOne(resolvedSource, batchDir, {
+        hooks: { ...hooks, updateRecovery: undefined },
+        progressFields: () => ({
+          unit: "items",
+          total,
+          completed: index,
+          phase: "Trashing",
+          current: labelFromPath(resolvedSource),
+          currentPath: resolvedSource
+        })
+      });
       moved.push({ source: resolvedSource, dest });
       await hooks.updateProgress?.({
         unit: "items",
@@ -10771,6 +11626,13 @@ function walkZipEntries(archive, options, onEntry) {
     signal?.addEventListener?.("abort", onAbort, { once: true });
 
     yauzl.open(archive, { lazyEntries: true, autoClose: true, decodeStrings: true }, (error, openedZip) => {
+      if (settled) {
+        // Aborted while opening: nothing else will close this handle.
+        try {
+          openedZip?.close();
+        } catch {}
+        return;
+      }
       if (error) {
         fail(error);
         return;
@@ -10941,6 +11803,17 @@ async function listZipArchive(archivePath, options = {}) {
   };
 }
 
+const powerShellUtf8Prelude = "try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; $OutputEncoding = [Console]::OutputEncoding } catch {}";
+
+// Windows PowerShell 5.1 writes redirected output in the OEM code page; switch
+// it to UTF-8 right after any param() block, which must stay the first statement.
+function powerShellUtf8Output(scriptContent) {
+  const text = String(scriptContent ?? "");
+  const param = text.match(/^\s*param\s*\((?:[^()]|\([^()]*\))*\)/i);
+  const at = param ? param[0].length : 0;
+  return `${text.slice(0, at)}\n${powerShellUtf8Prelude}\n${text.slice(at)}`;
+}
+
 async function runPowerShellPayload(scriptContent, payload, options = {}) {
   const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto
     .randomBytes(3)
@@ -10950,7 +11823,7 @@ async function runPowerShellPayload(scriptContent, payload, options = {}) {
   const payloadPath = path.join(runDir, "payload.json");
   await fs.mkdir(runDir, { recursive: true });
   try {
-    await fs.writeFile(scriptPath, scriptContent, "utf8");
+    await fs.writeFile(scriptPath, `\ufeff${powerShellUtf8Output(scriptContent)}`, "utf8");
     await fs.writeFile(payloadPath, JSON.stringify(payload, null, 2), "utf8");
     const result = await runProcess("powershell.exe", [
       "-NoProfile",
@@ -10970,7 +11843,7 @@ async function runPowerShellPayload(scriptContent, payload, options = {}) {
     }
     return result;
   } finally {
-    await fs.rm(runDir, { recursive: true, force: true });
+    await fs.rm(runDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
   }
 }
 
@@ -11020,7 +11893,15 @@ async function buildShortcutPlan(paths, targetDir, conflictMode = "unique") {
   return { targetDir: destDir, items };
 }
 
-async function createWindowsShortcuts(body) {
+async function failWithCreatedUndo(error, targetDir, created, hooks = {}) {
+  const undo = created.length ? { type: "trash-created", items: created.map((item) => ({ path: item.dest })) } : null;
+  const details = { ...(error.details || {}), error: error.message, targetDir, created, count: created.length, undo };
+  await hooks.updateRecovery?.(details);
+  error.details = details;
+  return error;
+}
+
+async function createWindowsShortcuts(body, hooks = {}) {
   if (process.platform !== "win32") {
     throw new Error("Windows shortcuts are only available on Windows.");
   }
@@ -11052,7 +11933,17 @@ foreach ($Item in @($Payload.items)) {
 }
 [pscustomobject]@{ created = $Created } | ConvertTo-Json -Compress -Depth 4
 `;
-  const result = await runPowerShellPayload(script, { items: plan.items });
+  let result;
+  try {
+    result = await runPowerShellPayload(script, { items: plan.items });
+  } catch (error) {
+    // Planned destinations did not exist, so any that exist now were created here.
+    const created = [];
+    for (const item of plan.items) {
+      if (await pathExists(item.dest)) created.push({ source: item.source, dest: item.dest, name: item.name });
+    }
+    throw await failWithCreatedUndo(error, plan.targetDir, created, hooks);
+  }
   const parsed = parsePowerShellJson(result, { created: plan.items });
   const created = (Array.isArray(parsed.created) ? parsed.created : [parsed.created])
     .filter(Boolean)
@@ -11141,22 +12032,26 @@ async function buildFilesystemLinkPlan(paths, targetDir, linkKind = "auto", conf
   return { targetDir: destDir, items };
 }
 
-async function createFilesystemLinks(body) {
+async function createFilesystemLinks(body, hooks = {}) {
   const linkKind = normalizeLinkKind(body.linkKind);
   const conflictMode = body.conflictMode === "fail" ? "fail" : "unique";
   const plan = await buildFilesystemLinkPlan(body.paths, body.targetDir || body.path, linkKind, conflictMode);
   const created = [];
-  for (const item of plan.items) {
-    if (item.linkKind === "hardlink") {
-      await fs.link(item.source, item.dest);
-    } else if (item.linkKind === "junction") {
-      await fs.symlink(item.source, item.dest, "junction");
-    } else if (item.linkKind === "symlink") {
-      await fs.symlink(item.source, item.dest, item.isDirectory ? "dir" : "file");
-    } else {
-      throw new Error(`Unsupported link type: ${item.linkKind}`);
+  try {
+    for (const item of plan.items) {
+      if (item.linkKind === "hardlink") {
+        await fs.link(item.source, item.dest);
+      } else if (item.linkKind === "junction") {
+        await fs.symlink(item.source, item.dest, "junction");
+      } else if (item.linkKind === "symlink") {
+        await fs.symlink(item.source, item.dest, item.isDirectory ? "dir" : "file");
+      } else {
+        throw new Error(`Unsupported link type: ${item.linkKind}`);
+      }
+      created.push({ source: item.source, dest: item.dest, name: item.name, linkKind: item.linkKind });
     }
-    created.push({ source: item.source, dest: item.dest, name: item.name, linkKind: item.linkKind });
+  } catch (error) {
+    throw await failWithCreatedUndo(error, plan.targetDir, created, hooks);
   }
 
   return {
@@ -11212,15 +12107,27 @@ async function extractZipArchive(body) {
   await fs.mkdir(targetDir, { recursive: true });
   const defaultFolder = path.parse(path.basename(archive)).name || "Extracted";
   const folderName = cleanEntryName(body.folderName || defaultFolder);
-  const dest = await uniquePath(targetDir, folderName);
-  await fs.mkdir(dest, { recursive: true });
+  let dest = await uniquePath(targetDir, folderName);
+  // Extract beside the destination and rename into place so a failure never
+  // leaves a partially extracted folder behind.
+  const staging = siblingStagingPath(dest);
+  await fs.mkdir(staging, { recursive: true });
 
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 $payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
 Expand-Archive -LiteralPath $payload.archive -DestinationPath $payload.dest -Force
 `;
-  await runPowerShellPayload(script, { archive, dest });
+  try {
+    await runPowerShellPayload(script, { archive, dest: staging });
+    if (await pathExists(dest)) {
+      dest = await uniquePath(targetDir, folderName);
+    }
+    await renamePathWithRetry(staging, dest);
+  } catch (error) {
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
   return {
     result: { archive, extractedDir: dest },
     undo: { type: "trash-created", items: [{ path: dest }] }
@@ -11457,9 +12364,11 @@ async function syncCompareItems(body, hooks = {}) {
     };
   });
   const copyingTasks = [];
-  for (const task of tasks) {
+  const copyingTaskIndexes = [];
+  for (const [index, task] of tasks.entries()) {
     if ((await pathExists(task.source)) && (overwrite || !(await pathExists(task.dest)))) {
       copyingTasks.push(task);
+      copyingTaskIndexes.push(index);
     }
   }
   let activeIndex = 0;
@@ -11469,11 +12378,8 @@ async function syncCompareItems(body, hooks = {}) {
       await scanCopyFootprints(
         copyingTasks.map((task) => task.source),
         hooks,
-        (itemPath) => {
-          const index = tasks.findIndex((task) => pathIdentity(task.source) === pathIdentity(itemPath));
-          if (index !== -1) {
-            activeIndex = index;
-          }
+        (itemPath, copyingIndex) => {
+          activeIndex = copyingTaskIndexes[copyingIndex];
         }
       )
     );
@@ -11682,6 +12588,14 @@ function originalPathLookupFromOperations(operations = []) {
       }
       if (item?.source && item?.dest) {
         lookup.set(pathIdentity(item.dest), item.source);
+      }
+      if (item?.backup && item?.dest) {
+        lookup.set(pathIdentity(item.backup), item.dest);
+      }
+    }
+    for (const item of Array.isArray(operation?.undo?.deleted) ? operation.undo.deleted : []) {
+      if (item?.from && item?.to) {
+        lookup.set(pathIdentity(item.from), item.to);
       }
     }
   }
@@ -12236,7 +13150,7 @@ async function buildTransferPlan(body) {
           status = "skip";
           reason = "Destination already exists.";
           action = "skip";
-        } else if (existing && effectiveConflictMode === "unique") {
+        } else if (effectiveConflictMode === "unique" && (existing || reservedTargets.has(pathIdentity(baseDest)))) {
           dest = await uniquePathWithReserved(targetDir, originalName, reservedTargets);
           reason = `Will rename to ${path.basename(dest)}.`;
           action = "rename";
@@ -12244,6 +13158,10 @@ async function buildTransferPlan(body) {
           if (sourceKeys.has(pathIdentity(baseDest))) {
             status = "invalid";
             reason = "Destination is also selected as a source.";
+            action = "block";
+          } else if (paths.some((selected) => insidePath(selected, baseDest))) {
+            status = "invalid";
+            reason = "Destination contains a selected source.";
             action = "block";
           } else {
             reason = "Will replace existing destination.";
@@ -12326,16 +13244,17 @@ async function buildSyncPreviewPlan(body) {
   const direction = body.direction === "rightToLeft" ? "rightToLeft" : "leftToRight";
   const overwrite = Boolean(body.overwrite);
   const mirrorDeletes = Boolean(body.mirrorDeletes);
-  const relativePaths = Array.isArray(body.items) ? body.items.slice(0, 1000) : [];
+  // Plan every requested item: apply runs all of body.items, so the preview and
+  // its digest must cover the same set.
+  const relativePaths = Array.isArray(body.items) ? body.items : [];
   if (!relativePaths.length) {
     throw new Error("Select at least one compare item to sync.");
   }
 
   const sourceRoot = direction === "leftToRight" ? leftRoot : rightRoot;
   const destRoot = direction === "leftToRight" ? rightRoot : leftRoot;
-  const items = [];
-  for (let index = 0; index < relativePaths.length; index += 1) {
-    const safePath = safeCompareRelativePath(relativePaths[index]);
+  const items = await mapConcurrent(relativePaths, 16, async (requestedPath, index) => {
+    const safePath = safeCompareRelativePath(requestedPath);
     const relativePath = safePath.relativePath;
     const rel = safePath.rel;
     const source = resolveRelativeUnderRoot(sourceRoot, rel);
@@ -12378,7 +13297,7 @@ async function buildSyncPreviewPlan(body) {
       }
     }
 
-    items.push({
+    return {
       index,
       relativePath,
       rel,
@@ -12397,8 +13316,8 @@ async function buildSyncPreviewPlan(body) {
       destSize: destStats && !destStats.isDirectory() ? destStats.size : null,
       destModified: destStats ? destStats.mtimeMs : null,
       destIsDirectory: Boolean(destStats?.isDirectory())
-    });
-  }
+    };
+  });
 
   const counts = items.reduce((acc, item) => {
     acc[item.status] = (acc[item.status] || 0) + 1;
@@ -12710,13 +13629,11 @@ async function buildBulkRenamePlan(body) {
   const options = body.options && typeof body.options === "object" ? body.options : {};
   const items = [];
   const targetCounts = new Map();
-  const sourceKeys = new Set();
 
   for (let index = 0; index < paths.length; index += 1) {
     const source = resolveUserPath(paths[index]);
     const parent = path.dirname(source);
     const originalName = path.basename(source);
-    sourceKeys.add(pathIdentity(source));
     let stats = null;
     let newName = originalName;
     let dest = source;
@@ -12758,6 +13675,7 @@ async function buildBulkRenamePlan(body) {
     });
   }
 
+  const vacatedKeys = new Set(items.filter((item) => item.status === "ready").map((item) => pathIdentity(item.source)));
   for (const item of items) {
     if (item.status !== "ready") {
       continue;
@@ -12773,7 +13691,7 @@ async function buildBulkRenamePlan(body) {
       item.reason = "Another selected item has the same target name.";
       continue;
     }
-    if ((await pathExists(item.dest)) && !sourceKeys.has(targetKey)) {
+    if ((await pathExists(item.dest)) && !vacatedKeys.has(targetKey)) {
       item.status = "collision";
       item.reason = "A file or folder with that name already exists.";
     }
@@ -12834,6 +13752,11 @@ async function applyBulkRename(body, hooks = {}) {
 
     for (const item of staged) {
       hooks.throwIfCanceled?.();
+      if (await lstatIfExists(item.dest)) {
+        const conflict = new Error(`A file or folder with that name already exists: ${item.dest}`);
+        conflict.code = "EEXIST";
+        throw conflict;
+      }
       await fs.rename(item.temp, item.dest);
       item.phase = "applied";
       applied.push({ source: item.source, dest: item.dest, originalName: item.originalName, newName: item.newName });
@@ -12897,6 +13820,9 @@ async function restoreBulkRenameItems(items) {
     }
 
     for (const item of staged) {
+      if (await lstatIfExists(item.to)) {
+        item.to = await uniquePath(path.dirname(item.to), path.basename(item.to));
+      }
       await fs.rename(item.temp, item.to);
       restored.push({ from: item.from, dest: item.to });
     }
@@ -13082,6 +14008,19 @@ async function recoverOperationBackups(operation, body = {}, hooks = {}) {
   };
 }
 
+async function lstatIfExists(itemPath) {
+  return fs.lstat(resolveUserPath(itemPath)).catch((error) => (error.code === "ENOENT" || error.code === "ENOTDIR" ? null : Promise.reject(error)));
+}
+
+async function persistUndoProgress(operation) {
+  await mutateState((nextState) => {
+    const index = nextState.operations.findIndex((item) => item.id === operation.id);
+    if (index !== -1) {
+      nextState.operations[index] = { ...nextState.operations[index], undo: operation.undo };
+    }
+  });
+}
+
 async function undoRecordedOperation(operation) {
   if (!operation || !operation.undo) {
     throw new Error("That operation does not have an undo action.");
@@ -13116,17 +14055,39 @@ async function undoRecordedOperation(operation) {
   }
 
   if (undo.type === "trash-created") {
-    const paths = undo.items.map((item) => item.path);
-    const trashed = await trashPaths(paths);
+    const paths = [];
+    const alreadyGone = [];
+    for (const item of undo.items) {
+      ((await lstatIfExists(item.path)) ? paths : alreadyGone).push(item.path);
+    }
+    const trashed = paths.length ? await trashPaths(paths) : { result: { moved: [], items: [] } };
+    const result = alreadyGone.length ? { ...trashed.result, alreadyGone } : trashed.result;
     operation.undo.appliedAt = new Date().toISOString();
-    operation.undo.result = trashed.result;
-    return { result: { undone: operation.id, trashed: trashed.result }, undo: null };
+    operation.undo.result = result;
+    return { result: { undone: operation.id, trashed: result }, undo: null };
   }
 
   if (undo.type === "move-back" || undo.type === "restore-trash") {
-    for (const item of undo.items) {
-      const dest = await moveToExactOrUnique(item.from, item.to);
-      restored.push({ from: item.from, dest });
+    try {
+      for (const item of undo.items) {
+        if (item.restoredTo) {
+          continue;
+        }
+        if (!(await lstatIfExists(item.from))) {
+          item.alreadyApplied = true;
+          continue;
+        }
+        const dest = await moveToExactOrUnique(item.from, item.to);
+        item.restoredTo = dest;
+        restored.push({ from: item.from, dest });
+      }
+    } catch (error) {
+      await updateLabelsForTransfers(restored.map((item) => ({ source: item.from, dest: item.dest })), "move").catch(() => {});
+      await persistUndoProgress(operation).catch(() => {});
+      throw error;
+    }
+    if (undo.items.length && undo.items.every((item) => item.alreadyApplied)) {
+      throw new Error("The items for this undo are no longer at their moved locations.");
     }
     await updateLabelsForTransfers(
       restored.map((item) => ({ source: item.from, dest: item.dest })),
@@ -13138,7 +14099,14 @@ async function undoRecordedOperation(operation) {
   }
 
   if (undo.type === "rename-back") {
-    const dest = await moveToExactOrUnique(undo.from, undo.to);
+    const from = resolveUserPath(undo.from);
+    const to = resolveUserPath(undo.to);
+    let dest = to;
+    if ((await pathExists(to)) && !(await renameTargetTaken(from, to))) {
+      await fs.rename(from, to);
+    } else {
+      dest = await moveToExactOrUnique(from, to);
+    }
     await updateLabelsForTransfers([{ source: undo.from, dest }], "move");
     operation.undo.appliedAt = new Date().toISOString();
     operation.undo.result = { dest };
@@ -13289,22 +14257,26 @@ async function registryKeyExists(key) {
   return result.code === 0;
 }
 
-function parseRegistryValue(stdout, name = null) {
-  const label = name || "(Default)";
-  const pattern = new RegExp(`^\\s*${escapeRegex(label)}\\s+(REG_\\w+)\\s*(.*)$`, "i");
-  for (const line of String(stdout || "").split(/\r?\n/)) {
-    const match = line.match(pattern);
-    if (!match) {
-      continue;
-    }
-    const type = match[1];
-    const value = (match[2] || "").trim();
-    if (!value || value === "(value not set)") {
-      return { valueExists: false, type, value: null };
-    }
-    return { valueExists: true, type, value };
+// Queries one value with reg.exe without relying on the localized "(Default)" and
+// "(value not set)" labels. Returns null when the key (or named value) is missing.
+async function queryRegistryValue(key, name = null) {
+  const args = ["query", key, name ? "/v" : "/ve"];
+  if (name) {
+    args.push(name);
   }
-  return { valueExists: false, type: null, value: null };
+  const result = await runProcess("reg.exe", args);
+  if (result.code !== 0) {
+    return null;
+  }
+  let listing = null;
+  if (!name) {
+    const parsed = shellRegistry.parseRegQueryValue(result.stdout);
+    if (parsed && shellRegistry.regDataMayBeNotSetPlaceholder(parsed.data)) {
+      const full = await runProcess("reg.exe", ["query", key]);
+      listing = full.code === 0 ? full.stdout : null;
+    }
+  }
+  return shellRegistry.resolveRegistryValue(result.stdout, name, listing);
 }
 
 async function readRegistryValueSnapshot(key, name = null) {
@@ -13312,15 +14284,8 @@ async function readRegistryValueSnapshot(key, name = null) {
   if (!keyExists) {
     return { keyExists: false, valueExists: false, type: null, value: null };
   }
-  const args = ["query", key, name ? "/v" : "/ve"];
-  if (name) {
-    args.push(name);
-  }
-  const result = await runProcess("reg.exe", args);
-  if (result.code !== 0) {
-    return { keyExists: true, valueExists: false, type: null, value: null };
-  }
-  return { keyExists: true, ...parseRegistryValue(result.stdout, name) };
+  const value = await queryRegistryValue(key, name);
+  return { keyExists: true, ...(value || { valueExists: false, type: null, value: null }) };
 }
 
 async function createShellRegistryEntry(spec) {
@@ -13353,11 +14318,46 @@ function absentShellRegistryEntry(spec) {
   };
 }
 
-async function createShellRegistryBackup(mode = "manual") {
-  const entries = [];
-  for (const spec of shellRegistrySnapshotSpec) {
-    entries.push(await createShellRegistryEntry(spec));
+// Snapshots registry entries in one PowerShell/.NET read so values survive
+// non-ASCII text exactly; falls back to per-value reg.exe queries.
+async function createShellRegistryEntries(specs) {
+  try {
+    const requests = specs.flatMap((spec) => spec.values.map((valueSpec) => ({ key: spec.key, name: valueSpec.name })));
+    const result = await shellRegistry.runProcessUtf8(
+      "powershell.exe",
+      shellRegistry.powerShellEncodedArgs(shellRegistry.registrySnapshotScript(requests)),
+      { timeoutMs: 30000 }
+    );
+    if (result.code !== 0) {
+      throw new Error(result.stderr || `Registry snapshot exited with ${result.code}`);
+    }
+    const rows = shellRegistry.parseRegistrySnapshotOutput(result.stdout, requests.length);
+    let index = 0;
+    return specs.map((spec) => {
+      const values = {};
+      for (const valueSpec of spec.values) {
+        values[valueSpec.id] = rows[index];
+        index += 1;
+      }
+      return {
+        id: spec.id,
+        key: spec.key,
+        kind: spec.kind,
+        keyExists: Object.values(values).some((value) => value.keyExists),
+        values
+      };
+    });
+  } catch {
+    const entries = [];
+    for (const spec of specs) {
+      entries.push(await createShellRegistryEntry(spec));
+    }
+    return entries;
   }
+}
+
+async function createShellRegistryBackup(mode = "manual") {
+  const entries = await createShellRegistryEntries(shellRegistrySnapshotSpec);
   return {
     version: 2,
     id: crypto.randomUUID(),
@@ -13367,7 +14367,7 @@ async function createShellRegistryBackup(mode = "manual") {
   };
 }
 
-function shellRestoreRegistryContent(backup) {
+function shellRestoreRegistryContent(backup, entryIds = null) {
   const lines = [
     "Windows Registry Editor Version 5.00",
     "",
@@ -13376,7 +14376,7 @@ function shellRestoreRegistryContent(backup) {
   ];
   for (const entry of backup?.entries || []) {
     const spec = shellRegistrySnapshotSpec.find((item) => item.id === entry.id);
-    if (!spec) {
+    if (!spec || (entryIds && !entryIds.includes(entry.id))) {
       continue;
     }
     lines.push("");
@@ -13393,33 +14393,60 @@ function shellRestoreRegistryContent(backup) {
   return lines.join("\r\n");
 }
 
-async function writeShellRestoreFile(backup) {
-  const paths = integrationPaths();
+async function writeRegistryFile(filePath, content) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, shellRegistry.registryFileBuffer(content));
+  return filePath;
+}
+
+async function writeShellRestoreFile(backup, { entryIds = null, filePath = integrationPaths().registryRestoreRegPath } = {}) {
   await fs.mkdir(integrationRoot, { recursive: true });
-  await fs.writeFile(paths.registryRestoreRegPath, shellRestoreRegistryContent(backup), "utf8");
-  return paths.registryRestoreRegPath;
+  return writeRegistryFile(filePath, shellRestoreRegistryContent(backup, entryIds));
+}
+
+// Captures the current shell state. It only becomes the stored original backup
+// when no unrestored original exists and Explore Better is not already the
+// default; otherwise it is kept separately as registrySnapshot for reference.
+async function captureShellRegistryBackup(mode = "manual") {
+  const snapshot = await createShellRegistryBackup(mode);
+  const restoreRegPath = integrationPaths().registryRestoreRegPath;
+  const outcome = await mutateState((state) => {
+    const existing = state.integration?.registryBackup || null;
+    const plan = shellRegistry.planShellBackupSave({ existing, snapshot });
+    if (plan.action === "replace") {
+      const savedBackup = { ...snapshot, restoreRegPath };
+      state.integration = {
+        ...state.integration,
+        registryBackup: savedBackup
+      };
+      return { action: plan.action, reason: plan.reason, backup: savedBackup, snapshot: savedBackup };
+    }
+    const latestSnapshot = { ...snapshot, original: false, reason: plan.reason };
+    state.integration = {
+      ...state.integration,
+      registrySnapshot: latestSnapshot
+    };
+    return {
+      action: plan.action,
+      reason: plan.reason,
+      backup: existing?.entries?.length ? existing : null,
+      snapshot: latestSnapshot
+    };
+  });
+  if (outcome.action === "replace") {
+    await writeShellRestoreFile(outcome.backup);
+  }
+  return outcome;
 }
 
 async function saveShellRegistryBackup(mode = "manual") {
-  const backup = await createShellRegistryBackup(mode);
-  const restoreRegPath = await writeShellRestoreFile(backup);
-  const savedBackup = {
-    ...backup,
-    restoreRegPath
-  };
-  await mutateState((state) => {
-    state.integration = {
-      ...state.integration,
-      registryBackup: savedBackup
-    };
-  });
-  return savedBackup;
+  return (await captureShellRegistryBackup(mode)).backup;
 }
 
 async function ensureShellRegistryBackup(mode = "integration") {
   const state = await readState();
   const existing = state.integration?.registryBackup;
-  if (existing?.entries?.length && !existing.restoredAt) {
+  if (shellRegistry.hasUnrestoredShellBackup(existing)) {
     const existingIds = new Set(existing.entries.map((entry) => entry.id));
     const missingSpecs = shellRegistrySnapshotSpec.filter((spec) => !existingIds.has(spec.id));
     if (!missingSpecs.length) return existing;
@@ -13427,11 +14454,8 @@ async function ensureShellRegistryBackup(mode = "integration") {
       ...existing,
       version: 2,
       upgradedAt: new Date().toISOString(),
-      entries: [...existing.entries]
+      entries: [...existing.entries, ...(await createShellRegistryEntries(missingSpecs))]
     };
-    for (const spec of missingSpecs) {
-      upgraded.entries.push(await createShellRegistryEntry(spec));
-    }
     upgraded.restoreRegPath = await writeShellRestoreFile(upgraded);
     await mutateState((nextState) => {
       nextState.integration = {
@@ -13465,7 +14489,30 @@ async function removeRegistryKeyWhenEmpty(key) {
   return { key, removed: true, empty: true };
 }
 
-async function restoreShellRegistryBackup() {
+// A restore must never leave Explore Better as the folder/drive default (for
+// example from a backup captured by an older build while it was already the
+// default); reset just those defaults back to Explorer when that happens.
+async function resetExploreBetterFolderDefaultIfStillSet() {
+  const stillDefault = [];
+  for (const key of ["HKCU\\Software\\Classes\\Directory\\shell", "HKCU\\Software\\Classes\\Drive\\shell"]) {
+    if (shellRegistry.isExploreBetterShellDefault(await readRegistryDefault(key))) {
+      stillDefault.push(key);
+    }
+  }
+  if (!stillDefault.length) {
+    return null;
+  }
+  const resetPath = await writeRegistryFile(
+    path.join(integrationRoot, "reset-folder-default.reg"),
+    shellRegistry.folderDefaultResetRegistryContent()
+  );
+  return { ...(await importRegistryFile(resetPath)), keys: stillDefault };
+}
+
+// entryIds limits the restore to those backup entries (used to put back only the
+// folder/drive default handlers while keeping later context-menu installs).
+async function restoreShellRegistryBackup({ entryIds = null } = {}) {
+  const partial = Array.isArray(entryIds);
   const state = await readState();
   let backup = state.integration?.registryBackup;
   if (!backup?.entries?.length) {
@@ -13485,30 +14532,46 @@ async function restoreShellRegistryBackup() {
       entries: [...backup.entries, ...legacyMissingSpecs.map(absentShellRegistryEntry)]
     };
   }
-  const restoreRegPath = await writeShellRestoreFile(backup);
+  const restoreRegPath = partial
+    ? await writeShellRestoreFile(backup, {
+        entryIds,
+        filePath: path.join(integrationRoot, "restore-previous-folder-default.reg")
+      })
+    : await writeShellRestoreFile(backup);
   const result = await importRegistryFile(restoreRegPath);
   const emptyKeyCleanup = [];
   for (const entry of backup.entries) {
+    if (partial && !entryIds.includes(entry.id)) {
+      continue;
+    }
     if (entry.kind === "defaultOnly" && !entry.keyExists) {
       emptyKeyCleanup.push(await removeRegistryKeyWhenEmpty(entry.key));
     }
   }
+  const folderDefaultReset = await resetExploreBetterFolderDefaultIfStillSet();
   const restoredAt = new Date().toISOString();
   await mutateState((nextState) => {
     nextState.integration = {
       ...nextState.integration,
-      registryBackup: {
-        ...backup,
-        restoreRegPath,
-        restoredAt
-      }
+      // A partial restore leaves the original backup unrestored so a later full
+      // restore (or cleanup) can still return every captured entry.
+      registryBackup: partial
+        ? { ...backup, defaultsRestoredAt: restoredAt }
+        : {
+            ...backup,
+            restoreRegPath,
+            restoredAt
+          }
     };
   });
   return {
     ...result,
     restoredAt,
     backupId: backup.id,
-    emptyKeyCleanup
+    partial,
+    entryIds: partial ? entryIds : null,
+    emptyKeyCleanup,
+    folderDefaultReset
   };
 }
 
@@ -13614,16 +14677,23 @@ async function installPackagedApp() {
   if (!(await pathExists(packagedAppCandidatePath()))) {
     throw new Error("Build the unpacked desktop app first with npm run package:dir.");
   }
+  await shellRegistry.cleanStaleInstallDirectories(installedAppRoot);
   const stagingRoot = `${installedAppRoot}.staging-${Date.now()}`;
-  await fs.rm(stagingRoot, { recursive: true, force: true });
   await fs.mkdir(path.dirname(stagingRoot), { recursive: true });
-  await fs.cp(sourceRoot, stagingRoot, {
-    recursive: true,
-    force: true,
-    verbatimSymlinks: true
+  try {
+    await fs.cp(sourceRoot, stagingRoot, {
+      recursive: true,
+      force: true,
+      verbatimSymlinks: true
+    });
+  } catch (error) {
+    await fs.rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+  // Never delete the live copy first: a locked executable would leave a broken install.
+  await shellRegistry.swapInstalledDirectory(installedAppRoot, stagingRoot, {
+    rename: (source, dest) => renamePathWithRetry(source, dest, 12)
   });
-  await fs.rm(installedAppRoot, { recursive: true, force: true });
-  await renamePathWithRetry(stagingRoot, installedAppRoot, 12);
   const installed = installedAppPath();
   await mutateState((state) => {
     state.integration = {
@@ -13642,7 +14712,13 @@ async function installPackagedApp() {
 }
 
 async function removeInstalledApp() {
-  await fs.rm(installedAppRoot, { recursive: true, force: true });
+  // Move the copy aside first so a locked file cannot leave a half-deleted install.
+  if (await pathExists(installedAppRoot)) {
+    const removedRoot = `${installedAppRoot}.old-${Date.now()}`;
+    await renamePathWithRetry(installedAppRoot, removedRoot, 12);
+    await fs.rm(removedRoot, { recursive: true, force: true }).catch(() => {});
+  }
+  await shellRegistry.cleanStaleInstallDirectories(installedAppRoot);
   await mutateState((state) => {
     state.integration = {
       ...state.integration,
@@ -13679,19 +14755,23 @@ async function writeIntegrationFiles() {
   const shellCommand = integrationShellCommand(launcherPath, launchMode, shellOpenMode);
   const backgroundShellCommand = integrationShellCommand(launcherPath, launchMode, shellOpenMode, "%V");
   const shellIcon = shellCommand.kind === "launcher" ? "imageres.dll,-5302" : shellCommand.target;
+  // Paths are emitted as single-quoted literals: no $/backtick expansion and no
+  // backslash doubling (PowerShell does not treat backslash as an escape).
+  const psLiteral = shellRegistry.powerShellLiteral;
   const scriptContent = `param(
   [string]$TargetPath = $PWD.Path,
   [switch]$DefaultBrowser
 )
 
 $ErrorActionPreference = "Stop"
-$RepoPath = "${repoPath.replaceAll("\\", "\\\\")}"
+${shellRegistry.launcherTargetNormalizationPs}
+$RepoPath = ${psLiteral(repoPath)}
 $Port = ${port}
 $DefaultLaunchMode = "${launchMode}"
 $ShellOpenMode = "${shellOpenMode}"
 $AppProfile = Join-Path $env:LOCALAPPDATA "ExploreBetter\\AppWindowProfile"
-$DesktopApp = "${String(desktopExecutable || "").replaceAll("\\", "\\\\")}"
-$InstalledApp = "${installedAppPath().replaceAll("\\", "\\\\")}"
+$DesktopApp = ${psLiteral(String(desktopExecutable || ""))}
+$InstalledApp = ${psLiteral(installedAppPath())}
 $PackagedApp = Join-Path $RepoPath "dist\\win-unpacked\\Explore Better.exe"
 $ElectronLauncher = Join-Path $RepoPath "node_modules\\.bin\\electron.cmd"
 $ResolvedTarget = (Resolve-Path -LiteralPath $TargetPath).Path
@@ -13788,9 +14868,9 @@ Start-Process $Url
 )
 
 $ErrorActionPreference = "Stop"
-$RepoPath = "${repoPath.replaceAll("\\", "\\\\")}"
+$RepoPath = ${psLiteral(repoPath)}
 $Port = ${port}
-$Launcher = "${launcherPath.replaceAll("\\", "\\\\")}"
+$Launcher = ${psLiteral(launcherPath)}
 
 try {
   Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$Port/api/roots" -TimeoutSec 1 | Out-Null
@@ -13809,14 +14889,14 @@ if ($Open) {
 )
 
 $ErrorActionPreference = "Stop"
-$Launcher = "${launcherPath.replaceAll("\\", "\\\\")}"
-$DesktopApp = "${String(desktopExecutable || "").replaceAll("\\", "\\\\")}"
-$InstalledApp = "${installedAppPath().replaceAll("\\", "\\\\")}"
-$PackagedApp = "${packagedAppCandidatePath().replaceAll("\\", "\\\\")}"
-$BrandIcon = "${path.join(repoPath, "build", "icon.ico").replaceAll("\\", "\\\\")}"
+$Launcher = ${psLiteral(launcherPath)}
+$DesktopApp = ${psLiteral(String(desktopExecutable || ""))}
+$InstalledApp = ${psLiteral(installedAppPath())}
+$PackagedApp = ${psLiteral(packagedAppCandidatePath())}
+$BrandIcon = ${psLiteral(path.join(repoPath, "build", "icon.ico"))}
 $ShellOpenMode = "${shellOpenMode}"
 $StartMenuDir = Join-Path $env:APPDATA "Microsoft\\Windows\\Start Menu\\Programs\\Explore Better"
-$DesktopDir = "${desktopDir.replaceAll("\\", "\\\\")}"
+$DesktopDir = ${psLiteral(desktopDir)}
 $Shell = New-Object -ComObject WScript.Shell
 
 New-Item -ItemType Directory -Force -Path $StartMenuDir | Out-Null
@@ -13852,10 +14932,10 @@ function New-ExploreBetterShortcut {
   $shortcut.Save()
 }
 
-New-ExploreBetterShortcut -ShortcutPath (Join-Path $StartMenuDir "Explore Better.lnk") -TargetPath "${repoPath.replaceAll("\\", "\\\\")}"
+New-ExploreBetterShortcut -ShortcutPath (Join-Path $StartMenuDir "Explore Better.lnk") -TargetPath ${psLiteral(repoPath)}
 
 if ($Desktop) {
-  New-ExploreBetterShortcut -ShortcutPath (Join-Path $DesktopDir "Explore Better.lnk") -TargetPath "${repoPath.replaceAll("\\", "\\\\")}"
+  New-ExploreBetterShortcut -ShortcutPath (Join-Path $DesktopDir "Explore Better.lnk") -TargetPath ${psLiteral(repoPath)}
 }
 
 Write-Output "Shortcuts installed in $StartMenuDir"
@@ -13864,7 +14944,7 @@ Write-Output "Shortcuts installed in $StartMenuDir"
   const shortcutRemoveScriptContent = `$ErrorActionPreference = "Stop"
 $StartMenuDir = Join-Path $env:APPDATA "Microsoft\\Windows\\Start Menu\\Programs\\Explore Better"
 $StartMenuShortcut = Join-Path $StartMenuDir "Explore Better.lnk"
-$DesktopShortcut = Join-Path "${desktopDir.replaceAll("\\", "\\\\")}" "Explore Better.lnk"
+$DesktopShortcut = Join-Path ${psLiteral(desktopDir)} "Explore Better.lnk"
 $Removed = @()
 
 foreach ($ShortcutPath in @($StartMenuShortcut, $DesktopShortcut)) {
@@ -13887,7 +14967,7 @@ if ($Removed.Count) {
 `;
 
   const winEHotkeyContent = `$ErrorActionPreference = "Stop"
-$Launcher = "${launcherPath.replaceAll("\\", "\\\\")}"
+$Launcher = ${psLiteral(launcherPath)}
 $DefaultTarget = [Environment]::GetFolderPath("UserProfile")
 $HotkeyId = 4627
 $ModWin = 0x0008
@@ -13938,8 +15018,8 @@ try {
 `;
 
   const winEInstallScriptContent = `$ErrorActionPreference = "Stop"
-$HotkeyScript = "${winEHotkeyPath.replaceAll("\\", "\\\\")}"
-$BrandIcon = "${path.join(repoPath, "build", "icon.ico").replaceAll("\\", "\\\\")}"
+$HotkeyScript = ${psLiteral(winEHotkeyPath)}
+$BrandIcon = ${psLiteral(path.join(repoPath, "build", "icon.ico"))}
 $RoamingRoot = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $env:USERPROFILE "AppData\\Roaming" }
 $StartupDir = Join-Path $RoamingRoot "Microsoft\\Windows\\Start Menu\\Programs\\Startup"
 $ShortcutPath = Join-Path $StartupDir "Explore Better Win+E.lnk"
@@ -14088,22 +15168,24 @@ ${winERemoveScriptPath}
 The Win+E helper is optional. It installs a current-user Startup shortcut to a resident PowerShell hotkey listener and can be removed without touching registry defaults.
 
 Launch behavior:
-Native Window mode opens the installed current-user app from ${installedAppRoot.replaceAll("\\", "\\\\")} when available, then a packaged Explore Better desktop app from dist\\win-unpacked, then the optional Electron development launcher at node_modules\\.bin\\electron.cmd. App Window mode starts the local Node server if needed and opens Edge/Chrome app mode when available. Browser Tab mode or missing optional launchers fall back to the default browser.
+Native Window mode opens the installed current-user app from ${installedAppRoot} when available, then a packaged Explore Better desktop app from dist\\win-unpacked, then the optional Electron development launcher at node_modules\\.bin\\electron.cmd. App Window mode starts the local Node server if needed and opens Edge/Chrome app mode when available. Browser Tab mode or missing optional launchers fall back to the default browser.
 Shell-open mode:
 The generated launcher currently uses shell mode "${shellOpenMode}". Change this from the Explorer Integration dialog and regenerate files.
 `;
 
-  await fs.writeFile(launcherPath, scriptContent, "utf8");
-  await fs.writeFile(serverScriptPath, serverScriptContent, "utf8");
-  await fs.writeFile(shortcutScriptPath, shortcutScriptContent, "utf8");
-  await fs.writeFile(shortcutRemoveScriptPath, shortcutRemoveScriptContent, "utf8");
-  await fs.writeFile(winEHotkeyPath, winEHotkeyContent, "utf8");
-  await fs.writeFile(winEInstallScriptPath, winEInstallScriptContent, "utf8");
-  await fs.writeFile(winERemoveScriptPath, winERemoveScriptContent, "utf8");
-  await fs.writeFile(paths.contextMenuRegPath, contextMenuReg, "utf8");
-  await fs.writeFile(paths.contextMenuRemoveRegPath, removeContextMenuReg, "utf8");
-  await fs.writeFile(paths.folderDefaultRegPath, folderDefaultReg, "utf8");
-  await fs.writeFile(paths.folderDefaultRemoveRegPath, removeFolderDefaultReg, "utf8");
+  // Windows PowerShell 5.1 needs a UTF-8 BOM to read non-ASCII literals, and
+  // reg import needs UTF-16LE with a BOM (BOM-less files are read as ANSI).
+  await fs.writeFile(launcherPath, shellRegistry.powerShellScriptBuffer(scriptContent));
+  await fs.writeFile(serverScriptPath, shellRegistry.powerShellScriptBuffer(serverScriptContent));
+  await fs.writeFile(shortcutScriptPath, shellRegistry.powerShellScriptBuffer(shortcutScriptContent));
+  await fs.writeFile(shortcutRemoveScriptPath, shellRegistry.powerShellScriptBuffer(shortcutRemoveScriptContent));
+  await fs.writeFile(winEHotkeyPath, shellRegistry.powerShellScriptBuffer(winEHotkeyContent));
+  await fs.writeFile(winEInstallScriptPath, shellRegistry.powerShellScriptBuffer(winEInstallScriptContent));
+  await fs.writeFile(winERemoveScriptPath, shellRegistry.powerShellScriptBuffer(winERemoveScriptContent));
+  await writeRegistryFile(paths.contextMenuRegPath, contextMenuReg);
+  await writeRegistryFile(paths.contextMenuRemoveRegPath, removeContextMenuReg);
+  await writeRegistryFile(paths.folderDefaultRegPath, folderDefaultReg);
+  await writeRegistryFile(paths.folderDefaultRemoveRegPath, removeFolderDefaultReg);
   await fs.writeFile(path.join(integrationRoot, "README.txt"), readme, "utf8");
 
   const generatedAt = new Date().toISOString();
@@ -14704,7 +15786,7 @@ function ensureNativeFilesystemHelperClient() {
   const client = {
     child,
     helperPath,
-    stdout: "",
+    stdoutChunks: [],
     stderr: "",
     pending: new Map(),
     requests: 0,
@@ -14723,17 +15805,25 @@ function ensureNativeFilesystemHelperClient() {
   child.once("spawn", () => {
     client.spawnedAt = monotonicMs();
   });
+  // The decoder keeps multi-byte UTF-8 sequences intact across chunks. Only
+  // new data is searched for newlines; partial lines are joined once complete.
+  child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
-    client.stdout += chunk.toString();
+    let start = 0;
     let index;
-    while ((index = client.stdout.indexOf("\n")) !== -1) {
-      const line = client.stdout.slice(0, index).trim();
-      client.stdout = client.stdout.slice(index + 1);
-      if (!line) continue;
+    while ((index = chunk.indexOf("\n", start)) !== -1) {
+      let line;
       let message;
       try {
+        const tail = chunk.slice(start, index);
+        line = (client.stdoutChunks.length ? client.stdoutChunks.join("") + tail : tail).trim();
+        client.stdoutChunks = [];
+        start = index + 1;
+        if (!line) continue;
         message = JSON.parse(line);
       } catch (error) {
+        // Invalid JSON, or a line beyond the maximum string length.
+        client.stdoutChunks = [];
         failNativeFilesystemHelperClient(client, error);
         if (child.exitCode === null) child.kill();
         return;
@@ -14750,10 +15840,15 @@ function ensureNativeFilesystemHelperClient() {
       }
       pending.complete(null, message.data || {});
     }
+    if (start < chunk.length) client.stdoutChunks.push(start ? chunk.slice(start) : chunk);
   });
+  child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => {
-    client.stderr = `${client.stderr}${chunk.toString()}`.slice(-8192);
+    client.stderr = `${client.stderr}${chunk}`.slice(-8192);
   });
+  // Writes after the helper dies fail with EPIPE; fail the client instead of
+  // letting an unhandled stream error take down the backend.
+  child.stdin.on("error", (error) => failNativeFilesystemHelperClient(client, error));
   child.once("error", (error) => failNativeFilesystemHelperClient(client, error));
   child.once("exit", (code) => {
     failNativeFilesystemHelperClient(
@@ -15328,15 +16423,26 @@ async function nativeSizeAnalysisSummary(rootPath, maxEntries, signal, onProgres
 
 function sizeAnalysisReportFromNativeSummary(payload = {}, context = {}) {
   const folderRows = Array.isArray(payload.folderNodes) ? payload.folderNodes : [];
-  const nodes = folderRows.map((row, index) => {
-    const node = makeSizeNode(String(row.path || (index === 0 ? context.rootPath : "")), null, Number(row.depth || 0));
+  const nodes = [];
+  folderRows.forEach((row, index) => {
+    // The helper sends a path for the root row only; every other folder is
+    // rebuilt from its parent (always emitted earlier) and its name.
+    const parentNode = index > 0 ? nodes[Number(row?.parent)] || nodes[0] : null;
+    const rowPath = row.path
+      ? String(row.path)
+      : index === 0
+        ? String(context.rootPath || "")
+        : parentNode
+          ? path.join(parentNode.path, String(row.name || ""))
+          : "";
+    const node = makeSizeNode(rowPath, null, Number(row.depth || 0));
     node.name = String(row.name || node.name);
     node.size = Number(row.logicalBytes || 0);
     node.allocated = Number(row.allocatedBytes || 0);
     node.files = Number(row.files || 0);
     node.folders = Number(row.folders || 0);
     node.modified = Number(row.modifiedMs || 0) || null;
-    return node;
+    nodes.push(node);
   });
   for (let index = 1; index < nodes.length; index += 1) {
     const parentIndex = Number(folderRows[index]?.parent);
@@ -15606,6 +16712,12 @@ function sizeAnalysisCacheKey(rootPath, options = {}) {
 }
 
 function pruneSizeAnalysisCache() {
+  const now = Date.now();
+  for (const [key, cached] of sizeAnalysisCache) {
+    if (now - Number(cached.cachedAt || 0) > sizeAnalysisCacheTtlMs) {
+      sizeAnalysisCache.delete(key);
+    }
+  }
   while (sizeAnalysisCache.size > sizeAnalysisCacheLimit) {
     const oldest = [...sizeAnalysisCache.entries()].sort(
       (left, right) => Number(left[1].lastAccess || 0) - Number(right[1].lastAccess || 0)
@@ -15964,7 +17076,8 @@ async function sizeAnalysisReport(body = {}, options = {}) {
           continue;
         }
         const bytes = Number(row.logicalBytes || 0);
-        const allocated = Number(row.allocatedBytes || allocatedBytesForPath(fullPath, bytes, allocationSnapshot));
+        // Zero is a real value: repeat hardlinks are charged no allocation.
+        const allocated = Number(row.allocatedBytes ?? allocatedBytesForPath(fullPath, bytes, allocationSnapshot));
         const modified = Number(row.modifiedMs || 0) || null;
         addFileToSizeNode(current, bytes, allocated, modified);
         rememberExtensionStat(extensionStats, fileName, bytes, allocated);
@@ -16592,6 +17705,51 @@ async function verifyChecksumManifest(body = {}) {
   };
 }
 
+const driveProbeTimeoutMs = 1500;
+const driveProbesInFlight = new Map();
+
+function probeDriveRoot(root) {
+  // One probe per drive at a time: an offline mapped drive can hold a libuv worker for a full SMB timeout,
+  // so repeated root refreshes must reuse the pending probe instead of stacking more blocked workers.
+  let probe = driveProbesInFlight.get(root);
+  if (!probe) {
+    probe = (async () => {
+      if (!(await pathExists(root))) {
+        return null;
+      }
+      return { name: root, path: root, kind: "drive", space: await driveSpaceForPath(root) };
+    })().finally(() => {
+      driveProbesInFlight.delete(root);
+    });
+    driveProbesInFlight.set(root, probe);
+  }
+  return probe;
+}
+
+async function probeDriveRootWithTimeout(root) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      probeDriveRoot(root),
+      new Promise((resolve) => {
+        timer = setTimeout(
+          () =>
+            resolve({
+              name: root,
+              path: root,
+              kind: "drive",
+              unavailable: true,
+              space: { available: false, timedOut: true, error: "Drive did not respond in time." }
+            }),
+          driveProbeTimeoutMs
+        );
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getRoots() {
   const shortcuts = [
     { name: "Home", path: os.homedir(), kind: "home" },
@@ -16601,24 +17759,16 @@ async function getRoots() {
     { name: workspaceLabel, path: workspaceRoot, kind: "workspace" }
   ];
 
-  const availableShortcuts = [];
-  for (const shortcut of shortcuts) {
-    if (await pathExists(shortcut.path)) {
-      availableShortcuts.push(shortcut);
-    }
-  }
-
-  const drives = [];
-  if (process.platform === "win32") {
-    for (const letter of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
-      const root = `${letter}:\\`;
-      if (await pathExists(root)) {
-        drives.push({ name: root, path: root, kind: "drive", space: await driveSpaceForPath(root) });
-      }
-    }
-  } else {
-    drives.push({ name: "/", path: "/", kind: "drive", space: await driveSpaceForPath("/") });
-  }
+  const drivesPromise =
+    process.platform === "win32"
+      ? Promise.all([..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"].map((letter) => probeDriveRootWithTimeout(`${letter}:\\`)))
+      : driveSpaceForPath("/").then((space) => [{ name: "/", path: "/", kind: "drive", space }]);
+  const [shortcutExists, driveResults] = await Promise.all([
+    Promise.all(shortcuts.map((shortcut) => pathExists(shortcut.path))),
+    drivesPromise
+  ]);
+  const availableShortcuts = shortcuts.filter((_, index) => shortcutExists[index]);
+  const drives = driveResults.filter(Boolean);
 
   return {
     cwd: workspaceRoot,
@@ -16685,13 +17835,11 @@ function specialFolderCandidates() {
 }
 
 async function existingSpecialFolders() {
-  const folders = [];
-  for (const candidate of specialFolderCandidates()) {
-    if (await pathExists(candidate.path)) {
-      folders.push({ ...candidate, detail: candidate.path, supportsPane: true });
-    }
-  }
-  return folders;
+  const candidates = specialFolderCandidates();
+  const exists = await Promise.all(candidates.map((candidate) => pathExists(candidate.path)));
+  return candidates
+    .filter((_, index) => exists[index])
+    .map((candidate) => ({ ...candidate, detail: candidate.path, supportsPane: true }));
 }
 
 function decodeXmlEntities(value) {
@@ -16817,10 +17965,15 @@ function shellNetworkSummary(drives) {
   };
 }
 
-async function getShellLocations() {
-  const roots = await getRoots();
-  const specialFolders = await existingSpecialFolders();
-  const libraries = await discoverWindowsLibraries();
+const shellLocationsOpenCacheTtlMs = 5000;
+let shellLocationsCache = null;
+
+async function getShellLocations({ roots: rootsSource = null } = {}) {
+  const [roots, specialFolders, libraries] = await Promise.all([
+    rootsSource || getRoots(),
+    existingSpecialFolders(),
+    discoverWindowsLibraries()
+  ]);
   const virtualFolders = shellNamespaceItems();
   const navigation = [
     ...virtualFolders,
@@ -16829,7 +17982,7 @@ async function getShellLocations() {
     ),
     ...libraries
   ];
-  return {
+  const locations = {
     platform: process.platform,
     windows: process.platform === "win32",
     generatedAt: new Date().toISOString(),
@@ -16843,6 +17996,8 @@ async function getShellLocations() {
     appTrash: specialFolders.find((item) => item.id === "appTrash") || null,
     navigation
   };
+  shellLocationsCache = { locations, at: Date.now() };
+  return locations;
 }
 
 async function shellOpenItemById(id) {
@@ -16850,13 +18005,21 @@ async function shellOpenItemById(id) {
   if (!cleanId) {
     return null;
   }
-  const locations = await getShellLocations();
-  const items = [
-    ...(locations.virtualFolders || []),
-    ...(locations.libraries || []).filter((item) => item.openTarget),
-    ...(locations.specialFolders || []).filter((item) => item.openTarget)
-  ];
-  return items.find((item) => item.id === cleanId && item.openTarget) || null;
+  const findIn = (locations) =>
+    [
+      ...(locations.virtualFolders || []),
+      ...(locations.libraries || []).filter((item) => item.openTarget),
+      ...(locations.specialFolders || []).filter((item) => item.openTarget)
+    ].find((item) => item.id === cleanId && item.openTarget) || null;
+  // Opening a location should not re-probe every drive letter; a just-built location list is fresh enough.
+  // A miss in the cached list still rebuilds, so a library created moments ago can be opened.
+  if (shellLocationsCache && Date.now() - shellLocationsCache.at < shellLocationsOpenCacheTtlMs) {
+    const cachedItem = findIn(shellLocationsCache.locations);
+    if (cachedItem) {
+      return cachedItem;
+    }
+  }
+  return findIn(await getShellLocations());
 }
 
 function launchShellTarget(openTarget) {
@@ -17372,8 +18535,47 @@ async function recordRelatedOperation(sourceOperationId, relatedOperation, kind,
   await saveOperation(source);
 }
 
-async function windowsDriveInventory() {
+const driveInventoryCacheTtlMs = 60_000;
+const driveInventoryFailureCacheTtlMs = 5_000;
+const driveInventoryMinRefreshAgeMs = 5_000;
+let driveInventoryCache = null;
+let driveInventoryInFlight = null;
+const driveInventoryStats = { loads: 0 };
+
+// The renderer polls devices every 15s and on every focus; reuse one PowerShell result for a minute,
+// coalesce concurrent callers, and let an explicit refresh through only once the cache is a few seconds old.
+async function windowsDriveInventory({ refresh = false } = {}) {
   if (process.platform !== "win32") return [];
+  if (driveInventoryCache) {
+    const age = Date.now() - driveInventoryCache.at;
+    if (age < driveInventoryCache.ttlMs && !(refresh && age >= driveInventoryMinRefreshAgeMs)) {
+      return driveInventoryCache.drives;
+    }
+  }
+  if (!driveInventoryInFlight) {
+    driveInventoryStats.loads += 1;
+    driveInventoryInFlight = loadWindowsDriveInventory()
+      .then(({ drives, ok }) => {
+        driveInventoryCache = {
+          drives,
+          at: Date.now(),
+          ttlMs: ok ? driveInventoryCacheTtlMs : driveInventoryFailureCacheTtlMs
+        };
+        return drives;
+      })
+      .finally(() => {
+        driveInventoryInFlight = null;
+      });
+  }
+  return driveInventoryInFlight;
+}
+
+function driveInventoryMissingDrives(drives = [], inventory = []) {
+  const known = new Set(inventory.map((drive) => String(drive.name || "").toLowerCase()));
+  return drives.some((drive) => !drive.unavailable && !known.has(String(drive.path || drive.name || "").toLowerCase()));
+}
+
+async function loadWindowsDriveInventory() {
   const script = `param([string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 @([System.IO.DriveInfo]::GetDrives() | ForEach-Object {
@@ -17398,7 +18600,7 @@ $ErrorActionPreference = "Stop"
 }) | ConvertTo-Json -Compress -Depth 5`;
   try {
     const parsed = parsePowerShellJson(await runPowerShellPayload(script, {}, { timeoutMs: 1800 }), []);
-    return (Array.isArray(parsed) ? parsed : parsed ? [parsed] : []).map((item) => ({
+    const drives = (Array.isArray(parsed) ? parsed : parsed ? [parsed] : []).map((item) => ({
       name: String(item.name || ""),
       driveType: String(item.driveType || "Unknown"),
       ready: item.ready === true,
@@ -17406,8 +18608,9 @@ $ErrorActionPreference = "Stop"
       freeBytes: Number.isFinite(Number(item.freeBytes)) ? Number(item.freeBytes) : null,
       label: String(item.label || "")
     }));
+    return { drives, ok: drives.length > 0 };
   } catch {
-    return [];
+    return { drives: [], ok: false };
   }
 }
 
@@ -17449,12 +18652,18 @@ async function getWindowsDevices({ refresh = false, includeNetwork = false } = {
       networkLoaded: false
     };
   }
-  const [roots, locations, thisPc, driveInventory] = await Promise.all([
-    getRoots(),
-    getShellLocations(),
+  const rootsPromise = getRoots();
+  const [roots, locations, thisPc, cachedDriveInventory] = await Promise.all([
+    rootsPromise,
+    getShellLocations({ roots: rootsPromise }),
     listShellNamespace({ target: "thisPc", limit: 200 }),
-    windowsDriveInventory()
+    windowsDriveInventory({ refresh })
   ]);
+  // A drive that appeared since the cached inventory (a USB stick plugged in) would otherwise be shown as a
+  // fixed drive until the cache expires, so a missing letter forces a refresh (still rate-limited).
+  const driveInventory = driveInventoryMissingDrives(roots.drives, cachedDriveInventory)
+    ? await windowsDriveInventory({ refresh: true })
+    : cachedDriveInventory;
   const warnings = [];
   if (thisPc.available === false) warnings.push(thisPc.reason || "Connected device provider is unavailable.");
   const driveByName = new Map(driveInventory.map((drive) => [String(drive.name || "").toLowerCase(), drive]));
@@ -17468,9 +18677,10 @@ async function getWindowsDevices({ refresh = false, includeNetwork = false } = {
       name: detail.label ? `${detail.label} (${drive.name})` : drive.name,
       kind,
       detail: `${String(detail.driveType || "Fixed")} drive`,
-      ready: detail.ready !== false,
-      totalBytes: detail.totalBytes ?? drive.space?.totalBytes,
-      freeBytes: detail.freeBytes ?? drive.space?.freeBytes,
+      // The inventory may be up to a minute old; the root probe just ran, so its answer wins where it has one.
+      ready: !drive.unavailable && (detail.ready !== false || drive.space?.available === true),
+      totalBytes: drive.space?.available ? drive.space.totalBytes : detail.totalBytes,
+      freeBytes: drive.space?.available ? drive.space.freeBytes : detail.freeBytes,
       capabilities: deviceCapabilities({ browseInApp: true, openInExplorer: true })
     });
   });
@@ -17877,7 +19087,11 @@ async function advancedSearch(options = {}) {
   const record = { rootPath, invalidated: false, promise: null, controller: new AbortController(), waiters: new Set() };
   record.promise = advancedSearchUncached({ ...options, signal: record.controller.signal }).then((report) => {
     if (!record.invalidated) {
-      advancedSearchCache.set(cacheKey, { rootPath, report, createdAt: Date.now(), lastAccess: Date.now() });
+      const storedAt = Date.now();
+      for (const [key, item] of advancedSearchCache) {
+        if (storedAt - item.createdAt > advancedSearchCacheTtlMs) advancedSearchCache.delete(key);
+      }
+      advancedSearchCache.set(cacheKey, { rootPath, report, createdAt: storedAt, lastAccess: storedAt });
       while (advancedSearchCache.size > 24) {
         const oldest = [...advancedSearchCache.entries()].sort((left, right) => left[1].lastAccess - right[1].lastAccess)[0];
         if (!oldest) break;
@@ -18184,31 +19398,43 @@ async function duplicateFiles(options = {}, context = {}) {
   };
 }
 
-function launchExplorer(target, reveal = false) {
-  const item = resolveUserPath(target);
-  const args = reveal ? ["/select,", item] : [item];
-  const child = spawn("explorer.exe", args, {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
+function spawnDetachedStarted(file, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(file, args, {
+      ...options,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve(child);
+    });
   });
-  child.unref();
 }
 
-function launchDetached(file, args = [], cwd = undefined) {
+async function launchExplorer(target, reveal = false) {
+  const item = resolveUserPath(target);
+  const args = reveal ? ["/select,", item] : [item];
+  await spawnDetachedStarted("explorer.exe", args);
+}
+
+function cmdCommandLine(file, args = []) {
+  return [file, ...args].map(cmdQuote).join(" ");
+}
+
+async function launchDetached(file, args = [], cwd = undefined) {
   const lowerFile = String(file || "").toLowerCase();
   const isBatchFile = lowerFile.endsWith(".cmd") || lowerFile.endsWith(".bat");
-  const launchFile = isBatchFile ? "cmd.exe" : file;
-  const launchArgs = isBatchFile
-    ? ["/d", "/s", "/c", [file, ...args].map((item) => `"${String(item).replaceAll('"', '""')}"`).join(" ")]
-    : args;
-  const child = spawn(launchFile, launchArgs, {
-    cwd,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  child.unref();
+  if (isBatchFile) {
+    await spawnDetachedStarted("cmd.exe", ["/d", "/s", "/c", `"${cmdCommandLine(file, args)}"`], {
+      cwd,
+      windowsVerbatimArguments: true
+    });
+  } else {
+    await spawnDetachedStarted(file, args, { cwd });
+  }
   return {
     file,
     args,
@@ -18292,13 +19518,21 @@ async function openWithTerminal(targetPath) {
 $Payload = Get-Content -Raw -LiteralPath $PayloadPath -Encoding UTF8 | ConvertFrom-Json
 $Dir = $Payload.dir
 if (Get-Command wt.exe -ErrorAction SilentlyContinue) {
-  Start-Process wt.exe -ArgumentList @("-d", $Dir)
+  Start-Process wt.exe -ArgumentList ([string]$Payload.wtArguments)
 } else {
   Start-Process powershell.exe -WorkingDirectory $Dir
 }
 `;
-  await runPowerShellPayload(script, { dir });
+  await runPowerShellPayload(script, { dir, wtArguments: windowsTerminalDirectoryArguments(dir) }, { timeoutMs: 15_000 });
   return { mode: "terminal", path: item, cwd: dir };
+}
+
+// Start-Process joins -ArgumentList without quoting, so build wt's command line
+// here: ; separates wt subcommands unless escaped, and trailing backslashes are
+// doubled so they do not escape the closing quote.
+function windowsTerminalDirectoryArguments(dir) {
+  const escaped = String(dir).replaceAll(";", "\\;").replace(/(\\+)$/, "$1$1");
+  return `-d "${escaped}"`;
 }
 
 async function openWithLaunch(body) {
@@ -18311,15 +19545,15 @@ async function openWithLaunch(body) {
     throw new Error("Select something to open first.");
   }
   if (mode === "default") {
-    const launched = paths.map((item) => {
-      launchExplorer(item, false);
+    const launched = await Promise.all(paths.map(async (item) => {
+      await launchExplorer(item, false);
       return { mode, path: item, file: "explorer.exe", args: [item] };
-    });
+    }));
     return { launched };
   }
   if (mode === "reveal") {
     const item = paths[0];
-    launchExplorer(item, true);
+    await launchExplorer(item, true);
     return { launched: [{ mode, path: item, file: "explorer.exe", args: ["/select,", item] }] };
   }
   if (mode === "terminal") {
@@ -18332,10 +19566,10 @@ async function openWithLaunch(body) {
     const tokens = splitArgumentTemplate(argsTemplate);
     const launchTogether = tokens.includes("{paths}");
     const targets = launchTogether ? [paths[0]] : paths;
-    const launched = targets.map((targetPath) => {
+    const launched = await Promise.all(targets.map(async (targetPath) => {
       const args = buildOpenWithArgs(argsTemplate, targetPath, paths);
-      return { mode, path: targetPath, ...launchDetached(appPath, args, cwd) };
-    });
+      return { mode, path: targetPath, ...(await launchDetached(appPath, args, cwd)) };
+    }));
     return { launched };
   }
   throw new Error("Unsupported open-with mode.");
@@ -18622,7 +19856,7 @@ $Text = [string]$Payload.text
 Set-Clipboard -Value $Text
 Write-Output $Text.Length
 `;
-  await runPowerShellPayload(script, { text: value });
+  await runPowerShellPayload(script, { text: value }, { timeoutMs: clipboardPowerShellTimeoutMs });
   return {
     chars: value.length,
     lines: value ? value.split(/\r\n|\r|\n/).length : 0
@@ -18671,6 +19905,8 @@ public static class EBClipboard {
 '@`;
 }
 
+const clipboardPowerShellTimeoutMs = 15_000;
+
 async function writeClipboardFiles(body = {}) {
   const paths = await resolveClipboardFilePaths(body.paths);
   const mode = normalizeClipboardFileMode(body.mode);
@@ -18716,7 +19952,7 @@ while ($true) {
   sequence = [EBClipboard]::GetClipboardSequenceNumber()
 } | ConvertTo-Json -Compress
 `;
-  const result = await runPowerShellPayload(script, { paths, mode }, { sta: true });
+  const result = await runPowerShellPayload(script, { paths, mode }, { sta: true, timeoutMs: clipboardPowerShellTimeoutMs });
   const parsed = parsePowerShellJson(result, {});
   return {
     paths,
@@ -18772,7 +20008,7 @@ if ($Changed -and $Attempts -ge 8) { throw "Clipboard changed while reading it. 
   sequence = $Sequence
 } | ConvertTo-Json -Compress
 `;
-  const result = await runPowerShellPayload(script, {}, { sta: true });
+  const result = await runPowerShellPayload(script, {}, { sta: true, timeoutMs: clipboardPowerShellTimeoutMs });
   const parsed = parsePowerShellJson(result, {});
   const paths = Array.isArray(parsed.paths)
     ? parsed.paths.map((item) => String(item || "")).filter(Boolean)
@@ -18808,7 +20044,7 @@ try {
   [pscustomobject]@{ cleared = $Matches; sequence = [EBClipboard]::GetClipboardSequenceNumber() } | ConvertTo-Json -Compress
 } finally { [void][EBClipboard]::CloseClipboard() }
 `;
-  const result = await runPowerShellPayload(script, { expectedSequence }, { sta: true });
+  const result = await runPowerShellPayload(script, { expectedSequence }, { sta: true, timeoutMs: clipboardPowerShellTimeoutMs });
   return parsePowerShellJson(result, { cleared: false });
 }
 
@@ -18829,13 +20065,53 @@ function pathExistsSync(target) {
   return Boolean(target) && existsSync(target);
 }
 
+function killProcessTree(child) {
+  if (process.platform === "win32" && child.pid) {
+    try {
+      const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      killer.once("error", () => {
+        try {
+          child.kill();
+        } catch {}
+      });
+      return;
+    } catch {}
+  }
+  try {
+    child.kill();
+  } catch {}
+}
+
+function boundedOutputCollector(limit) {
+  const chunks = [];
+  let bytes = 0;
+  let truncated = false;
+  return {
+    push(chunk) {
+      if (bytes >= limit) {
+        truncated = true;
+        return;
+      }
+      const piece = chunk.length > limit - bytes ? chunk.subarray(0, limit - bytes) : chunk;
+      truncated ||= piece.length < chunk.length;
+      chunks.push(piece);
+      bytes += piece.length;
+    },
+    text() {
+      const value = Buffer.concat(chunks, bytes).toString("utf8");
+      return truncated ? `${value}\n[output truncated]` : value;
+    }
+  };
+}
+
 function runProcess(file, args, options = {}) {
   return new Promise((resolve) => {
-    const child = spawn(file, args, { windowsHide: true });
-    let stdout = "";
-    let stderr = "";
+    const maxOutputBytes = Number(options.maxOutputBytes) > 0 ? Number(options.maxOutputBytes) : 64 * 1024 * 1024;
+    const stdout = boundedOutputCollector(maxOutputBytes);
+    const stderr = boundedOutputCollector(maxOutputBytes);
     let settled = false;
     let timeout = null;
+    let child;
     const finish = (result) => {
       if (settled) {
         return;
@@ -18844,39 +20120,41 @@ function runProcess(file, args, options = {}) {
       if (timeout) {
         clearTimeout(timeout);
       }
-      resolve(result);
+      resolve({ ...result, stdout: stdout.text(), stderr: result.stderr ?? stderr.text() });
     };
+    try {
+      child = spawn(file, args, { windowsHide: true });
+    } catch (error) {
+      finish({ code: -1, stderr: error.message });
+      return;
+    }
     const timeoutMs = Number(options.timeoutMs || 0);
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timeout = setTimeout(() => {
-        try {
-          child.kill();
-        } catch {}
-        finish({ code: -1, stdout, stderr, timedOut: true });
+        killProcessTree(child);
+        finish({ code: -1, timedOut: true });
       }, timeoutMs);
       timeout.unref?.();
     }
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.on("error", (error) => {
-      finish({ code: -1, stdout, stderr: error.message });
+      finish({ code: -1, stderr: error.message });
     });
+    child.on("close", (code) => {
+      finish({ code });
+    });
+    // A grandchild that inherited the pipes can hold them open after exit.
     child.on("exit", (code) => {
-      finish({ code, stdout, stderr });
+      setTimeout(() => finish({ code }), processCloseGraceMs).unref?.();
     });
   });
 }
 
+const processCloseGraceMs = 2000;
+
 function shellQuote(value, kind) {
-  const text = String(value ?? "");
-  if (kind === "cmd") {
-    return `"${text.replaceAll('"', '""')}"`;
-  }
-  return `'${text.replaceAll("'", "''")}'`;
+  return kind === "cmd" ? cmdQuote(value) : quotePowerShellLiteral(value);
 }
 
 function applyCommandTemplate(commandText, commandKind, context) {
@@ -18945,32 +20223,41 @@ async function runExternalCommand(savedCommand, context) {
   const file = command.kind === "cmd" ? "cmd.exe" : "powershell.exe";
   const args =
     command.kind === "cmd"
-      ? ["/d", "/s", "/c", rendered]
-      : ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", rendered];
+      ? ["/d", "/s", "/c", `"${rendered}"`]
+      : ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `${powerShellUtf8Prelude}\n${rendered}`];
 
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, {
-      cwd: context.cwd,
-      env,
-      windowsHide: true
-    });
+    let child;
+    try {
+      child = spawn(file, args, {
+        cwd: context.cwd,
+        env,
+        windowsHide: true,
+        windowsVerbatimArguments: command.kind === "cmd"
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
     let stdout = "";
     let stderr = "";
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     let settled = false;
     const timeout = setTimeout(() => {
       if (settled) {
         return;
       }
       settled = true;
-      child.kill();
+      killProcessTree(child);
       reject(new Error(`Command timed out after 60 seconds: ${command.name}`));
     }, 60_000);
 
     child.stdout.on("data", (chunk) => {
-      stdout = limitedAppend(stdout, chunk);
+      stdout = limitedAppend(stdout, stdoutDecoder.write(chunk));
     });
     child.stderr.on("data", (chunk) => {
-      stderr = limitedAppend(stderr, chunk);
+      stderr = limitedAppend(stderr, stderrDecoder.write(chunk));
     });
     child.on("error", (error) => {
       if (settled) {
@@ -18980,12 +20267,14 @@ async function runExternalCommand(savedCommand, context) {
       clearTimeout(timeout);
       reject(error);
     });
-    child.on("exit", (code) => {
+    const finish = (code) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timeout);
+      stdout = limitedAppend(stdout, stdoutDecoder.end());
+      stderr = limitedAppend(stderr, stderrDecoder.end());
       const result = {
         commandId: command.id,
         name: command.name,
@@ -19003,17 +20292,22 @@ async function runExternalCommand(savedCommand, context) {
         error.details = result;
         reject(error);
       }
+    };
+    child.on("exit", (code) => {
+      // Wait for buffered output; a detached grandchild may keep the pipes open.
+      setTimeout(() => finish(code), processCloseGraceMs).unref?.();
     });
+    child.on("close", (code) => finish(code));
   });
 }
 
+// null when the key is missing, "" when its default value is not set.
 async function readRegistryDefault(key) {
-  const result = await runProcess("reg.exe", ["query", key, "/ve"]);
-  if (result.code !== 0) {
+  const value = await queryRegistryValue(key);
+  if (!value) {
     return null;
   }
-  const match = result.stdout.match(/\(Default\)\s+REG_\w+\s+(.+)/i);
-  return match ? match[1].trim() : "";
+  return value.valueExists ? value.value : "";
 }
 
 function preflightItem(id, label, state, detail, action = "") {
@@ -19486,7 +20780,7 @@ async function importRegistryFile(filePath) {
       stderr += chunk.toString();
     });
     child.on("error", reject);
-    child.on("exit", (code) => {
+    child.on("close", (code) => {
       if (code === 0) {
         resolve({ ok: true, file: regFile });
       } else {
@@ -19504,6 +20798,15 @@ function integrationProcessSummary(result = {}) {
   };
 }
 
+// Runs a generated script with UTF-8 console output so non-ASCII paths in its
+// output decode correctly; arguments are passed as PowerShell literals.
+function runIntegrationPowerShell(script, args = []) {
+  return shellRegistry.runProcessUtf8(
+    "powershell.exe",
+    shellRegistry.powerShellEncodedArgs(shellRegistry.integrationScriptCommand(script, args))
+  );
+}
+
 async function runIntegrationPowerShellScript(scriptPath, args = [], label = "Integration script") {
   const script = resolveUserPath(scriptPath);
   if (!script.startsWith(integrationRoot)) {
@@ -19512,14 +20815,7 @@ async function runIntegrationPowerShellScript(scriptPath, args = [], label = "In
   if (!(await pathExists(script))) {
     await writeIntegrationFiles();
   }
-  const result = await runProcess("powershell.exe", [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    script,
-    ...args
-  ]);
+  const result = await runIntegrationPowerShell(script, args);
   if (result.code !== 0) {
     const summary = integrationProcessSummary(result);
     const error = new Error(`${label} failed.`);
@@ -19562,20 +20858,34 @@ async function cleanupCurrentUserIntegration(body = {}) {
   await writeIntegrationFiles();
   const before = await getIntegrationStatus();
   const steps = [];
-
-  const shortcutsResult = await removeShortcutIntegration(paths);
-  steps.push({ id: "shortcuts", label: "Shortcuts", ...shortcutsResult });
-
-  const winEResult = await updateWinEIntegration("remove", paths);
-  steps.push({ id: "winE", label: "Win+E helper", ...winEResult });
+  const errors = [];
+  // Each step runs even when an earlier one fails, and the shell restore runs
+  // first so folders keep opening in Explorer whatever happens afterwards.
+  const runStep = async (id, label, action) => {
+    try {
+      steps.push({ id, label, ...(await action()) });
+    } catch (error) {
+      const failure = { id, label, ok: false, error: error.message, details: error.details || null };
+      steps.push(failure);
+      errors.push(failure);
+    }
+  };
 
   if (before.registry?.contextMenuInstalled || before.registry?.folderDefaultEnabled) {
     if (body.restoreBackup !== false && before.registry?.shellBackup?.available) {
-      const restore = await restoreShellRegistryBackup();
-      steps.push({ id: "shellRestore", label: "Shell restore", ...restore });
+      await runStep("shellRestore", "Shell restore", async () => ({ ok: true, ...(await restoreShellRegistryBackup()) }));
+      if (errors.length) {
+        await runStep("shellHandlers", "Shell handlers", async () => ({
+          ok: true,
+          fallback: true,
+          results: await removeGeneratedShellHandlers(paths)
+        }));
+      }
     } else {
-      const registryResults = await removeGeneratedShellHandlers(paths);
-      steps.push({ id: "shellHandlers", label: "Shell handlers", ok: true, results: registryResults });
+      await runStep("shellHandlers", "Shell handlers", async () => ({
+        ok: true,
+        results: await removeGeneratedShellHandlers(paths)
+      }));
     }
   } else {
     steps.push({
@@ -19587,9 +20897,13 @@ async function cleanupCurrentUserIntegration(body = {}) {
     });
   }
 
+  await runStep("shortcuts", "Shortcuts", () => removeShortcutIntegration(paths));
+  await runStep("winE", "Win+E helper", () => updateWinEIntegration("remove", paths));
+
   return {
-    ok: true,
+    ok: errors.length === 0,
     steps,
+    errors: errors.map((failure) => ({ id: failure.id, label: failure.label, error: failure.error })),
     before: {
       shortcuts: before.shortcuts,
       registry: before.registry
@@ -19648,9 +20962,51 @@ function scriptPaneContext(source = {}, fallbackPath = workspaceRoot, fallbackSe
   };
 }
 
-async function runTrustedScript(body, hooks = {}) {
+const scriptOutputEntryLimit = 2000;
+const scriptSettleGraceMs = 2000;
+
+async function runTrustedScript(body, outerHooks = {}) {
   const logs = [];
   const events = [];
+  // Every api call after a timeout must fail, otherwise a script that keeps awaiting could keep
+  // moving or trashing files after the operation has already been reported as failed.
+  const scriptController = new AbortController();
+  const scriptSignal = scriptController.signal;
+  const forwardOuterAbort = () => scriptController.abort(outerHooks.signal?.reason || operationCanceledError());
+  if (outerHooks.signal?.aborted) {
+    forwardOuterAbort();
+  } else {
+    outerHooks.signal?.addEventListener?.("abort", forwardOuterAbort, { once: true });
+  }
+  let scriptAbortWait = null;
+  const scriptAborted = () => {
+    scriptAbortWait ||= new Promise((resolve) => {
+      if (scriptSignal.aborted) resolve();
+      else scriptSignal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    return scriptAbortWait;
+  };
+  const throwIfScriptStopped = () => {
+    outerHooks.throwIfCanceled?.();
+    throwIfOperationCanceled(scriptSignal);
+  };
+  const hooks = {
+    ...outerHooks,
+    signal: scriptSignal,
+    throwIfCanceled: throwIfScriptStopped,
+    waitIfPaused: async () => {
+      throwIfScriptStopped();
+      if (outerHooks.waitIfPaused) {
+        // A paused script must not stay parked forever once the timeout has already failed the operation.
+        await Promise.race([outerHooks.waitIfPaused(), scriptAborted()]);
+      }
+      throwIfScriptStopped();
+    },
+    updateProgress: async (progress) => {
+      throwIfScriptStopped();
+      await outerHooks.updateProgress?.(progress);
+    }
+  };
   const mutationPaths = new Map();
   const rememberScriptMutationPath = (itemPath) => addDirectoryListingMutationPath(mutationPaths, itemPath);
   const rememberScriptMutationPaths = (...items) => {
@@ -19678,13 +21034,17 @@ async function runTrustedScript(body, hooks = {}) {
   const selectedPaths = explicitSelectedPaths.length ? explicitSelectedPaths : [...panes[activePane].selectedPaths];
   const timeoutMs = Math.max(1000, Math.min(Number(body.timeoutMs || 30000), 120000));
   const checkpoint = async (progress = null) => {
-    hooks.throwIfCanceled?.();
-    await hooks.waitIfPaused?.();
-    hooks.throwIfCanceled?.();
-    if (progress) {
-      await hooks.updateProgress?.(progress);
+    if (scriptSignal.aborted) {
+      // Yield a macrotask first so a script that swallows these errors in a loop cannot starve the event loop.
+      await new Promise((resolve) => setImmediate(resolve));
     }
-    hooks.throwIfCanceled?.();
+    hooks.throwIfCanceled();
+    await hooks.waitIfPaused();
+    hooks.throwIfCanceled();
+    if (progress) {
+      await hooks.updateProgress(progress);
+    }
+    hooks.throwIfCanceled();
     return true;
   };
 
@@ -19703,7 +21063,9 @@ async function runTrustedScript(body, hooks = {}) {
         detail: boundedJsonValue(detail, 1000),
         at: new Date().toISOString()
       };
-      events.push(event);
+      if (events.length < scriptOutputEntryLimit) {
+        events.push(event);
+      }
       await checkpoint();
       return event;
     },
@@ -19809,7 +21171,12 @@ async function runTrustedScript(body, hooks = {}) {
       timeoutMs
     },
     console: {
-      log: (...args) => logs.push(args.map(formatForScript).join(" "))
+      log: (...args) => {
+        // Only the first lines are ever reported; do not let a chatty script grow memory without bound.
+        if (logs.length < scriptOutputEntryLimit) {
+          logs.push(args.map(formatForScript).join(" "));
+        }
+      }
     },
     path: {
       basename: path.basename,
@@ -19825,22 +21192,47 @@ async function runTrustedScript(body, hooks = {}) {
     filename: "ExploreBetterScript.vm"
   });
 
-  const resultPromise = script.runInNewContext(sandbox, {
-    timeout: 1000,
-    displayErrors: true
-  });
-
   let cacheInvalidation = { reason: "script", invalidated: 0, dirs: [] };
   let backgroundIndexInvalidation = { reason: "script", affected: 0, roots: [] };
   let result;
+  let timeoutTimer = null;
+  let resultPromise = null;
   try {
+    resultPromise = Promise.resolve(
+      script.runInNewContext(sandbox, {
+        timeout: 1000,
+        displayErrors: true
+      })
+    );
     result = await Promise.race([
       resultPromise,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`Script timed out after ${Math.round(timeoutMs / 1000)} seconds.`)), timeoutMs)
-      )
+      new Promise((_, reject) => {
+        timeoutTimer = setTimeout(() => {
+          const error = new Error(`Script timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+          error.code = "SCRIPT_TIMEOUT";
+          scriptController.abort(error);
+          reject(error);
+        }, timeoutMs);
+      }),
+      // Surface a real cancellation even while the script is parked in a non-api await.
+      scriptAborted().then(() => {
+        throw scriptSignal.reason || operationCanceledError();
+      })
     ]);
   } finally {
+    clearTimeout(timeoutTimer);
+    outerHooks.signal?.removeEventListener?.("abort", forwardOuterAbort);
+    if (resultPromise && scriptSignal.aborted) {
+      // Let an in-flight copy/move roll back before the caches are invalidated, but never wait indefinitely.
+      let graceTimer = null;
+      await Promise.race([
+        resultPromise.catch(() => {}),
+        new Promise((resolve) => {
+          graceTimer = setTimeout(resolve, scriptSettleGraceMs);
+        })
+      ]);
+      clearTimeout(graceTimer);
+    }
     if (mutationPaths.size) {
       cacheInvalidation = invalidateDirectoryListingCachesForDirs(mutationPaths, "script");
       backgroundIndexInvalidation = await safelyInvalidateBackgroundIndexesForDirs(mutationPaths, "script", "script");
@@ -19883,7 +21275,8 @@ function healthCacheMetrics() {
     folderIndexBytes: folderIndexCacheStats().bytes,
     sizeAnalyses: sizeAnalysisCache.size,
     searches: advancedSearchCache.size,
-    backgroundSearchStores: backgroundIndexSearchStoreCache.size
+    backgroundSearchStores: backgroundIndexSearchStoreCache.size,
+    driveInventoryLoads: driveInventoryStats.loads
   };
 }
 
@@ -20176,7 +21569,15 @@ async function handleApi(req, res, url) {
   }
 
   if (route === "GET /api/state") {
-    return sendJson(res, 200, await readState());
+    return sendJson(res, 200, stateWithLiveOperations(await readState()));
+  }
+
+  if (route === "GET /api/operations") {
+    const state = await readState({ clone: false });
+    return sendJson(res, 200, {
+      operations: overlayLiveOperations(state.operations || []),
+      ...(process.env.EB_TEST_STATE_WRITE_COUNTER === "1" ? { stateWrites: stateWriteCount } : {})
+    });
   }
 
   if (route === "POST /api/state") {
@@ -20186,7 +21587,7 @@ async function handleApi(req, res, url) {
         state.layout = body.layout;
       }
       if (Array.isArray(body.favorites)) {
-        state.favorites = body.favorites.map(sanitizeFavorite);
+        state.favorites = sanitizeStateList(body.favorites, sanitizeFavorite);
       }
       if (Array.isArray(body.aliases)) {
         state.aliases = uniquePathAliases(body.aliases);
@@ -20198,7 +21599,7 @@ async function handleApi(req, res, url) {
         state.fileBasket = uniqueCollectionItems(body.fileBasket).slice(0, 1000);
       }
       if (Array.isArray(body.commands)) {
-        state.commands = body.commands.map(sanitizeCommand);
+        state.commands = sanitizeStateList(body.commands, sanitizeCommand);
       }
       if (body.settings && typeof body.settings === "object") {
         state.settings = sanitizeSettings({ ...state.settings, ...body.settings });
@@ -20210,7 +21611,7 @@ async function handleApi(req, res, url) {
         state.tabGroups = body.tabGroups.map(sanitizeTabGroup).slice(0, 50);
       }
       if (Array.isArray(body.scripts)) {
-        state.scripts = body.scripts.map(sanitizeScriptSnippet).slice(0, 100);
+        state.scripts = sanitizeStateList(body.scripts, sanitizeScriptSnippet, 100);
       }
       if (Array.isArray(body.collections)) {
         state.collections = body.collections.map(sanitizeSavedCollection).slice(0, 50);
@@ -20249,7 +21650,7 @@ async function handleApi(req, res, url) {
         state.bulkRenamePresets = body.bulkRenamePresets.map(sanitizeBulkRenamePreset).slice(0, 50);
       }
     });
-    return sendJson(res, 200, saved);
+    return sendJson(res, 200, stateWithLiveOperations(saved));
   }
 
   if (route === "GET /api/labels") {
@@ -20352,10 +21753,15 @@ async function handleApi(req, res, url) {
 
   if (route === "POST /api/integration/backup") {
     const body = await readJson(req);
-    const backup = await saveShellRegistryBackup(body.mode || "manual");
+    const outcome = await captureShellRegistryBackup(body.mode || "manual");
     return sendJson(res, 200, {
       ok: true,
-      backup,
+      backup: outcome.backup,
+      savedAsOriginal: outcome.action === "replace",
+      preservedOriginal: outcome.action === "keep-original",
+      refusedOriginal: outcome.action === "refuse-original",
+      message: outcome.reason || undefined,
+      snapshot: outcome.action === "replace" ? undefined : outcome.snapshot,
       status: await getIntegrationStatus()
     });
   }
@@ -20547,14 +21953,7 @@ async function handleApi(req, res, url) {
       await writeIntegrationFiles();
     }
     const targetPath = resolveUserPath(body.path || __dirname);
-    const result = await runProcess("powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      paths.scriptPath,
-      targetPath
-    ]);
+    const result = await runIntegrationPowerShell(paths.scriptPath, [targetPath]);
     if (result.code !== 0) {
       return sendError(res, 500, "Launcher test failed.", {
         stdout: result.stdout,
@@ -20575,7 +21974,8 @@ async function handleApi(req, res, url) {
     if (body.mode === "removeFolderDefault") {
       const status = await getIntegrationStatus();
       if (status.registry?.shellBackup?.available) {
-        const restored = await restoreShellRegistryBackup();
+        // Only the folder/drive default handlers; context-menu entries stay as installed.
+        const restored = await restoreShellRegistryBackup({ entryIds: shellRegistry.shellDefaultEntryIdList() });
         return sendJson(res, 200, {
           ...restored,
           restoredBackup: true,
@@ -20796,13 +22196,18 @@ async function handleApi(req, res, url) {
   }
 
   if (route === "GET /api/raw") {
+    if (rawForbiddenFetchDestinations.has(String(req.headers["sec-fetch-dest"] || "").toLowerCase())) {
+      return sendError(res, 403, "Raw files cannot be loaded as scripts or stylesheets.");
+    }
     const file = resolveUserPath(url.searchParams.get("path"));
     const stats = await fs.stat(file);
     if (!stats.isFile()) {
       return sendError(res, 400, "Only files can be streamed.");
     }
     const ext = path.extname(file).toLowerCase();
-    const contentType = mimeTypes.get(ext) || "application/octet-stream";
+    const contentType = rawPlainTextExtensions.has(ext)
+      ? "text/plain; charset=utf-8"
+      : mimeTypes.get(ext) || "application/octet-stream";
     const versioned = url.searchParams.has("v");
     const etag = `"${crypto
       .createHash("sha1")
@@ -20871,13 +22276,13 @@ async function handleApi(req, res, url) {
         "content-length": end - start + 1,
         "content-range": `bytes ${start}-${end}/${stats.size}`
       });
-      return createReadStream(file, { start, end }).pipe(res);
+      return pipeline(createReadStream(file, { start, end }), res).catch(() => {});
     }
     res.writeHead(200, {
       ...commonHeaders,
       "content-length": stats.size
     });
-    return createReadStream(file).pipe(res);
+    return pipeline(createReadStream(file), res).catch(() => {});
   }
 
   if (route === "POST /api/mkdir") {
@@ -21160,7 +22565,7 @@ async function handleApi(req, res, url) {
 
   if (route === "POST /api/open") {
     const body = await readJson(req);
-    launchExplorer(body.path, Boolean(body.reveal));
+    await launchExplorer(body.path, Boolean(body.reveal));
     return sendJson(res, 200, { ok: true });
   }
 
@@ -21278,9 +22683,12 @@ async function serveStatic(req, res, url) {
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
       "x-frame-options": "DENY",
-      "set-cookie": `${apiCapabilityCookieName}=${apiCapability}; HttpOnly; SameSite=Strict; Path=/`
+      // Desktop mode installs the cookie on the window session, so static files never hand it out.
+      ...(requireDirectApiCapability ? {} : {
+        "set-cookie": `${apiCapabilityCookieName}=${apiCapability}; HttpOnly; SameSite=Strict; Path=/`
+      })
     });
-    return createReadStream(file).pipe(res);
+    return pipeline(createReadStream(file), res).catch(() => {});
   } catch {
     return sendError(res, 404, "Static file not found.");
   }
@@ -21343,6 +22751,7 @@ export async function startServer() {
         syncBackgroundIndexWatchersFromState().catch((error) => {
           console.warn(`Could not start background index watchers: ${error.message}`);
         });
+        scheduleCacheMaintenance();
         resolve(server);
       };
       server.once("error", onError);
@@ -21568,14 +22977,20 @@ const modulePath = path.resolve(fileURLToPath(import.meta.url));
 if (invokedPath === modulePath) {
   if (typeof process.send === "function") {
     let shutdownRequested = false;
-    process.on("message", (message) => {
-      if (message?.type !== "explore-better:shutdown" || shutdownRequested) return;
+    const shutdown = () => {
+      if (shutdownRequested) return;
       shutdownRequested = true;
       stopServer().then(() => process.exit(0), (error) => {
         console.error(error);
         process.exit(1);
       });
+    };
+    process.on("message", (message) => {
+      if (message?.type === "explore-better:shutdown") shutdown();
     });
+    // The desktop parent owns this child through the IPC channel. If the parent
+    // dies without asking for shutdown, stop instead of lingering as an orphan.
+    process.on("disconnect", shutdown);
   }
   startServer().catch((error) => {
     console.error(error);

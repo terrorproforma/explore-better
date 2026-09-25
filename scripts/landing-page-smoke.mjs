@@ -142,11 +142,12 @@ async function pageSnapshot(page, installerName) {
 }
 
 async function releaseExpectations() {
-  const pkg = JSON.parse(await fs.readFile(path.join(workspace, "package.json"), "utf8"));
+  // The site describes the latest published release, which trails package.json
+  // until that release exists, so site/release.json is the reference version.
   const release = JSON.parse(await fs.readFile(path.join(siteRoot, "release.json"), "utf8"));
-  const version = String(pkg.version || "").trim();
-  if (release.version !== version) {
-    throw new Error(`site/release.json version ${release.version || "missing"} does not match package version ${version}.`);
+  const version = String(release.version || "").trim();
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error(`site/release.json has an invalid version: ${release.version || "missing"}.`);
   }
   return {
     version,
@@ -191,6 +192,27 @@ async function main() {
       `${archive.label} homepage is preserved with an archive notice and excluded from indexing`
     );
   }
+  const archiveFiles = (await fs.readdir(siteRoot)).filter((name) => /^legacy-.+\.html$/.test(name));
+  const archiveTitles = new Map();
+  const archiveProblems = [];
+  for (const file of archiveFiles) {
+    const html = await fs.readFile(path.join(siteRoot, file), "utf8");
+    const url = `https://terrorproforma.github.io/explore-better/${file}`;
+    const title = /<title>([^<]+)<\/title>/.exec(html)?.[1] || "";
+    if (archiveTitles.has(title)) archiveProblems.push(`${file} duplicates the title of ${archiveTitles.get(title)}`);
+    archiveTitles.set(title, file);
+    if (!html.includes('content="noindex,nofollow"')) archiveProblems.push(`${file} is indexable`);
+    if (!html.includes(`<link rel="canonical" href="${url}" />`)) archiveProblems.push(`${file} canonical is not self`);
+    if (!html.includes(`<meta property="og:url" content="${url}" />`)) archiveProblems.push(`${file} og:url is not self`);
+    if (html.includes("application/ld+json")) archiveProblems.push(`${file} repeats the live structured data`);
+  }
+  addCheck(checks, "legacy-homepage-archive-metadata", archiveProblems.length === 0,
+    archiveProblems.join("; ") || `${archiveFiles.length} archives have unique titles, self URLs, and no structured data`);
+  const homepageSource = await fs.readFile(path.join(siteRoot, "index.html"), "utf8");
+  const footerArchives = [...homepageSource.matchAll(/<a href="(legacy-[^"]+\.html)">(Previous|Original) Homepage<\/a>/g)].map((match) => match[1]);
+  addCheck(checks, "legacy-homepage-footer-links",
+    footerArchives.length === 2 && footerArchives.every((file) => archiveFiles.includes(file)),
+    footerArchives.join(", ") || "Missing archive footer links");
   const { server, baseUrl } = await startServer();
   let browser;
   try {
@@ -375,6 +397,27 @@ async function main() {
         );
         await page.keyboard.press("Escape");
         addCheck(checks, "mobile-nav-escape", (await toggle.getAttribute("aria-expanded")) === "false", "Escape closes menu");
+        addCheck(
+          checks,
+          "mobile-nav-escape-focus",
+          await toggle.evaluate((element) => document.activeElement === element),
+          "Escape returns focus to the menu toggle"
+        );
+        await toggle.click();
+        await page.setViewportSize({ width: 1100, height: viewport.height });
+        await page.waitForFunction(() => !document.body.classList.contains("nav-open"), null, { timeout: 5_000 }).catch(() => {});
+        const widened = await page.evaluate(() => ({
+          navOpen: document.body.classList.contains("nav-open"),
+          expanded: document.querySelector("[data-nav-toggle]").getAttribute("aria-expanded"),
+          overflow: getComputedStyle(document.body).overflow
+        }));
+        addCheck(
+          checks,
+          "mobile-nav-closes-on-widen",
+          !widened.navOpen && widened.expanded === "false" && widened.overflow !== "hidden",
+          JSON.stringify(widened)
+        );
+        await page.setViewportSize({ width: viewport.width, height: viewport.height });
       }
 
       const screenshot = path.join(artifactsDir, `landing-page-${viewport.name}.png`);
@@ -382,6 +425,15 @@ async function main() {
       evidence.push({ viewport, screenshot, snapshot });
       await context.close();
     }
+
+    const noScriptContext = await browser.newContext({ viewport: viewports[0], javaScriptEnabled: false });
+    const noScriptPage = await noScriptContext.newPage();
+    await noScriptPage.goto(baseUrl, { waitUntil: "load" });
+    const hiddenReveals = await noScriptPage.evaluate(
+      () => [...document.querySelectorAll(".reveal")].filter((element) => getComputedStyle(element).opacity !== "1").length
+    );
+    addCheck(checks, "no-js-content-visible", hiddenReveals === 0, `${hiddenReveals} reveal sections hidden without JavaScript`);
+    await noScriptContext.close();
 
     addCheck(checks, "runtime-errors", errors.length === 0, errors.length ? errors.join("; ") : "No page errors");
   } finally {

@@ -91,6 +91,7 @@ function startServer(port, options = {}) {
       PORT: String(port),
       LOCALAPPDATA: appData,
       APPDATA: appData,
+      EXPLORE_BETTER_TEST_HOOKS: "1",
       ...(operationDelay
         ? {
             EB_TEST_OPERATION_DELAY_MS: "15000",

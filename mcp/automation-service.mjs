@@ -4,6 +4,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { readTextPage } from "./text-pages.mjs";
+import { mcpClientConfigPaths, windowsStartupFolders } from "./client-paths.mjs";
 
 const schemaVersion = "1";
 const maxPageSize = 500;
@@ -15,6 +16,11 @@ const maxStoredJobBytes = 16 * 1024 * 1024;
 const maxRetainedJobBytes = 128 * 1024 * 1024;
 const maxResponseBytes = 3 * 1024 * 1024;
 const maxActiveJobs = 12;
+// MCP link types mapped to the operation service's accepted linkKind values.
+const mcpLinkKinds = Object.freeze({ hard: "hardlink", junction: "junction", symbolic: "symlink" });
+const searchSnapshotTtlMs = 5 * 60_000;
+const maxSearchSnapshots = 32;
+const maxSearchResults = 1000;
 const contractPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "contracts-v1.json");
 
 export class McpAutomationError extends Error {
@@ -119,10 +125,34 @@ function isInside(candidate, parent) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-async function canonicalizePath(input, { allowMissing = false } = {}) {
+function pathKey(value) {
+  return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
+function uniquePaths(values) {
+  const seen = new Map();
+  for (const value of values) if (value && !seen.has(pathKey(value))) seen.set(pathKey(value), value);
+  return [...seen.values()];
+}
+
+function isAbsolutePathText(value) {
+  return typeof value === "string" && /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/?.])/.test(value);
+}
+
+function lexicalPath(input) {
   const text = String(input || "").trim();
   if (!text || isDeviceOrAdsPath(text)) bridgeError("INVALID_PATH", "The path is empty or uses a blocked Windows path form.");
-  const resolved = path.resolve(text);
+  return path.resolve(text);
+}
+
+function isUncPath(value) {
+  return /^[\\/]{2}/.test(String(value || ""));
+}
+
+const maxLinkRedirects = 16;
+
+async function canonicalizePath(input, { allowMissing = false, redirects = 0 } = {}) {
+  const resolved = lexicalPath(input);
   try {
     return await fs.realpath(resolved);
   } catch (error) {
@@ -131,15 +161,37 @@ async function canonicalizePath(input, { allowMissing = false } = {}) {
       bridgeError("NOT_FOUND", "The requested path does not exist.", { path: resolved });
     }
   }
-  let ancestor = resolved;
+  let current = resolved;
   const suffix = [];
   while (true) {
-    const parent = path.dirname(ancestor);
-    if (parent === ancestor) bridgeError("NOT_FOUND", "No existing parent could be resolved.", { path: resolved });
-    suffix.unshift(path.basename(ancestor));
-    ancestor = parent;
+    // realpath reports ENOENT for a dangling symlink or junction, yet creating an
+    // item at that path follows the link. Resolve the location it points to so
+    // the caller authorizes where the write would really land.
+    const stat = await fs.lstat(current).catch((error) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      bridgeError("INVALID_PATH", "The target parent could not be resolved.", { path: resolved });
+    });
+    if (stat) {
+      if (!stat.isSymbolicLink() || redirects >= maxLinkRedirects) bridgeError("INVALID_PATH", "The target path contains an unresolvable link.", { path: resolved });
+      let linkTarget;
+      try {
+        linkTarget = await fs.readlink(current);
+      } catch {
+        bridgeError("INVALID_PATH", "The target path contains an unresolvable link.", { path: resolved });
+      }
+      if (!linkTarget || isDeviceOrAdsPath(linkTarget)) bridgeError("INVALID_PATH", "The target path contains a link with a blocked Windows path form.", { path: resolved });
+      const redirected = path.join(path.resolve(path.dirname(current), linkTarget), ...suffix);
+      // A network target is returned lexically and never touched here; root
+      // authorization then compares it textually.
+      if (isUncPath(redirected)) return lexicalPath(redirected);
+      return canonicalizePath(redirected, { allowMissing: true, redirects: redirects + 1 });
+    }
+    const parent = path.dirname(current);
+    if (parent === current) bridgeError("NOT_FOUND", "No existing parent could be resolved.", { path: resolved });
+    suffix.unshift(path.basename(current));
+    current = parent;
     try {
-      const realAncestor = await fs.realpath(ancestor);
+      const realAncestor = await fs.realpath(current);
       return path.join(realAncestor, ...suffix);
     } catch (error) {
       if (error.code !== "ENOENT") bridgeError("INVALID_PATH", "The target parent could not be resolved.", { path: resolved });
@@ -357,7 +409,19 @@ export async function createMcpAutomationService(deps) {
 
   const resolvePath = (value) => deps.resolveUserPath(value);
   const canonicalizeRoot = (value) => canonicalizePath(resolvePath(value), { allowMissing: true });
-  const internalRoots = Object.freeze(await Promise.all((deps.internalRoots || []).map(canonicalizeRoot)));
+  const bothForms = async (values) => uniquePaths((await Promise.all(values.map(async (value) => {
+    const resolved = resolvePath(value);
+    return [resolved, await canonicalizeRoot(resolved).catch(() => resolved)];
+  }))).flat());
+  // Lexical and physical forms, so aliases and junctions resolve to the same entry.
+  const internalRoots = Object.freeze(await bothForms(deps.internalRoots || []));
+  // MCP writes may never create, replace, move, or delete these: Windows runs
+  // Startup folder contents at sign-in, and client configuration files decide
+  // which MCP servers (and so which commands) an AI client launches. Reads stay
+  // allowed and no user prompt is involved.
+  const writeDenyFolders = Object.freeze(await bothForms(deps.writeDenyFolders || windowsStartupFolders()));
+  const writeDenyFiles = Object.freeze(await bothForms(deps.writeDenyFiles || Object.values(mcpClientConfigPaths())));
+  const searchSnapshots = new Map();
   const defaultConfig = () => ({ version: 1, enabled: false, auditRetentionDays: 30, profiles: [], updatedAt: new Date().toISOString() });
 
   async function readConfig() {
@@ -502,32 +566,112 @@ export async function createMcpAutomationService(deps) {
       return rootCache.get(key);
     };
     const profileRoots = await Promise.all(profile.roots.map(requestRoot));
+    const lexicalProfileRoots = uniquePaths([...profile.roots.map((root) => resolvePath(root)), ...profileRoots]);
     const rawClientRoots = Array.isArray(request.clientRoots) ? request.clientRoots : [];
     const normalizedClientRoots = rawClientRoots.map(normalizeClientRoot).filter(Boolean);
-    const clientRoots = await Promise.all(normalizedClientRoots.map(requestRoot));
+    // A client-supplied network root is resolved only when a profile root
+    // textually contains it; resolving any other UNC path would authenticate to
+    // that host.
+    const clientRoots = await Promise.all(normalizedClientRoots.map((root) => {
+      const resolved = resolvePath(root);
+      if (isUncPath(resolved) && !lexicalProfileRoots.some((profileRoot) => isInside(resolved, profileRoot))) {
+        return lexicalPath(resolved);
+      }
+      return requestRoot(resolved);
+    }));
+    const lexicalClientRoots = uniquePaths([...normalizedClientRoots.map((root) => resolvePath(root)), ...clientRoots]);
     return Object.freeze({
       profile: Object.freeze(profile),
       profileId: profile.id,
       toolName: tool.name,
       sessionId: boundedString(request.sessionId, 120) || "unknown",
       profileRoots: Object.freeze(profileRoots),
+      lexicalProfileRoots: Object.freeze(lexicalProfileRoots),
       clientRoots: Object.freeze(clientRoots),
+      lexicalClientRoots: Object.freeze(lexicalClientRoots),
       clientRootsProvided: request.clientRootsProvided === true || rawClientRoots.length > 0,
       context: cleanContext(request.context, null),
       limits: Object.freeze({ pageSize: maxPageSize, textBytes: maxTextBytes, concurrentJobs: 3 })
     });
   }
 
+  const isInternalPath = (value) => internalRoots.some((root) => isInside(value, root));
+
   async function authorizePath(principal, input, options = {}) {
     if (!principal.profileRoots.length) bridgeError("OUTSIDE_ROOTS", "This profile has no authorized folders.");
-    const canonical = await canonicalizePath(resolvePath(input), { allowMissing: options.allowMissing === true });
-    if (internalRoots.some((root) => isInside(canonical, root) || isInside(root, canonical))) {
-      bridgeError("OUTSIDE_ROOTS", "Explore Better internal state cannot be accessed through MCP.", { path: canonical });
+    const resolved = lexicalPath(resolvePath(input));
+    // Only the internal subtree itself is hidden. Its ancestors (the drive,
+    // the home folder, AppData) remain listable; results under them are
+    // filtered by withoutInternal.
+    if (isInternalPath(resolved)) bridgeError("OUTSIDE_ROOTS", "Explore Better internal state cannot be accessed through MCP.", { path: resolved });
+    const lexicallyAllowed = principal.lexicalProfileRoots.some((root) => isInside(resolved, root))
+      && (!principal.clientRootsProvided || principal.lexicalClientRoots.some((root) => isInside(resolved, root)));
+    // Textual containment is decided before any filesystem call. A network path
+    // outside every root is never resolved: realpath on \\host\share would
+    // authenticate to that host. Local paths may still be resolved so junction
+    // and 8.3 aliases of authorized folders keep working, but every failure is
+    // reported as OUTSIDE_ROOTS so the result is not an existence oracle.
+    if (!lexicallyAllowed && isUncPath(resolved)) bridgeError("OUTSIDE_ROOTS", "The path is outside the effective authorized roots.", { path: resolved });
+    let canonical;
+    try {
+      canonical = await canonicalizePath(resolved, { allowMissing: options.allowMissing === true });
+    } catch (error) {
+      if (!lexicallyAllowed) bridgeError("OUTSIDE_ROOTS", "The path is outside the effective authorized roots.", { path: resolved });
+      throw error;
+    }
+    if (isInternalPath(canonical)) {
+      bridgeError("OUTSIDE_ROOTS", "Explore Better internal state cannot be accessed through MCP.", { path: lexicallyAllowed ? canonical : resolved });
     }
     const profileAllowed = principal.profileRoots.some((root) => isInside(canonical, root));
     const clientAllowed = !principal.clientRootsProvided || principal.clientRoots.some((root) => isInside(canonical, root));
-    if (!profileAllowed || !clientAllowed) bridgeError("OUTSIDE_ROOTS", "The path is outside the effective authorized roots.", { path: canonical });
+    if (!profileAllowed || !clientAllowed) bridgeError("OUTSIDE_ROOTS", "The path is outside the effective authorized roots.", { path: lexicallyAllowed ? canonical : resolved });
     return canonical;
+  }
+
+  // `target` is a canonical path that a write creates, replaces, moves, or
+  // deletes, together with everything beneath it.
+  function assertWriteAllowed(target) {
+    const denied = writeDenyFolders.some((folder) => isInside(target, folder) || isInside(folder, target))
+      || writeDenyFiles.some((file) => isInside(file, target));
+    if (denied) {
+      bridgeError("WRITE_POLICY_DENIED", "MCP clients cannot modify Windows Startup folders or AI client MCP configuration files. Make this change in Explore Better or Windows directly.", { path: target });
+    }
+    if (internalRoots.some((root) => isInside(root, target))) {
+      bridgeError("WRITE_POLICY_DENIED", "This write would move or remove Explore Better internal state.", { path: target });
+    }
+    return target;
+  }
+
+  async function assertNotHardLinkToDenied(target) {
+    const current = await fs.stat(target, { bigint: true }).catch(() => null);
+    if (!current) return;
+    for (const file of writeDenyFiles) {
+      const denied = await fs.stat(file, { bigint: true }).catch(() => null);
+      if (denied && denied.ino === current.ino && denied.dev === current.dev) {
+        bridgeError("WRITE_POLICY_DENIED", "This file is a hard link to an AI client MCP configuration file.", { path: target });
+      }
+    }
+  }
+
+  function referencesInternal(item) {
+    if (typeof item === "string") return isAbsolutePathText(item) && isInternalPath(path.resolve(item));
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    return ["path", "source", "dest", "parent", "fullPath"].some((key) => referencesInternal(item[key]))
+      || ["left", "right"].some((key) => item[key] && typeof item[key] === "object" && referencesInternal(item[key]));
+  }
+
+  function stripInternal(value) {
+    if (Array.isArray(value)) return value.filter((item) => !referencesInternal(item)).map(stripInternal);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, stripInternal(child)]));
+    return referencesInternal(value) ? "" : value;
+  }
+
+  // Results of a listing, search, or analysis rooted at an ancestor of the
+  // internal subtree omit anything inside it. Other roots pay no cost.
+  function withoutInternal(value, ...scanRoots) {
+    const ancestors = scanRoots.filter(Boolean);
+    if (!internalRoots.some((root) => ancestors.some((scanRoot) => isInside(root, scanRoot)))) return value;
+    return stripInternal(value);
   }
 
   async function authorizePaths(principal, paths, options = {}) {
@@ -797,10 +941,10 @@ export async function createMcpAutomationService(deps) {
     return { ...record, result, nextCursor: cursor, totalResults: total, resultSections: totals };
   }
 
-  async function makePlan(principal, type, args, action, paths, summary) {
+  async function makePlan(principal, type, args, action, paths, summary, recheckPaths = []) {
     const signatures = [];
     for (const itemPath of paths) signatures.push(await pathSignature(itemPath));
-    const plan = { id: crypto.randomUUID(), type, args: clone(args), action, signatures, summary,
+    const plan = { id: crypto.randomUUID(), type, args: clone(args), action, signatures, summary, recheckPaths,
       policySignature: policySignature(principal), planningTool: principal.toolName, createdAt: new Date().toISOString() };
     const planDigest = digest(plan);
     const applyToken = crypto.randomBytes(32).toString("base64url");
@@ -810,23 +954,45 @@ export async function createMcpAutomationService(deps) {
     return { id: plan.id, type, summary, planDigest, applyToken, applyTokenExpiresAt: new Date(expiresAt).toISOString(), signatures };
   }
 
+  function syncItemPath(item) {
+    const parts = String(item ?? "").replace(/\\/g, "/").trim().split("/");
+    if (typeof item !== "string" || parts.some((part) => !part || part === "." || part === ".." || part.includes(":"))) {
+      bridgeError("INVALID_ARGUMENT", "Sync items must be relative paths inside the compared folders.", { item: boundedString(item, 260) });
+    }
+    return path.join(...parts);
+  }
+
   async function planTransfer(principal, args) {
     if (args.mode === "sync") {
       const leftPath = await authorizePath(principal, args.leftPath);
       const rightPath = await authorizePath(principal, args.rightPath);
+      const direction = args.direction === "right-to-left" ? "rightToLeft" : "leftToRight";
+      const [sourceRoot, destRoot] = direction === "leftToRight" ? [leftPath, rightPath] : [rightPath, leftPath];
+      // Every relative item is authorized on both sides. A junction inside a
+      // root would otherwise carry copies or mirror deletions outside it.
+      const recheckPaths = [];
+      for (const item of Array.isArray(args.paths) ? args.paths : []) {
+        const relative = syncItemPath(item);
+        await authorizePath(principal, path.join(sourceRoot, relative), { allowMissing: true });
+        assertWriteAllowed(await authorizePath(principal, path.join(destRoot, relative), { allowMissing: true }));
+        recheckPaths.push({ path: path.join(sourceRoot, relative), write: false }, { path: path.join(destRoot, relative), write: true });
+      }
       const body = {
-        type: "sync", leftPath, rightPath,
-        direction: args.direction === "right-to-left" ? "rightToLeft" : "leftToRight",
+        type: "sync", leftPath, rightPath, direction,
         items: args.paths, overwrite: args.overwrite === true, mirrorDeletes: args.mirrorDeletes === true
       };
       const preview = await deps.buildOperationPreview(body);
       return makePlan(principal, "transfer", args, { kind: "operation", type: "sync", body: { ...body, expectedPlanDigest: preview.planDigest } }, [leftPath, rightPath], {
         mode: "sync", counts: preview.counts, actionCounts: preview.actionCounts, canApply: preview.canApply, items: preview.items?.slice(0, 500)
-      });
+      }, recheckPaths);
     }
     const sources = await authorizePaths(principal, args.paths);
     const targetDir = await authorizePath(principal, args.targetDir);
-    for (const source of sources) if (isInside(targetDir, source)) bridgeError("CONFLICT", "A destination cannot be inside its source.", { source, targetDir });
+    for (const source of sources) {
+      if (isInside(targetDir, source)) bridgeError("CONFLICT", "A destination cannot be inside its source.", { source, targetDir });
+      if (args.mode === "move") assertWriteAllowed(source);
+      assertWriteAllowed(await authorizePath(principal, path.join(targetDir, path.basename(source)), { allowMissing: true }));
+    }
     const body = { type: "transfer", mode: args.mode, paths: sources, targetDir, conflictMode: args.conflictMode || "unique" };
     const preview = await deps.buildOperationPreview(body);
     return makePlan(principal, "transfer", args, { kind: "operation", type: "transfer", body: { ...body, expectedPlanDigest: preview.planDigest } }, [...sources, targetDir], {
@@ -840,6 +1006,8 @@ export async function createMcpAutomationService(deps) {
     const name = boundedString(args.name, 260);
     if (!name || name === "." || name === ".." || /[\\/:*?"<>|]/.test(name)) bridgeError("INVALID_ARGUMENT", "The new file name is invalid.");
     const destination = await authorizePath(principal, path.join(path.dirname(source), name), { allowMissing: true });
+    assertWriteAllowed(source);
+    assertWriteAllowed(destination);
     if (await fs.stat(destination).then(() => true, () => false)) bridgeError("CONFLICT", "The rename destination already exists.", { destination });
     return makePlan(principal, "rename", args, { kind: "operation", type: "rename", body: { path: source, name } }, [source, destination], { source, destination });
   }
@@ -850,6 +1018,7 @@ export async function createMcpAutomationService(deps) {
     if (mode === "permanent" && !principal.profile.allowPermanentDelete) bridgeError("TOOL_NOT_ALLOWED", "Permanent deletion is disabled for this profile.");
     for (const source of sources) {
       if (path.parse(source).root === source) bridgeError("CONFLICT", "Drive-root deletion is never permitted.", { path: source });
+      assertWriteAllowed(source);
     }
     const operationType = mode === "permanent" ? "delete" : mode;
     return makePlan(principal, "delete", args, { kind: "operation", type: operationType, body: { paths: sources } }, sources, { mode, count: sources.length, paths: sources });
@@ -858,31 +1027,45 @@ export async function createMcpAutomationService(deps) {
   async function planArchive(principal, args) {
     if (args.action === "create") {
       const sources = await authorizePaths(principal, args.paths || []);
-      const archivePath = await authorizePath(principal, args.archivePath, { allowMissing: true });
-      return makePlan(principal, "archive", args, { kind: "operation", type: "archive-create", body: { paths: sources, outputPath: archivePath, overwrite: args.overwrite === true } }, [...sources, archivePath], { action: "create", archivePath, count: sources.length });
+      const requested = String(args.archivePath || "").trim();
+      if (!requested) bridgeError("INVALID_ARGUMENT", "archivePath is required to create an archive.");
+      // The archive service always writes a .zip name; preview the same path.
+      const archivePath = assertWriteAllowed(await authorizePath(principal, /\.zip$/i.test(requested) ? requested : `${requested}.zip`, { allowMissing: true }));
+      // The archive service takes a folder and a file name. Without them it
+      // would derive both from the first source, outside the authorized path.
+      const body = { paths: sources, targetDir: path.dirname(archivePath), name: path.basename(archivePath), overwrite: args.overwrite === true };
+      return makePlan(principal, "archive", args, { kind: "operation", type: "archive-create", body }, [...sources, archivePath], { action: "create", archivePath, count: sources.length });
     }
     const archivePath = await authorizePath(principal, args.archivePath || args.targetPath);
     const targetDir = await authorizePath(principal, args.targetDir, { allowMissing: true });
+    // Extraction creates a new folder named after the archive inside targetDir.
+    assertWriteAllowed(path.join(targetDir, path.parse(archivePath).name || "Extracted"));
     return makePlan(principal, "archive", args, { kind: "operation", type: "archive-extract", body: { path: archivePath, targetDir, overwrite: args.overwrite === true } }, [archivePath, targetDir], { action: "extract", archivePath, targetDir });
   }
 
   async function planCreate(principal, args) {
     const parent = await authorizePath(principal, args.path);
     const name = boundedString(args.name || (args.kind === "file" ? "New File.txt" : "New Folder"), 260);
-    const target = await authorizePath(principal, path.join(parent, name), { allowMissing: true });
+    const target = assertWriteAllowed(await authorizePath(principal, path.join(parent, name), { allowMissing: true }));
     let type;
     let body;
     if (args.kind === "folder") { type = "mkdir"; body = { path: parent, name }; }
     else if (args.kind === "file") { type = "create-file"; body = { path: parent, name, content: String(args.content || ""), conflictMode: "fail" }; }
     else if (args.kind === "shortcut") { type = "shortcut-create"; body = { targetDir: parent, paths: await authorizePaths(principal, args.targets || []) }; }
-    else { type = "link-create"; body = { targetDir: parent, paths: await authorizePaths(principal, args.targets || []), linkType: args.linkType || "symbolic" }; }
+    else {
+      type = "link-create";
+      body = { targetDir: parent, paths: await authorizePaths(principal, args.targets || []), linkKind: mcpLinkKinds[args.linkType || "symbolic"] };
+      // A hard link shares the protected file's contents without resolving to its path.
+      if (body.linkKind === "hardlink") body.paths.forEach(assertWriteAllowed);
+    }
     return makePlan(principal, "create", args, { kind: "operation", type, body }, [parent, target, ...(body.paths || [])], { kind: args.kind, target });
   }
 
   async function planTextWrite(principal, args) {
-    const target = await authorizePath(principal, args.path, { allowMissing: true });
+    const target = assertWriteAllowed(await authorizePath(principal, args.path, { allowMissing: true }));
     const existing = await fs.stat(target).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error));
     if (existing?.isDirectory()) bridgeError("CONFLICT", "Text cannot be written over a folder.");
+    if (existing?.nlink > 1) await assertNotHardLinkToDenied(target);
     if (existing && Number.isFinite(args.expectedModified) && Math.abs(existing.mtimeMs - args.expectedModified) > 1 && args.force !== true) {
       bridgeError("PLAN_CHANGED", "The file changed after it was inspected.", { expectedModified: args.expectedModified, actualModified: existing.mtimeMs });
     }
@@ -920,6 +1103,12 @@ export async function createMcpAutomationService(deps) {
       currentSignatures.push(await pathSignature(signature.path));
     }
     if (digest(currentSignatures) !== digest(record.signatures)) bridgeError("PLAN_CHANGED", "A source or destination changed after the preview was created.", { planId: record.id });
+    // Item paths without signatures (sync items) are authorized again, so a
+    // link swapped in after the preview cannot redirect the operation.
+    for (const item of record.recheckPaths || []) {
+      const canonical = await authorizePath(principal, item.path, { allowMissing: true });
+      if (item.write) assertWriteAllowed(canonical);
+    }
     const { action } = record;
     if (action.type === "delete" && !principal.profile.allowPermanentDelete) bridgeError("TOOL_NOT_ALLOWED", "Permanent deletion is disabled for this profile.");
     if (action.kind === "operation") {
@@ -1038,9 +1227,18 @@ export async function createMcpAutomationService(deps) {
       if (authorized.authorized === true) selection.push(authorized.path);
     }
     const focused = await authorizeContextPath(context.focusedPath);
+    // Status and toast text are free-form and often name files without a full
+    // path, so path redaction cannot clean them. Keep them only while every
+    // visible pane is inside this profile's effective roots.
+    const visiblePanes = context.paneLayout === "single-left" ? ["left"]
+      : context.paneLayout === "single-right" ? ["right"]
+        : context.paneLayout === "single" ? [context.activePane] : ["left", "right"];
+    const uiTextAuthorized = visiblePanes.every((paneId) => panes[paneId].pathAuthorized !== false);
+    const ui = uiTextAuthorized ? context.ui : { ...context.ui, status: "", toast: { ...context.ui.toast, text: "" } };
     return {
       context: {
         ...context,
+        ui,
         panes,
         selection: selection.slice(0, 100),
         focusedPath: focused.path
@@ -1049,6 +1247,32 @@ export async function createMcpAutomationService(deps) {
         ? [`Redacted ${redactedPaths} path${redactedPaths === 1 ? "" : "s"} outside this profile's effective authorized roots.`]
         : []
     };
+  }
+
+  // Search pages come from a bounded snapshot instead of re-running the whole
+  // search for every cursor. A snapshot that is too short is refreshed with a
+  // doubled limit, so deep pagination re-runs the search only logarithmically.
+  async function searchSnapshot(principal, key, itemPath, args, needed, reuse, signal) {
+    const now = Date.now();
+    for (const [snapshotKey, snapshot] of searchSnapshots) {
+      if (now - snapshot.createdAt > searchSnapshotTtlMs) searchSnapshots.delete(snapshotKey);
+    }
+    const snapshotKey = digest({ key, profileId: principal.profileId, policy: policySignature(principal) });
+    const cached = reuse ? searchSnapshots.get(snapshotKey) : null;
+    if (cached && (cached.complete || cached.rawCount >= needed)) return cached;
+    const requestLimit = Math.min(maxSearchResults, Math.max(needed, (cached?.rawCount || 0) * 2));
+    const { entries: rawEntries = [], ...report } = await deps.advancedSearch({ ...args, path: itemPath, limit: requestLimit, maxScanned: Math.min(50_000, args.maxScanned || 8000), signal });
+    const snapshot = {
+      createdAt: Date.now(),
+      rawCount: rawEntries.length,
+      complete: rawEntries.length < requestLimit || requestLimit >= maxSearchResults,
+      entries: withoutInternal(rawEntries, itemPath),
+      report
+    };
+    searchSnapshots.delete(snapshotKey);
+    searchSnapshots.set(snapshotKey, snapshot);
+    while (searchSnapshots.size > maxSearchSnapshots) searchSnapshots.delete(searchSnapshots.keys().next().value);
+    return snapshot;
   }
 
   async function invokeTool(principal, name, args, request) {
@@ -1230,9 +1454,10 @@ export async function createMcpAutomationService(deps) {
         includeLinks: args.includeLinks === true, includeAttributes: args.includeAttributes === true,
         windowOptions: { offset, limit }, priority: "foreground"
       });
-      const entries = listing.entries || [];
-      const total = Number(listing.window?.total ?? listing.totalEntries ?? listing.total ?? offset + entries.length);
-      const cursor = offset + entries.length < total ? makeCursor("directory", key, offset + entries.length) : null;
+      const windowEntries = listing.entries || [];
+      const total = Number(listing.window?.total ?? listing.totalEntries ?? listing.total ?? offset + windowEntries.length);
+      const cursor = offset + windowEntries.length < total ? makeCursor("directory", key, offset + windowEntries.length) : null;
+      const entries = withoutInternal(windowEntries, itemPath);
       return resultEnvelope({ ...listing, entries, offset, limit, total }, { cursor, contextRevision: revision });
     }
     if (name === "search_files") {
@@ -1240,16 +1465,17 @@ export async function createMcpAutomationService(deps) {
       const limit = Math.min(maxPageSize, Math.max(1, Number(args.limit || 200)));
       const key = digest({ ...args, cursor: undefined, path: itemPath });
       const offset = readCursor(args.cursor, "search", key);
-      const report = await deps.advancedSearch({ ...args, path: itemPath, limit: offset + limit + 1, maxScanned: Math.min(50_000, args.maxScanned || 8000), signal: request.signal });
-      const all = report.entries || [];
+      const snapshot = await searchSnapshot(principal, key, itemPath, args, offset + limit + 1, offset > 0, request.signal);
+      const all = snapshot.entries;
       const entries = all.slice(offset, offset + limit);
       const cursor = entries.length > 0 && offset + entries.length < all.length ? makeCursor("search", key, offset + entries.length) : null;
-      const incomplete = report.truncated && !cursor;
-      return resultEnvelope({ ...report, entries, offset, limit }, { cursor, contextRevision: revision, status: incomplete ? "partial" : "ok", warnings: incomplete ? ["The search reached its scan limit. Narrow the query or increase maxScanned to inspect more files."] : [] });
+      const incomplete = snapshot.report.truncated && !cursor;
+      return resultEnvelope({ ...snapshot.report, entries, offset, limit }, { cursor, contextRevision: revision, status: incomplete ? "partial" : "ok", warnings: incomplete ? ["The search reached its scan limit. Narrow the query or increase maxScanned to inspect more files."] : [] });
     }
     if (name === "inspect_paths") {
       const paths = await authorizePaths(principal, args.paths);
-      return resultEnvelope(await deps.propertiesReport({ ...args, paths, recursive: args.recursive === true }, { signal: request.signal }), { contextRevision: revision });
+      const report = await deps.propertiesReport({ ...args, paths, recursive: args.recursive === true }, { signal: request.signal });
+      return resultEnvelope(args.recursive === true ? withoutInternal(report, ...paths) : report, { contextRevision: revision });
     }
     if (name === "read_text") {
       const itemPath = await authorizePath(principal, args.path);
@@ -1257,7 +1483,7 @@ export async function createMcpAutomationService(deps) {
     }
     if (name === "compute_checksums") {
       const paths = await authorizePaths(principal, args.paths);
-      return resultEnvelope({ job: startJob(principal, name, (signal) => deps.checksumReport({ ...args, paths }, { signal })) }, { status: "accepted", contextRevision: revision });
+      return resultEnvelope({ job: startJob(principal, name, async (signal) => withoutInternal(await deps.checksumReport({ ...args, paths }, { signal }), ...paths)) }, { status: "accepted", contextRevision: revision });
     }
     if (name === "get_index_status") {
       const itemPath = args.path ? await authorizePath(principal, args.path) : null;
@@ -1265,16 +1491,16 @@ export async function createMcpAutomationService(deps) {
     }
     if (name === "analyze_disk_usage") {
       const itemPath = await authorizePath(principal, args.path);
-      return resultEnvelope({ job: startJob(principal, name, (signal) => deps.sizeAnalysisReport({ ...args, path: itemPath }, { signal })) }, { status: "accepted", contextRevision: revision });
+      return resultEnvelope({ job: startJob(principal, name, async (signal) => withoutInternal(await deps.sizeAnalysisReport({ ...args, path: itemPath }, { signal }), itemPath)) }, { status: "accepted", contextRevision: revision });
     }
     if (name === "find_duplicates") {
       const itemPath = await authorizePath(principal, args.path);
-      return resultEnvelope({ job: startJob(principal, name, (signal) => deps.duplicateFiles({ ...args, path: itemPath }, { signal })) }, { status: "accepted", contextRevision: revision });
+      return resultEnvelope({ job: startJob(principal, name, async (signal) => withoutInternal(await deps.duplicateFiles({ ...args, path: itemPath }, { signal }), itemPath)) }, { status: "accepted", contextRevision: revision });
     }
     if (name === "compare_folders") {
       const leftPath = await authorizePath(principal, args.leftPath);
       const rightPath = await authorizePath(principal, args.rightPath);
-      return resultEnvelope({ job: startJob(principal, name, (signal) => deps.compareDirectories({ ...args, leftPath, rightPath }, { signal })) }, { status: "accepted", contextRevision: revision });
+      return resultEnvelope({ job: startJob(principal, name, async (signal) => withoutInternal(await deps.compareDirectories({ ...args, leftPath, rightPath }, { signal }), leftPath, rightPath)) }, { status: "accepted", contextRevision: revision });
     }
     if (name === "get_job") {
       const job = await loadJob(args.jobId);

@@ -61,8 +61,30 @@ async function prepareCollectorFallback() {
   return { hintPath, createdHint };
 }
 
+// The package excludes the raw renderer sources and ships only the esbuild output,
+// and extraResources copies the native helpers. Refuse to build an app without them.
+const requiredBuildOutputs = [
+  "public/generated/app-runtime.js",
+  "public/generated/model-runtime.js",
+  "public/generated/model-worker.js",
+  "public/generated/terminal-renderer.js",
+  "native/bin/explore-better-fs.exe",
+  "native/bin/ExploreBetterMcp.exe"
+];
+
+async function assertBuildOutputs() {
+  const missing = [];
+  for (const relative of requiredBuildOutputs) {
+    if (!(await pathExists(path.join(root, relative)))) missing.push(relative);
+  }
+  if (missing.length) {
+    throw new Error(`Missing build output: ${missing.join(", ")}. Run the prepackage steps (build:renderer, build:native-helper, build:mcp-server) first.`);
+  }
+}
+
 let fallback = null;
 try {
+  await assertBuildOutputs();
   fallback = await prepareCollectorFallback();
   const env = { ...process.env };
   if (fallback) {

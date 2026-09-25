@@ -198,17 +198,6 @@
   .app-shell.navigator-off.inspector-off:not(.focus-files) .workbench.layout-single {
     grid-template-rows: minmax(420px, 60vh);
   }
-
-  .app-shell.focus-files .workbench,
-  .app-shell.focus-files .workbench.layout-horizontal {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: repeat(2, minmax(420px, 60vh));
-  }
-
-  .app-shell.focus-files .workbench.layout-single {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(420px, 60vh);
-  }
 }
 
 * {
@@ -250,10 +239,10 @@ button {
   padding: 0 10px;
 }
 
+/* Keyboard focus keeps the shared ring from the :focus-visible rule near the end of this file. */
 button:hover,
 button:focus-visible {
   border-color: var(--teal);
-  outline: none;
 }
 
 button:disabled {
@@ -409,7 +398,15 @@ button.primary-command:focus-visible {
 .topbar-more-menu button:focus-visible {
   border-color: var(--teal);
   background: #eaf6f1;
+}
+
+.topbar-more-menu button:hover {
   outline: 2px solid rgba(45, 139, 120, 0.18);
+  outline-offset: 1px;
+}
+
+.topbar-more-menu button:focus-visible {
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -637,15 +634,6 @@ button.primary-command:focus-visible {
 .workbench.layout-horizontal .pane[data-pane="left"] {
   grid-column: 3;
   grid-row: 1;
-}
-
-.workbench.layout-horizontal .pane {
-  grid-template-rows: 40px auto auto 32px minmax(68px, 1fr);
-}
-
-.workbench.layout-horizontal .pane.view-compact,
-.workbench.layout-horizontal .pane.view-tiles {
-  grid-template-rows: 40px auto auto minmax(100px, 1fr);
 }
 
 .workbench.layout-horizontal .toolbar {
@@ -888,6 +876,12 @@ button.primary-command:focus-visible {
 
 .nav-rail {
   grid-column: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .pane[data-pane="left"] {
@@ -993,15 +987,6 @@ body.resizing-layout {
 
 body.resizing-layout.resizing-rows {
   cursor: row-resize;
-}
-
-.nav-rail {
-  display: flex;
-  flex-direction: column;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
 }
 
 .nav-rail-head {
@@ -2526,7 +2511,8 @@ textarea:focus {
 
 .breadcrumb-menu {
   position: fixed;
-  z-index: 35;
+  /* Above the compact breadcrumb strip (45) and pane chrome, alongside the other popup menus. */
+  z-index: 130;
   display: grid;
   width: min(420px, calc(100vw - 16px));
   max-height: min(440px, calc(100vh - 28px));
@@ -3234,8 +3220,9 @@ textarea:focus {
 }
 
 .file-row.focused {
-  outline: 2px solid rgba(8, 119, 111, 0.38);
+  outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
+  box-shadow: inset 0 0 0 2px var(--focus-ring-soft);
 }
 
 .file-row.selected.focused {
@@ -3540,8 +3527,9 @@ textarea:focus {
 }
 
 .file-tile.focused {
-  outline: 2px solid rgba(8, 119, 111, 0.42);
+  outline: 2px solid var(--focus-ring);
   outline-offset: -3px;
+  box-shadow: inset 0 0 0 2px var(--focus-ring-soft);
 }
 
 .file-tile.selected.focused {
@@ -4994,7 +4982,6 @@ textarea:focus {
   overflow: hidden;
 }
 
-.dock-context,
 .dock-mode-strip {
   display: flex;
   align-items: flex-start;
@@ -5007,6 +4994,8 @@ textarea:focus {
   display: grid;
   grid-template-columns: minmax(92px, 1fr) max-content max-content;
   gap: 4px;
+  min-width: 0;
+  min-height: 0;
   align-content: start;
   align-items: start;
   overflow: hidden;
@@ -5094,7 +5083,9 @@ textarea:focus {
 
 .dock-select:focus-visible {
   border-color: var(--teal);
-  outline: none;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--focus-ring-soft);
 }
 
 .dock-toggle {
@@ -5613,6 +5604,11 @@ textarea:focus {
 .context-menu button:hover,
 .context-menu button:focus-visible {
   background: #edf8f5;
+}
+
+.context-menu button:focus-visible {
+  outline-offset: -2px;
+  box-shadow: none;
 }
 
 .context-menu button:disabled {
@@ -7613,7 +7609,10 @@ textarea:focus {
   border-color: #2d8b78;
   background: #e9f7f1;
   box-shadow: 0 0 0 2px rgba(45, 139, 120, 0.16);
-  outline: none;
+}
+
+.command-item:focus-visible {
+  outline-offset: -2px;
 }
 
 .command-item-main {
@@ -12115,7 +12114,12 @@ textarea:focus {
 .update-banner-actions a:focus-visible {
   color: var(--acid);
   text-decoration: underline;
-  outline: none;
+}
+
+.update-banner-actions a:focus-visible {
+  outline: 2px solid var(--acid);
+  outline-offset: 2px;
+  box-shadow: none;
 }
 
 .update-banner[data-state="error"] {
@@ -12339,10 +12343,7 @@ textarea:focus {
   }
 
   .workbench.layout-horizontal,
-  .workbench.layout-single,
-  .app-shell.focus-files .workbench,
-  .app-shell.focus-files .workbench.layout-horizontal,
-  .app-shell.focus-files .workbench.layout-single {
+  .workbench.layout-single {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: 230px repeat(2, minmax(420px, 60vh)) 280px;
   }
@@ -12360,6 +12361,23 @@ textarea:focus {
   .app-shell.inspector-off .workbench.layout-single {
     grid-template-columns: 1fr;
     grid-template-rows: 230px minmax(420px, 60vh);
+  }
+
+  /* Focus mode hides the navigator and inspector, so stack only the panes. */
+  .app-shell.focus-files .workbench,
+  .app-shell.focus-files .workbench.layout-horizontal {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(420px, 60vh));
+  }
+
+  .app-shell.focus-files .workbench.layout-single {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(420px, 60vh);
+  }
+
+  .app-shell.focus-files .workbench .pane[data-pane] {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .nav-rail,
@@ -12972,12 +12990,6 @@ textarea:focus {
   box-shadow: inset 0 0 0 2px var(--focus-ring-soft);
 }
 
-.file-row.focused,
-.file-tile.focused {
-  outline-color: var(--focus-ring);
-  box-shadow: inset 0 0 0 2px var(--focus-ring-soft);
-}
-
 @media (prefers-contrast: more) {
   :root {
     --focus-ring: #005fcc;
@@ -13051,6 +13063,59 @@ textarea:focus {
     outline: 2px solid Highlight;
     background: Highlight;
     color: HighlightText;
+  }
+
+  /* Opt selected rows out of forcing so Chromium's Canvas text backplate does not hide HighlightText. */
+  .file-row.selected,
+  .file-tile.selected,
+  .command-item.active {
+    forced-color-adjust: none;
+  }
+
+  .file-row.selected *,
+  .file-tile.selected *,
+  .command-item.active * {
+    color: HighlightText;
+  }
+
+  .file-row.selected .glyph:not(.folder),
+  .file-tile.selected .glyph:not(.folder) {
+    forced-color-adjust: auto;
+    color: CanvasText;
+  }
+
+  #size-analysis-treemap:focus-visible {
+    outline: 2px solid Highlight;
+  }
+
+  /* Mask- and box-shadow-drawn glyphs paint with background/currentColor, which forced colors would erase. */
+  .lucide-icon,
+  .glyph.folder {
+    forced-color-adjust: none;
+    background: CanvasText;
+  }
+
+  button .lucide-icon,
+  summary .lucide-icon {
+    background: ButtonText;
+  }
+
+  button:disabled .lucide-icon {
+    background: GrayText;
+  }
+
+  .view-glyph,
+  .breadcrumb-glyph {
+    forced-color-adjust: none;
+    color: ButtonText;
+  }
+
+  .file-row.selected .lucide-icon,
+  .file-row.selected .glyph.folder,
+  .file-tile.selected .lucide-icon,
+  .file-tile.selected .glyph.folder,
+  .command-item.active .lucide-icon {
+    background: HighlightText;
   }
 }
 
@@ -13234,5 +13299,31 @@ textarea:focus {
 @media (prefers-reduced-motion: reduce) {
   .preview-loading span {
     animation: none;
+  }
+
+  /* Near-zero durations (not 0) keep animationend/transitionend firing for scripts. */
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Indeterminate loaders would otherwise stop off-screen: show a static busy state instead. */
+  .tile-thumb:has(.tile-thumb-image[data-thumb-src])::after,
+  .tile-thumb:has(.tile-thumb-image.loading)::after {
+    animation-name: none;
+    opacity: 0.45;
+    transform: none;
+  }
+
+  .size-analysis-progress-track.is-loading > i,
+  .operation-pulse::before {
+    animation-name: none;
+    width: 100%;
+    opacity: 0.6;
+    transform: none;
   }
 }

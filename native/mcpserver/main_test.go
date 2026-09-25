@@ -16,8 +16,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Microsoft/go-winio"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestReadBridgeFramesRetainsBufferedUnicode(t *testing.T) {
@@ -330,5 +332,83 @@ func TestWaitingSubscriptionHonorsCancellation(t *testing.T) {
 	}
 	if err := client.setSubscription(context.Background(), "fixture", nil, "explore-better://jobs/later", true); err != nil {
 		t.Fatalf("cancellation left the subscription gate locked: %v", err)
+	}
+}
+
+func TestToolResultTextCarriesCompactJSON(t *testing.T) {
+	raw := json.RawMessage("{\n  \"schemaVersion\": \"1\",\n  \"status\": \"ok\",\n  \"data\": { \"text\": \"café\", \"entries\": [1, 2] }\n}")
+	result := toolResult(raw, nil)
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected text content, got %T", result.Content[0])
+	}
+	if text.Text != `{"schemaVersion":"1","status":"ok","data":{"text":"café","entries":[1,2]}}` {
+		t.Fatalf("text content does not carry the compact result JSON: %q", text.Text)
+	}
+	if result.StructuredContent == nil || result.IsError {
+		t.Fatalf("structured result missing: %+v", result)
+	}
+}
+
+func TestToolResultTextIsBoundedAtRuneBoundary(t *testing.T) {
+	payload, _ := json.Marshal(map[string]any{"status": "ok", "data": strings.Repeat("é", maxToolResultTextBytes)})
+	result := toolResult(payload, nil)
+	text := result.Content[0].(*mcp.TextContent).Text
+	if len(text) > maxToolResultTextBytes+300 || !strings.Contains(text, "[Truncated:") || !utf8.ValidString(text) {
+		t.Fatalf("oversized text was not truncated cleanly: %d bytes", len(text))
+	}
+	object, ok := result.StructuredContent.(map[string]any)
+	if !ok || len(object["data"].(string)) != len("é")*maxToolResultTextBytes {
+		t.Fatal("structured content lost part of an oversized result")
+	}
+}
+
+func TestSessionIdentityIsStableWithoutTransportSessionID(t *testing.T) {
+	first, _ := sessionIdentity(nil)
+	second, _ := sessionIdentity(nil)
+	if first == "" || first != second || first != stableSessionID("") {
+		t.Fatalf("session identity changed within one process: %q, %q", first, second)
+	}
+	if stableSessionID("http-session") != "http-session" {
+		t.Fatal("a transport session ID was replaced")
+	}
+}
+
+func TestRootsCacheRefreshesOnlyAfterInvalidation(t *testing.T) {
+	cache := newRootsCache()
+	key := new(int)
+	calls := 0
+	fetch := func(context.Context) ([]string, bool, error) {
+		calls++
+		return []string{fmt.Sprintf("file:///C:/root-%d", calls)}, true, nil
+	}
+	for range 3 {
+		roots, provided, err := cache.get(context.Background(), key, fetch)
+		if err != nil || !provided || roots[0] != "file:///C:/root-1" {
+			t.Fatalf("cached roots: %v %v %v", roots, provided, err)
+		}
+	}
+	cache.invalidate(key)
+	roots, _, _ := cache.get(context.Background(), key, fetch)
+	if calls != 2 || roots[0] != "file:///C:/root-2" {
+		t.Fatalf("roots were not refreshed after list_changed: calls=%d roots=%v", calls, roots)
+	}
+	failing := func(context.Context) ([]string, bool, error) {
+		return nil, true, &bridgeError{Code: "CLIENT_ROOTS_UNAVAILABLE"}
+	}
+	other := new(int)
+	if _, _, err := cache.get(context.Background(), other, failing); err == nil {
+		t.Fatal("expected a roots failure")
+	}
+	if _, _, err := cache.get(context.Background(), other, fetch); err != nil || calls != 3 {
+		t.Fatalf("a failed roots request was cached: %v calls=%d", err, calls)
+	}
+	stale := new(int)
+	_, _, _ = cache.get(context.Background(), stale, func(context.Context) ([]string, bool, error) {
+		cache.invalidate(stale)
+		return []string{"file:///C:/stale"}, true, nil
+	})
+	if roots, _, _ := cache.get(context.Background(), stale, fetch); roots[0] == "file:///C:/stale" {
+		t.Fatal("roots fetched across a change notification were cached")
 	}
 }

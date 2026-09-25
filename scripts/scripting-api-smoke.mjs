@@ -266,9 +266,17 @@ async function runToolbarScriptInBrowser(baseUrl) {
     await page.goto(url, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => Boolean(window.__exploreBetterStartup?.completedAt), { timeout: 15000 });
     const button = page.locator('[data-run-script="toolbar-script-smoke"]');
-    await button.waitFor({ state: "visible", timeout: 15000 });
+    await button.waitFor({ state: "attached", timeout: 15000 });
     const label = await button.textContent();
-    await button.click();
+    // Narrow shelves move pinned scripts into the overflow menu; run it from there when hidden.
+    if (await button.isVisible()) {
+      await button.click();
+    } else {
+      await page.locator("#dock-overflow-toggle").click();
+      const overflowItem = page.locator('[data-overflow-run-script="toolbar-script-smoke"]');
+      await overflowItem.waitFor({ state: "visible", timeout: 15000 });
+      await overflowItem.click();
+    }
     assert(await waitForPath(outputPath, 15000), "Toolbar script should write its marker file.");
     const marker = JSON.parse(await fs.readFile(outputPath, "utf8"));
     assert(marker.activePane === "left", "Toolbar script should receive active pane from the browser.");

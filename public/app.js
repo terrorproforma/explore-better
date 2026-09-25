@@ -957,7 +957,13 @@ function runtimeTabId() {
   return globalThis.crypto?.randomUUID?.() || `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+// mcpContextRevision counts published snapshots (wait_for_ui wakes on each).
+// mcpSemanticRevision is the revision at which the semantic context (panes,
+// tabs, paths, selection, focus, open dialogs) last changed; cosmetic updates
+// such as toasts or status text leave earlier revisions valid.
 let mcpContextRevision = 0;
+let mcpSemanticRevision = 0;
+let mcpSemanticDigest = "";
 let mcpContextPublishFrame = 0;
 let mcpLastInteraction = null;
 
@@ -1129,10 +1135,15 @@ async function runAppUpdateAction(action) {
   if (action === "install") {
     const button = document.querySelector('[data-update-action="install"]');
     if (button) button.disabled = true;
-    const status = await bridge.installUpdate();
-    if (!status?.accepted) {
+    try {
+      const status = await bridge.installUpdate();
+      if (!status?.accepted) {
+        if (button) button.disabled = false;
+        showToast("The update is not ready to install yet.");
+      }
+    } catch (error) {
       if (button) button.disabled = false;
-      showToast("The update is not ready to install yet.");
+      showToast(`Could not install the update: ${error?.message || error}`);
     }
   }
 }
@@ -1361,22 +1372,40 @@ function initializeMcpUiObservation() {
       recordMcpInteraction(event, "keyboard");
     }
   }, { capture: true });
+  // Terminal output (xterm's DOM renderer) is deliberately not observed: it
+  // mutates every frame and would force a full snapshot + IPC each time. Only
+  // the drawer itself and its state title are watched, and the title only
+  // counts when its text actually changes (it is rewritten on every data chunk).
+  const terminalTitleText = new WeakMap();
+  const terminalTitleChanged = (title) => {
+    const text = title.textContent;
+    if (terminalTitleText.get(title) === text) return false;
+    terminalTitleText.set(title, text);
+    return true;
+  };
   const observer = new MutationObserver((records) => {
     const relevant = records.some((record) => {
       const element = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
+      const terminalTitle = element?.closest?.("[data-terminal-title]");
+      if (terminalTitle) return terminalTitleChanged(terminalTitle);
       return Boolean(element?.closest?.("dialog[open], #status-pill, #toast, .nav-rail, #update-banner, .pane-terminal"))
         || (record.type === "attributes" && element?.tagName === "DIALOG" && record.attributeName === "open");
     });
     if (relevant) scheduleMcpContextPublish();
   });
-  for (const element of document.querySelectorAll("dialog, #status-pill, #toast, .nav-rail, #update-banner, .pane-terminal")) {
+  const observedAttributes = ["open", "class", "hidden", "disabled", "aria-busy", "aria-expanded", "aria-pressed", "aria-selected"];
+  for (const element of document.querySelectorAll("dialog, #status-pill, #toast, .nav-rail, #update-banner, [data-terminal-title]")) {
     observer.observe(element, {
       attributes: true,
-      attributeFilter: ["open", "class", "hidden", "disabled", "aria-busy", "aria-expanded", "aria-pressed", "aria-selected"],
+      attributeFilter: observedAttributes,
       childList: true,
       characterData: true,
       subtree: true
     });
+  }
+  for (const element of document.querySelectorAll(".pane-terminal")) {
+    for (const title of element.querySelectorAll("[data-terminal-title]")) terminalTitleText.set(title, title.textContent);
+    observer.observe(element, { attributes: true, attributeFilter: observedAttributes });
   }
 }
 
@@ -1396,16 +1425,37 @@ function mcpContextSnapshot() {
     };
   }
   const activeTab = tabOf(app.activePane);
+  const selection = [...(activeTab?.selected || [])].slice(0, 100);
+  const focusedPath = activeTab?.focusedPath || "";
+  const ui = mcpUiSnapshot();
+  const contextRevision = ++mcpContextRevision;
+  const digest = JSON.stringify([
+    app.activePane,
+    app.paneLayout,
+    paneSnapshots,
+    activeTab?.selected?.size || 0,
+    selection,
+    focusedPath,
+    ui.openDialogs.map((dialog) => [dialog.id, dialog.title, dialog.modal])
+  ]);
+  if (digest !== mcpSemanticDigest) {
+    mcpSemanticDigest = digest;
+    mcpSemanticRevision = contextRevision;
+  }
   return {
     live: true,
     activePane: app.activePane,
     paneLayout: app.paneLayout,
     panes: paneSnapshots,
-    selection: [...(activeTab?.selected || [])].slice(0, 100),
-    focusedPath: activeTab?.focusedPath || "",
-    ui: mcpUiSnapshot(),
-    contextRevision: ++mcpContextRevision
+    selection,
+    focusedPath,
+    ui,
+    contextRevision
   };
+}
+
+function mcpContextRevisionIsCurrent(revision) {
+  return Number.isInteger(revision) && revision >= mcpSemanticRevision && revision <= mcpContextRevision;
 }
 
 function scheduleMcpContextPublish(immediate = false) {
@@ -1667,7 +1717,7 @@ async function invokeMcpSemanticAction(action = {}) {
   const paneName = mcpActionPane(action.pane);
   const inputs = action.inputs && typeof action.inputs === "object" && !Array.isArray(action.inputs) ? action.inputs : {};
   validateMcpSemanticInputs(inputs, definition.inputSchema);
-  if (definition.requiresFreshContext && Number.isInteger(action.expectedContextRevision) && action.expectedContextRevision !== mcpContextRevision) {
+  if (definition.requiresFreshContext && Number.isInteger(action.expectedContextRevision) && !mcpContextRevisionIsCurrent(action.expectedContextRevision)) {
     throw Object.assign(new Error("The Explore Better selection or view changed. Read context and retry the action."), {
       code: "STALE_CONTEXT",
       details: { expectedContextRevision: action.expectedContextRevision, currentContextRevision: mcpContextRevision }
@@ -1792,7 +1842,13 @@ function describeMcpUiAction(action = {}) {
     }
   }
   const description = { pane: paneName, paths: [...new Set(paths)] };
-  return { ...description, contextRevision: mcpContextRevision, descriptionToken: JSON.stringify(description) };
+  // Echo a caller's revision while it is still semantically current so the
+  // exact-match fence in the automation service is not tripped by cosmetic
+  // publishes (toasts, status text) that happened after the caller read context.
+  const contextRevision = mcpContextRevisionIsCurrent(action.expectedContextRevision)
+    ? action.expectedContextRevision
+    : mcpContextRevision;
+  return { ...description, contextRevision, descriptionToken: JSON.stringify(description) };
 }
 
 async function handleMcpUiAction(action = {}) {
@@ -1800,7 +1856,7 @@ async function handleMcpUiAction(action = {}) {
   if (action.expectedDescriptionToken !== undefined && action.expectedDescriptionToken !== describeMcpUiAction(action).descriptionToken) {
     throw Object.assign(new Error("The requested UI target changed. Read context and retry the action."), { code: "STALE_CONTEXT" });
   }
-  if (Number.isInteger(action.expectedContextRevision) && action.expectedContextRevision !== mcpContextRevision) {
+  if (Number.isInteger(action.expectedContextRevision) && !mcpContextRevisionIsCurrent(action.expectedContextRevision)) {
     throw Object.assign(new Error("The Explore Better selection or view changed. Read context and retry the action."), { code: "STALE_CONTEXT" });
   }
   if (action.type === "listActions") {
@@ -2357,6 +2413,11 @@ function foregroundRequestKind(url, options = {}) {
   return "";
 }
 
+const listingResponseRoutes = new Set(["/api/list", "/api/archive/list"]);
+// Listing response -> listing cache generation when its request started, so a
+// response that raced a cache clear is never written back into the cache.
+const listingResponseGenerations = new WeakMap();
+
 async function requestWithoutForegroundTracking(url, options = {}) {
   const { invalidateListingCache, ...fetchOptions } = options;
   const method = String(options.method || "GET").toUpperCase();
@@ -2369,6 +2430,7 @@ async function requestWithoutForegroundTracking(url, options = {}) {
   if (shouldWatchOperation && app.state) {
     scheduleOperationPoll(200);
   }
+  const listingGeneration = listingResponseRoutes.has(pathname) ? app.listingCacheGeneration : null;
   const initialListing = method === "GET"
     ? window.__exploreBetterInitialListings?.[url] ||
       (window.__exploreBetterInitialListing?.route === url ? window.__exploreBetterInitialListing : null)
@@ -2400,6 +2462,9 @@ async function requestWithoutForegroundTracking(url, options = {}) {
     }
   }
   const data = expandCompactDirectoryListing(parsed);
+  if (listingGeneration !== null && data && typeof data === "object") {
+    listingResponseGenerations.set(data, listingGeneration);
+  }
   if (shouldInvalidateListingCache(method, pathname, invalidateListingCache)) {
     clearListingCache();
   }
@@ -2422,6 +2487,7 @@ async function request(url, options = {}) {
 
 async function requestSizeAnalysisStream(body, signal, onProgress) {
   const release = beginForegroundActivity("analysis");
+  let reader = null;
   try {
     const response = await fetch("/api/size-analysis/stream", {
       method: "POST",
@@ -2433,7 +2499,7 @@ async function requestSizeAnalysisStream(body, signal, onProgress) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || `Request failed: ${response.status}`);
     }
-    const reader = response.body.getReader();
+    reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let result = null;
@@ -2459,11 +2525,29 @@ async function requestSizeAnalysisStream(body, signal, onProgress) {
     if (!result) throw new Error("Size analysis stream ended before the final result.");
     return result;
   } finally {
+    // Stops the server-side scan when an error event or parse failure ends the
+    // loop early; a no-op once the stream has completed.
+    reader?.cancel().catch(() => {});
     release?.();
   }
 }
 
+// Listings repeat a handful of attribute strings; entries never mutate their
+// attributes object, so identical strings can share one parsed object.
+const compactAttributesCache = new Map();
+
 function attributesFromCompactText(value) {
+  const key = String(value || "");
+  let attributes = compactAttributesCache.get(key);
+  if (!attributes) {
+    attributes = parseCompactAttributesText(key);
+    if (compactAttributesCache.size >= 512) compactAttributesCache.clear();
+    compactAttributesCache.set(key, attributes);
+  }
+  return attributes;
+}
+
+function parseCompactAttributesText(value) {
   const text = String(value || "").toUpperCase();
   return {
     readonly: text.includes("R"),
@@ -2855,40 +2939,124 @@ async function loadIntegrationStatus() {
   return app.integrationStatus;
 }
 
+const stateSyncFields = [
+  "layout",
+  "favorites",
+  "aliases",
+  "recentLocations",
+  "fileBasket",
+  "layouts",
+  "tabGroups",
+  "collections",
+  "paneSnapshots",
+  "selectionSets",
+  "labels",
+  "folderFormats",
+  "displayPresets",
+  "filterPresets",
+  "syncProfiles",
+  "openWithPresets",
+  "searchPresets",
+  "selectPresets",
+  "bulkRenamePresets",
+  "scripts",
+  "commands",
+  "settings"
+];
+const stateSyncFieldSet = new Set(stateSyncFields);
+// Per-field JSON of what the server last confirmed, so saves send only renderer-side changes
+// and never revert fields the server changed on its own (labels moved with files, MCP edits).
+const stateSync = { snapshot: new Map(), saveSeq: 0, appliedSeq: 0 };
+let syncedAppState = app.state;
+
+function stateFieldText(state, field) {
+  const value = state?.[field];
+  return value === undefined ? undefined : JSON.stringify(value);
+}
+
+function recordSyncedState(state) {
+  stateSync.snapshot.clear();
+  for (const field of stateSyncFields) {
+    stateSync.snapshot.set(field, stateFieldText(state, field));
+  }
+  // A whole-state replacement is newer than any save still in flight.
+  stateSync.appliedSeq = stateSync.saveSeq;
+}
+
+Object.defineProperty(app, "state", {
+  configurable: true,
+  enumerable: true,
+  get: () => syncedAppState,
+  set(value) {
+    syncedAppState = value;
+    recordSyncedState(value);
+  }
+});
+
+// Adopt server values only for fields the renderer has not changed since `baseline` was taken.
+function mergeServerState(serverState, baseline = stateSync.snapshot, sent = {}) {
+  const state = syncedAppState;
+  if (!state || !serverState || typeof serverState !== "object") {
+    return;
+  }
+  for (const [field, value] of Object.entries(serverState)) {
+    if (!stateSyncFieldSet.has(field)) {
+      state[field] = value;
+      continue;
+    }
+    const base = baseline.get(field);
+    const wasSent = Object.hasOwn(sent, field);
+    if (stateFieldText(state, field) === base) {
+      state[field] = value;
+      if (field !== "layout") {
+        stateSync.snapshot.set(field, stateFieldText(serverState, field));
+      } else if (wasSent) {
+        stateSync.snapshot.set(field, base);
+      }
+    } else if (wasSent) {
+      stateSync.snapshot.set(field, base);
+    }
+  }
+}
+
 async function saveStateNow() {
   if (!app.state) {
     return null;
   }
   app.state.layout = serializeLayout();
-  app.state = await request("/api/state", {
+  const baseline = new Map();
+  const body = {};
+  for (const field of stateSyncFields) {
+    const text = stateFieldText(app.state, field);
+    baseline.set(field, text);
+    if (text !== undefined && text !== stateSync.snapshot.get(field)) {
+      body[field] = app.state[field];
+    }
+  }
+  if (!Object.keys(body).length) {
+    updateOperationReadout();
+    return app.state;
+  }
+  const seq = ++stateSync.saveSeq;
+  const saved = await request("/api/state", {
     method: "POST",
-    body: JSON.stringify({
-      layout: app.state.layout,
-      favorites: app.state.favorites || [],
-      aliases: app.state.aliases || [],
-      recentLocations: app.state.recentLocations || [],
-      fileBasket: app.state.fileBasket || [],
-      layouts: app.state.layouts || [],
-      tabGroups: app.state.tabGroups || [],
-      collections: app.state.collections || [],
-      paneSnapshots: app.state.paneSnapshots || [],
-      selectionSets: app.state.selectionSets || [],
-      labels: app.state.labels || [],
-      folderFormats: app.state.folderFormats || [],
-      displayPresets: app.state.displayPresets || [],
-      filterPresets: app.state.filterPresets || [],
-      syncProfiles: app.state.syncProfiles || [],
-      openWithPresets: app.state.openWithPresets || [],
-      searchPresets: app.state.searchPresets || [],
-      selectPresets: app.state.selectPresets || [],
-      bulkRenamePresets: app.state.bulkRenamePresets || [],
-      scripts: app.state.scripts || [],
-      commands: app.state.commands || [],
-      settings: app.state.settings || {}
-    })
+    body: JSON.stringify(body)
   });
+  if (seq > stateSync.appliedSeq) {
+    stateSync.appliedSeq = seq;
+    mergeServerState(saved, baseline, body);
+  }
   updateOperationReadout();
   return app.state;
+}
+
+async function refreshServerOwnedState() {
+  const seq = stateSync.saveSeq;
+  const state = await request("/api/state");
+  // A save started meanwhile returns fresher server state itself.
+  if (seq === stateSync.saveSeq) {
+    mergeServerState(state);
+  }
 }
 
 function scheduleStateSave() {
@@ -3240,37 +3408,84 @@ function renderKindFilterOptions(selectedValue = "all") {
     .join("");
 }
 
+const numericSortKeys = new Set(["size", "dimensions", "modified", "created", "accessed"]);
+// Entry objects are replaced (not mutated) when their searchable fields change,
+// so the lowercase filter text can be computed once per entry object.
+const entrySearchTextCache = new WeakMap();
+// entries array -> Map(sortKey/sortDir/revision -> sorted, unfiltered copy)
+const sortedEntryOrderCache = new WeakMap();
+
+function entrySearchText(entry) {
+  let text = entrySearchTextCache.get(entry);
+  if (text === undefined) {
+    const label = entry.label || {};
+    text = `${entry.name} ${entry.kind} ${entry.parent || ""} ${attributeText(entry)} ${linkTypeText(entry)} ${linkTargetText(
+      entry
+    )} ${imageDimensionsText(entry)} ${label.name || ""} ${label.notes || ""}`.toLowerCase();
+    entrySearchTextCache.set(entry, text);
+  }
+  return text;
+}
+
+function sortedUnfilteredEntries(tab) {
+  const source = tab.entries;
+  const sortKey = tab.sortKey;
+  const key = `${sortKey}\u001f${tab.sortDir}\u001f${Number(tab.visibleEntriesRevision || 0)}\u001f${source.length}`;
+  let byKey = sortedEntryOrderCache.get(source);
+  const cached = byKey?.get(key);
+  if (cached) {
+    byKey.delete(key);
+    byKey.set(key, cached);
+    return cached;
+  }
+  const factor = tab.sortDir === "asc" ? 1 : -1;
+  const numeric = numericSortKeys.has(sortKey);
+  const foldersFirst = sortKey === "name";
+  const values = source.map((entry) => {
+    const value = sortableValue(entry, sortKey);
+    return numeric ? Number(value) || 0 : String(value);
+  });
+  const order = source.map((_entry, index) => index);
+  order.sort((leftIndex, rightIndex) => {
+    const a = source[leftIndex];
+    const b = source[rightIndex];
+    if (foldersFirst && a.isDirectory !== b.isDirectory) {
+      return a.isDirectory ? -1 : 1;
+    }
+    const left = values[leftIndex];
+    const right = values[rightIndex];
+    if (numeric) {
+      return (left - right) * factor;
+    }
+    return paneValueCollator.compare(left, right) * factor;
+  });
+  const sorted = order.map((index) => source[index]);
+  if (!byKey) {
+    byKey = new Map();
+    sortedEntryOrderCache.set(source, byKey);
+  }
+  byKey.set(key, sorted);
+  while (byKey.size > 2) {
+    byKey.delete(byKey.keys().next().value);
+  }
+  return sorted;
+}
+
 function sortedEntries(tab) {
   const filter = tab.filter.trim().toLowerCase();
   const kindFilter = normalizeKindFilter(tab.kindFilter);
   const labelFilter = tab.labelFilter || "all";
-  const entries = tab.entries.filter((entry) => {
-    const label = entry.label || {};
-    const matchesText = filter
-      ? `${entry.name} ${entry.kind} ${entry.parent || ""} ${attributeText(entry)} ${linkTypeText(entry)} ${linkTargetText(
-          entry
-        )} ${imageDimensionsText(entry)} ${label.name || ""} ${label.notes || ""}`
-          .toLowerCase()
-          .includes(filter)
-      : true;
+  const sorted = sortedUnfilteredEntries(tab);
+  if (!filter && kindFilter === "all" && labelFilter === "all") {
+    return sorted.slice();
+  }
+  return sorted.filter((entry) => {
+    const matchesText = filter ? entrySearchText(entry).includes(filter) : true;
     const matchesLabel =
       labelFilter === "all" ||
       (labelFilter === "any" && entry.label) ||
       (entry.label && entry.label.color === labelFilter);
     return matchesText && matchesLabel && entryMatchesKindFilter(entry, kindFilter);
-  });
-
-  const factor = tab.sortDir === "asc" ? 1 : -1;
-  return entries.sort((a, b) => {
-    if (a.isDirectory !== b.isDirectory && tab.sortKey === "name") {
-      return a.isDirectory ? -1 : 1;
-    }
-    const left = sortableValue(a, tab.sortKey);
-    const right = sortableValue(b, tab.sortKey);
-    if (["size", "dimensions", "modified", "created", "accessed"].includes(tab.sortKey)) {
-      return ((left || 0) - (right || 0)) * factor;
-    }
-    return paneValueCollator.compare(String(left), String(right)) * factor;
   });
 }
 
@@ -3599,28 +3814,51 @@ function pruneListingCache() {
   }
 }
 
-function rememberListingCache(cacheKey, data) {
+function rememberListingCache(cacheKey, data, generation = listingResponseGenerations.get(data)) {
+  // A listing requested before the cache was cleared may describe a folder
+  // that has since changed; never let it repopulate the cache.
+  if (generation !== undefined && generation !== app.listingCacheGeneration) {
+    return false;
+  }
   app.listingCache.delete(cacheKey);
   app.listingCache.set(cacheKey, {
     cachedAt: Date.now(),
     data
   });
   pruneListingCache();
+  return true;
 }
 
-function requestFullListingHydration(cacheKey, query) {
-  const key = `${app.listingCacheGeneration}:${cacheKey}`;
-  const existing = app.listingHydrations.get(key);
-  if (existing) {
-    return existing;
+function requestFullListingHydration(cacheKey, query, { signal } = {}) {
+  const generation = app.listingCacheGeneration;
+  const key = `${generation}:${cacheKey}`;
+  let promise = app.listingHydrations.get(key);
+  if (!promise) {
+    // The shared request is not tied to any one caller: if the pane navigates
+    // away, the full listing still lands in the cache for the next visit.
+    promise = request(`/api/list?${query}`, { invalidateListingCache: false })
+      .then((data) => {
+        rememberListingCache(cacheKey, data, generation);
+        return data;
+      })
+      .finally(() => {
+        if (app.listingHydrations.get(key) === promise) {
+          app.listingHydrations.delete(key);
+        }
+      });
+    app.listingHydrations.set(key, promise);
   }
-  const promise = request(`/api/list?${query}`, { invalidateListingCache: false }).finally(() => {
-    if (app.listingHydrations.get(key) === promise) {
-      app.listingHydrations.delete(key);
-    }
+  if (!signal) {
+    return promise;
+  }
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
-  app.listingHydrations.set(key, promise);
-  return promise;
 }
 
 function listingCacheEntry(cacheKey) {
@@ -3767,7 +4005,7 @@ function applyPaneListing(paneName, tab, data, context = {}) {
     options = {}
   } = context;
   const entries = entriesWithCurrentLabels(data.entries);
-  if (pushHistory && previousPath && previousPath !== data.path) {
+  if (pushHistory && previousPath && !samePath(previousPath, data.path)) {
     tab.history.push(previousPath);
     tab.future = [];
   }
@@ -3829,7 +4067,7 @@ function applyZipPaneListing(paneName, tab, data, context = {}) {
     options = {}
   } = context;
   const entries = (data.entries || []).map((entry) => withCurrentLabel({ ...entry }));
-  if (pushHistory && previousPath && previousPath !== data.path) {
+  if (pushHistory && previousPath && !samePath(previousPath, data.path)) {
     tab.history.push(previousPath);
     tab.future = [];
   }
@@ -4146,6 +4384,8 @@ async function openShellNamespaceIndexInPane(index) {
   await openShellNamespaceInPane(item.path);
 }
 
+let shellNamespaceRequestSeq = 0;
+
 async function loadShellNamespace(target = app.shellNamespace?.target || "thisPc", options = {}) {
   app.shellNamespace = app.shellNamespace || { target: "thisPc", stack: [], report: null, loading: false };
   const previousTarget = app.shellNamespace.target;
@@ -4154,17 +4394,24 @@ async function loadShellNamespace(target = app.shellNamespace?.target || "thisPc
   }
   app.shellNamespace.target = target;
   app.shellNamespace.loading = true;
+  // Only the newest request may update the dialog; a slow older response
+  // (or one from a previous dialog session) must not overwrite it.
+  const requestId = ++shellNamespaceRequestSeq;
+  app.shellNamespace.requestId = requestId;
+  const isCurrent = () => app.shellNamespace?.requestId === requestId;
   document.getElementById("shell-namespace-output").textContent = "";
   renderShellNamespaceDialog("Reading Windows locations...");
   try {
     const params = new URLSearchParams({ target, limit: "160" });
     const report = await request(`/api/shell/namespace?${params}`);
+    if (!isCurrent()) return report;
     app.shellNamespace.report = report;
     app.shellNamespace.target = report.target || target;
     app.shellNamespace.loading = false;
     renderShellNamespaceDialog();
     return report;
   } catch (error) {
+    if (!isCurrent()) return null;
     app.shellNamespace.loading = false;
     renderShellNamespaceDialog("Windows locations failed");
     throw error;
@@ -4366,10 +4613,20 @@ async function runDeviceAction(action, id, paneName = app.activePane) {
   showToast("That action is not supported for this device");
 }
 
+function deviceSurfaceVisible() {
+  if (document.getElementById("devices-dialog")?.open) return true;
+  const section = document.getElementById("nav-devices-section");
+  return Boolean(section && !section.hidden && section.offsetParent !== null);
+}
+
 function scheduleDeviceRefresh() {
   clearInterval(app.devices.pollTimer);
   app.devices.pollTimer = setInterval(() => {
-    if (document.visibilityState === "visible") loadDevicesReport().catch(() => {});
+    if (document.visibilityState !== "visible") return;
+    // Poll briskly only while device rows are on screen; otherwise a slow check still catches new drives.
+    if (deviceSurfaceVisible() || Date.now() - (app.devices.lastLoadedAt || 0) >= 60_000) {
+      loadDevicesReport().catch(() => {});
+    }
   }, 15_000);
 }
 
@@ -4461,7 +4718,8 @@ async function exportSupportBundle() {
 }
 
 function normalizedPathKey(itemPath) {
-  return String(itemPath || "").replace(/[\\/]+$/, "").toLowerCase();
+  // Windows accepts either separator, so C:/foo and C:\foo share one key.
+  return String(itemPath || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
 }
 
 function samePath(left, right) {
@@ -4472,9 +4730,11 @@ function parentPathOf(itemPath) {
   const trimmed = String(itemPath || "").replace(/[\\/]+$/, "");
   const splitAt = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
   if (splitAt <= 0) {
-    return trimmed;
+    // "D:" alone is drive-relative (the drive's current directory), not its root.
+    return /^[A-Za-z]:$/.test(trimmed) ? `${trimmed}\\` : trimmed;
   }
-  return trimmed.slice(0, splitAt);
+  const parent = trimmed.slice(0, splitAt);
+  return /^[A-Za-z]:$/.test(parent) ? `${parent}${trimmed[splitAt]}` : parent;
 }
 
 function pathSeparatorFor(itemPath) {
@@ -4700,28 +4960,110 @@ function filesystemSuggestionBase(inputPath) {
   };
 }
 
+const pathSuggestDebounceMs = 120;
+const pathSuggestFolderCacheTtlMs = 15_000;
+const pathSuggestFolderCacheMaxEntries = 8;
+// Parent folder -> its sorted subfolders, so typing more characters of a name
+// filters locally instead of listing the parent again on every keystroke.
+const pathSuggestFolderCache = new Map();
+let pathSuggestFetch = null;
+
+function pathSuggestFolderCacheKey(parentPath) {
+  return `${app.listingCacheGeneration}\u001f${showHiddenEntriesEnabled() ? 1 : 0}\u001f${normalizedPathKey(parentPath)}`;
+}
+
+function cachedPathSuggestFolders(key) {
+  const cached = pathSuggestFolderCache.get(key);
+  if (!cached) {
+    return null;
+  }
+  if (Date.now() - cached.cachedAt > pathSuggestFolderCacheTtlMs) {
+    pathSuggestFolderCache.delete(key);
+    return null;
+  }
+  return cached;
+}
+
+function cancelPathSuggestFetch() {
+  clearTimeout(pathSuggestFetch?.timer);
+  pathSuggestFetch?.controller.abort();
+  pathSuggestFetch = null;
+}
+
+function pathSuggestFolders(parentPath, key) {
+  if (pathSuggestFetch?.key === key) {
+    return pathSuggestFetch.promise;
+  }
+  cancelPathSuggestFetch();
+  const controller = new AbortController();
+  const fetchState = { key, controller, timer: null, promise: null };
+  fetchState.promise = new Promise((resolve, reject) => {
+    const abort = () => reject(new DOMException("Aborted", "AbortError"));
+    controller.signal.addEventListener("abort", abort, { once: true });
+    // Debounce so a burst of keystrokes that changes the parent folder costs
+    // one listing instead of one per character.
+    fetchState.timer = setTimeout(async () => {
+      try {
+        const query = new URLSearchParams({
+          path: parentPath,
+          showHidden: showHiddenEntriesEnabled() ? "true" : "false",
+          format: "compact-v2"
+        });
+        const listing = await request(`/api/list?${query}`, { signal: controller.signal, invalidateListingCache: false });
+        const folders = (listing.entries || [])
+          .filter((entry) => entry.isDirectory && !entry.unavailable)
+          .map((entry) => ({ name: entry.name, lowerName: entry.name.toLowerCase(), path: entry.path }))
+          .sort((left, right) => left.name.localeCompare(right.name));
+        const result = { cachedAt: Date.now(), path: listing.path, folders };
+        if (key.startsWith(`${app.listingCacheGeneration}\u001f`)) {
+          pathSuggestFolderCache.delete(key);
+          pathSuggestFolderCache.set(key, result);
+          while (pathSuggestFolderCache.size > pathSuggestFolderCacheMaxEntries) {
+            pathSuggestFolderCache.delete(pathSuggestFolderCache.keys().next().value);
+          }
+        }
+        resolve(result);
+      } catch (error) {
+        reject(error);
+      } finally {
+        controller.signal.removeEventListener("abort", abort);
+        if (pathSuggestFetch === fetchState) {
+          pathSuggestFetch = null;
+        }
+      }
+    }, pathSuggestDebounceMs);
+  });
+  // Callers that were superseded stop listening; avoid unhandled rejections.
+  fetchState.promise.catch(() => {});
+  pathSuggestFetch = fetchState;
+  return fetchState.promise;
+}
+
 async function filesystemPathSuggestions(inputPath) {
   const base = filesystemSuggestionBase(inputPath);
   if (!base?.parent) {
+    cancelPathSuggestFetch();
     return [];
   }
-  const query = new URLSearchParams({
-    path: base.parent,
-    showHidden: showHiddenEntriesEnabled() ? "true" : "false"
-  });
-  const listing = await request(`/api/list?${query}`);
+  const key = pathSuggestFolderCacheKey(base.parent);
+  const cached = cachedPathSuggestFolders(key);
+  if (cached && pathSuggestFetch?.key !== key) {
+    cancelPathSuggestFetch();
+  }
+  const listing = cached || await pathSuggestFolders(base.parent, key);
   const prefix = base.prefix.toLowerCase();
-  return (listing.entries || [])
-    .filter((entry) => entry.isDirectory && !entry.unavailable)
-    .filter((entry) => !prefix || entry.name.toLowerCase().startsWith(prefix))
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .slice(0, 8)
-    .map((entry) => ({
+  const matches = [];
+  for (const folder of listing.folders) {
+    if (prefix && !folder.lowerName.startsWith(prefix)) continue;
+    matches.push({
       kind: "Folder",
-      label: entry.name,
-      path: entry.path,
+      label: folder.name,
+      path: folder.path,
       detail: listing.path
-    }));
+    });
+    if (matches.length >= 8) break;
+  }
+  return matches;
 }
 
 function renderPathSuggestions() {
@@ -4770,6 +5112,7 @@ function hidePathSuggestions(paneName = null) {
   if (paneName && app.pathSuggest?.paneName && app.pathSuggest.paneName !== paneName) {
     return;
   }
+  cancelPathSuggestFetch();
   app.pathSuggest = {
     paneName: null,
     items: [],
@@ -5610,6 +5953,15 @@ function sortableValue(entry, sortKey) {
   if (sortKey === "linkTarget") {
     return linkTargetText(entry);
   }
+  if (sortKey === "modified" || sortKey === "created" || sortKey === "accessed") {
+    // Restored snapshots carry ISO strings; live listings carry epoch numbers.
+    const value = entry[sortKey];
+    if (typeof value === "string") {
+      const parsed = Date.parse(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return value ?? "";
+  }
   return entry[sortKey] ?? "";
 }
 
@@ -5756,8 +6108,10 @@ function renderNavigatorDevices() {
   const list = document.getElementById("nav-devices");
   if (!section || !list) return;
   const devices = navigatorMeaningfulDevices();
-  section.hidden = devices.length === 0;
-  list.innerHTML = devices.slice(0, 8).map((item) => {
+  if (section.hidden !== (devices.length === 0)) section.hidden = devices.length === 0;
+  // Unchanged markup keeps the existing buttons (and keyboard focus) intact
+  // across the periodic device refresh.
+  setStableMarkup(list, devices.slice(0, 8).map((item) => {
     const pathAction = item.path && item.capabilities?.browseInApp
       ? `data-device-nav-path="${escapeHtml(item.path)}"`
       : `data-device-nav-id="${escapeHtml(item.id)}"`;
@@ -5769,7 +6123,7 @@ function renderNavigatorDevices() {
       </button>
       <button class="nav-mini" data-device-nav-id="${escapeHtml(item.id)}" title="View device actions" aria-label="View device actions">&gt;</button>
     </div>`;
-  }).join("");
+  }).join(""));
 }
 
 function folderTreeRoots() {
@@ -5873,7 +6227,9 @@ function renderFolderTreeChildren(itemPath, depth) {
   }
   const children = entries.map((entry) => renderFolderTreeNode(entry, depth)).join("");
   const note = node.truncated
-    ? `<div class="tree-message" style="--tree-depth:${Math.min(depth, 12)}">Showing first ${entries.length} folders</div>`
+    ? `<div class="tree-message" style="--tree-depth:${Math.min(depth, 12)}">Showing first ${
+        entries.filter((entry) => !entry.revealed).length
+      } folders</div>`
     : "";
   return `${children}${note}`;
 }
@@ -5967,7 +6323,20 @@ async function revealPathInFolderTree(itemPath) {
   await loadFolderTreeChildren(current);
   for (const part of parts) {
     const node = folderTreeNodeFor(current);
-    const child = node?.entries?.find((entry) => entry.name.toLowerCase() === part.toLowerCase());
+    let child = node?.entries?.find((entry) => entry.name.toLowerCase() === part.toLowerCase());
+    if (!child && node?.truncated && !node.error) {
+      // The folder is past the node's first-N limit (entries are name-sorted,
+      // so it sorts after them). Add just this segment so the path stays visible.
+      child = {
+        name: part,
+        path: joinPathSegment(current, part, pathSeparatorFor(current)),
+        parent: current,
+        kind: "folder",
+        revealed: true
+      };
+      node.entries = [...(node.entries || []), child];
+      app.folderTree.leafPaths.delete(normalizedPathKey(current));
+    }
     if (!child) {
       break;
     }
@@ -5981,7 +6350,8 @@ async function revealPathInFolderTree(itemPath) {
 function pathSegmentsBetween(rootPath, itemPath) {
   const root = String(rootPath || "").replace(/[\\/]+$/, "");
   const target = String(itemPath || "").replace(/[\\/]+$/, "");
-  if (!target.toLowerCase().startsWith(root.toLowerCase())) {
+  // Require a separator after the root so C:\foo is not treated as containing C:\foobar.
+  if (!pathInsideFolder(target, root || rootPath)) {
     return [];
   }
   return target
@@ -6513,28 +6883,11 @@ async function sortPaneByColumn(paneName, sortKey, direction = null) {
   scheduleStateSave();
 }
 
-function fileRenderLimits(viewMode) {
-  if (viewMode === "tiles") {
-    return { initial: 180, chunk: 180 };
-  }
-  if (viewMode === "compact") {
-    return { initial: 900, chunk: 900 };
-  }
-  return { initial: 650, chunk: 650 };
-}
-
 function renderEntriesMarkup(entries, paneName, tab, renderer, start = 0, end = entries.length) {
   return entries
     .slice(start, end)
     .map((entry, offset) => renderer(entry, paneName, tab, start + offset, entries.length))
     .join("");
-}
-
-function renderFileRenderProgress(rendered, total) {
-  return `<div class="file-render-progress" data-render-progress>
-    <strong>${rendered.toLocaleString()}</strong>
-    <span>/ ${total.toLocaleString()} rendered</span>
-  </div>`;
 }
 
 function virtualRowHeight(viewMode) {
@@ -6781,40 +7134,6 @@ function unobserveLazyThumbnailImages(paneName, root) {
     return;
   }
   root.querySelectorAll(".tile-thumb-image[data-thumb-src]").forEach((image) => observer.unobserve(image));
-}
-
-function appendEntriesMarkup(list, html) {
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  const images = [...template.content.querySelectorAll(".tile-thumb-image[data-thumb-src]")];
-  list.append(template.content);
-  return images;
-}
-
-function scheduleProgressiveFileRender(paneName, token, entries, renderer, startIndex, chunkSize) {
-  const list = document.querySelector(`[data-list="${paneName}"]`);
-  const tab = tabOf(paneName);
-  if (!list || app.renderTokens[paneName] !== token) {
-    return;
-  }
-  const nextIndex = Math.min(startIndex + chunkSize, entries.length);
-  const progress = list.querySelector("[data-render-progress]");
-  progress?.remove();
-  const lazyImages = appendEntriesMarkup(
-    list,
-    renderEntriesMarkup(entries, paneName, tab, renderer, startIndex, nextIndex)
-  );
-  hydrateLazyThumbnailImages(paneName, list, lazyImages);
-  const focusedPath = tab.focusedPath;
-  const focusedInChunk =
-    focusedPath && entries.slice(startIndex, nextIndex).some((entry) => samePath(entry.path, focusedPath));
-  if (focusedInChunk) {
-    scrollFocusedEntryIntoView(paneName);
-  }
-  if (nextIndex < entries.length) {
-    list.insertAdjacentHTML("beforeend", renderFileRenderProgress(nextIndex, entries.length));
-    requestAnimationFrame(() => scheduleProgressiveFileRender(paneName, token, entries, renderer, nextIndex, chunkSize));
-  }
 }
 
 const paneTabOverflowFrames = { left: 0, right: 0 };
@@ -7068,18 +7387,10 @@ function renderPane(paneName) {
     }
     return;
   }
-  const limits = fileRenderLimits(tab.viewMode);
-  const initialLimit = Math.min(limits.initial, entries.length);
-  list.innerHTML =
-    renderEntriesMarkup(entries, paneName, tab, renderer, 0, initialLimit) +
-    (initialLimit < entries.length ? renderFileRenderProgress(initialLimit, entries.length) : "");
+  // Lists above virtualRenderThreshold are virtualized, so the rest fit in one pass.
+  list.innerHTML = renderEntriesMarkup(entries, paneName, tab, renderer);
   syncPaneActiveDescendant(paneName);
   hydrateLazyThumbnails(paneName);
-  if (initialLimit < entries.length) {
-    requestAnimationFrame(() =>
-      scheduleProgressiveFileRender(paneName, renderToken, entries, renderer, initialLimit, limits.chunk)
-    );
-  }
   if (paneName === app.activePane) {
     updateSelectionReadout();
   }
@@ -7398,6 +7709,15 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
   const linkedPreviousPath = options.linkedPreviousPath || previousPath;
   const previousSelected = new Set(tab.selected || []);
   const previousFocusedPath = tab.focusedPath;
+  const activityState = app.paneLoads[paneName];
+  const previousActivity = {
+    phase: activityState.phase,
+    text: activityState.text,
+    detail: activityState.detail,
+    count: activityState.count,
+    total: activityState.total,
+    wallMs: activityState.wallMs
+  };
   const load = beginPaneLoad(paneName, {
     detail: `${paneName === "left" ? "Left" : "Right"} pane loading ${resolvedTargetPath}`
   });
@@ -7465,6 +7785,9 @@ async function loadPane(paneName, targetPath, pushHistory = true, options = {}) 
       return false;
     }
     if (options.autoRefresh && paneEntryInteractionRecent(paneName)) {
+      // Skipped refresh: put the badge back; finishPaneLoad re-renders it.
+      const wasBusy = previousActivity.phase === "loading" || previousActivity.phase === "hydrating";
+      Object.assign(app.paneLoads[paneName], wasBusy ? { phase: "idle", text: "Ready", detail: "Ready" } : previousActivity);
       return false;
     }
     const partial = isWindowedListing(data);
@@ -7797,6 +8120,19 @@ function updateSizeAnalysisActionState() {
   }
 }
 
+function discardPartialSizeAnalysisReport() {
+  // A cancelled or failed stream leaves its last progress snapshot behind; it
+  // must not be treated as a finished report for this path.
+  if (!app.sizeAnalysis.report?.partial) {
+    return;
+  }
+  app.sizeAnalysis.report = null;
+  app.sizeAnalysis.treemapRects = [];
+  app.sizeAnalysis.treemapHover = null;
+  app.sizeAnalysis.treemapSelection = null;
+  app.sizeAnalysis.treemapFocusPath = "";
+}
+
 function cancelSizeAnalysis(message = "Scan canceled") {
   const controller = app.sizeAnalysis.controller;
   const wasLoading = app.sizeAnalysis.loading === true;
@@ -7806,6 +8142,7 @@ function cancelSizeAnalysis(message = "Scan canceled") {
   if (controller && !controller.signal.aborted) {
     controller.abort();
   }
+  discardPartialSizeAnalysisReport();
   renderSizeAnalysisDialog(message);
   if (wasLoading) {
     setStatus(message);
@@ -8225,7 +8562,7 @@ function renderSizeAnalysisViewState() {
 }
 
 function queueSizeAnalysisTreemapDraw() {
-  requestAnimationFrame(() => requestAnimationFrame(() => drawSizeTreemap(app.sizeAnalysis.report)));
+  requestAnimationFrame(scheduleSizeAnalysisTreemapDraw);
 }
 
 function setSizeAnalysisViewMode(mode) {
@@ -8402,14 +8739,16 @@ function renderSizeAnalysisDialog(message = "") {
   extensions.innerHTML = topExtensions.length
     ? topExtensions.slice(0, 9).map((item) => sizeAnalysisExtensionRow(item, totalBytes)).join("")
     : `<div class="empty-state">No extensions</div>`;
-  requestAnimationFrame(() => drawSizeTreemap(report));
+  scheduleSizeAnalysisTreemapDraw();
 }
 
 function openSizeAnalysisDialog(paneName = app.activePane, viewMode = app.sizeAnalysis.viewMode) {
   app.sizeAnalysis.paneName = paneName;
   app.sizeAnalysis.viewMode = viewMode === "map" ? "map" : "overview";
   const defaultPath = sizeAnalysisDefaultPath(paneName);
-  const hasCurrentReport = Boolean(app.sizeAnalysis.report?.path && samePath(app.sizeAnalysis.report.path, defaultPath));
+  const hasCurrentReport = Boolean(
+    app.sizeAnalysis.report?.path && !app.sizeAnalysis.report.partial && samePath(app.sizeAnalysis.report.path, defaultPath)
+  );
   if (app.sizeAnalysis.report?.path && !samePath(app.sizeAnalysis.report.path, defaultPath)) {
     app.sizeAnalysis.report = null;
     app.sizeAnalysis.treemapRects = [];
@@ -8475,6 +8814,7 @@ async function runSizeAnalysis() {
     }
     app.sizeAnalysis.controller = null;
     app.sizeAnalysis.loading = false;
+    discardPartialSizeAnalysisReport();
     if (isAbortError(error)) {
       renderSizeAnalysisDialog("Scan canceled");
       setStatus("Size analysis canceled");
@@ -8499,21 +8839,27 @@ function sizeAnalysisTreemapItems(report) {
     .sort((left, right) => sizeAnalysisTreemapValue(right) - sizeAnalysisTreemapValue(left));
 }
 
-function sizeAnalysisPathContains(folderPath, itemPath) {
-  const folder = normalizedPathKey(folderPath);
-  const item = normalizedPathKey(itemPath);
-  if (!folder || !item) {
-    return false;
+let sizeAnalysisTreemapHierarchyCache = { report: null, sizeMode: "", colorMode: "", hierarchy: null };
+
+// The hierarchy is treated as read-only by its consumers, so one build per
+// (report, sizeMode, colorMode) serves navigation, hover redraws and focus.
+function sizeAnalysisTreemapHierarchy(report) {
+  const cache = sizeAnalysisTreemapHierarchyCache;
+  const { sizeMode, colorMode } = app.sizeAnalysis;
+  if (cache.report === report && cache.sizeMode === sizeMode && cache.colorMode === colorMode) {
+    return cache.hierarchy;
   }
-  return item === folder || item.startsWith(`${folder}\\`) || item.startsWith(`${folder}/`);
+  const hierarchy = buildSizeAnalysisTreemapHierarchy(report);
+  sizeAnalysisTreemapHierarchyCache = { report, sizeMode, colorMode, hierarchy };
+  return hierarchy;
 }
 
-function sizeAnalysisTreemapHierarchy(report) {
+function buildSizeAnalysisTreemapHierarchy(report) {
   const sourceRoot = report?.tree;
   if (!sourceRoot || sizeAnalysisTreemapTotal(report) <= 0) {
     return null;
   }
-  const folderNodes = [];
+  const foldersByKey = new Map();
   const cloneFolder = (source, parent = null) => {
     const node = {
       name: source.name || source.path || "Folder",
@@ -8529,26 +8875,45 @@ function sizeAnalysisTreemapHierarchy(report) {
       virtualRemainder: false,
       folderChildren: [],
       fileChildren: [],
-      children: []
+      children: [],
+      mergedFolders: null
     };
-    folderNodes.push(node);
+    // Parents are registered before their children, so a folder keeps its key
+    // over the server's "Other" bucket, which reuses the parent's path.
+    const key = normalizedPathKey(node.path);
+    if (!foldersByKey.has(key)) foldersByKey.set(key, node);
     node.folderChildren = (Array.isArray(source.children) ? source.children : [])
       .filter((child) => sizeAnalysisTreemapValue(child) > 0)
       .map((child) => cloneFolder(child, node));
+    node.mergedFolders = node.folderChildren.find((child) => normalizedPathKey(child.path) === key) || null;
     return node;
   };
   const root = cloneFolder(sourceRoot);
-  for (const file of sizeAnalysisTreemapItems(report)) {
-    const fileParent = file.parent || parentPathOf(file.path || "");
-    let owner = root;
-    for (const folder of folderNodes) {
-      if (
-        sizeAnalysisPathContains(folder.path, fileParent) &&
-        normalizedPathKey(folder.path).length > normalizedPathKey(owner.path).length
-      ) {
-        owner = folder;
+  const rootKey = normalizedPathKey(root.path);
+  const ownerForParent = (fileParent) => {
+    let current = fileParent;
+    let key = normalizedPathKey(current);
+    let descended = false;
+    while (key) {
+      const folder = foldersByKey.get(key);
+      if (folder) {
+        // A file below an unlisted subfolder of a folder that has an "Other"
+        // bucket lives in one of the merged folders; nesting it there keeps
+        // its bytes from being counted twice.
+        return descended && folder.mergedFolders ? folder.mergedFolders : folder;
       }
+      if (key === rootKey) break;
+      const next = parentPathOf(current);
+      const nextKey = normalizedPathKey(next);
+      if (!nextKey || nextKey === key) break;
+      current = next;
+      key = nextKey;
+      descended = true;
     }
+    return root;
+  };
+  for (const file of sizeAnalysisTreemapItems(report)) {
+    const owner = ownerForParent(file.parent || parentPathOf(file.path || ""));
     file.mapSize = sizeAnalysisTreemapValue(file);
     owner.fileChildren.push(file);
   }
@@ -8617,6 +8982,7 @@ function sizeAnalysisTreemapHierarchy(report) {
     );
     delete folder.folderChildren;
     delete folder.fileChildren;
+    delete folder.mergedFolders;
   };
   finishFolder(root);
   return root;
@@ -8908,14 +9274,14 @@ function setSizeAnalysisTreemapHover(item) {
   }
   app.sizeAnalysis.treemapHover = item || null;
   setSizeAnalysisMapDetail(item || null);
-  requestAnimationFrame(() => drawSizeTreemap(app.sizeAnalysis.report));
+  scheduleSizeAnalysisTreemapDraw();
 }
 
 function setSizeAnalysisTreemapSelection(item) {
   app.sizeAnalysis.treemapSelection = item || null;
   setSizeAnalysisMapDetail(app.sizeAnalysis.treemapHover || app.sizeAnalysis.treemapSelection);
   renderSizeAnalysisMapNavigation(app.sizeAnalysis.report);
-  requestAnimationFrame(() => drawSizeTreemap(app.sizeAnalysis.report));
+  scheduleSizeAnalysisTreemapDraw();
 }
 
 function updateSizeAnalysisTreemapHover(event) {
@@ -8959,6 +9325,19 @@ async function openSizeAnalysisTreemapItem(item = app.sizeAnalysis.treemapHover)
   }
 }
 
+let sizeAnalysisTreemapLayoutCache = { hierarchy: null, focused: null, width: 0, height: 0, rects: null, treemapRects: null };
+let sizeAnalysisTreemapDrawFrame = 0;
+
+function scheduleSizeAnalysisTreemapDraw() {
+  if (sizeAnalysisTreemapDrawFrame) {
+    return;
+  }
+  sizeAnalysisTreemapDrawFrame = requestAnimationFrame(() => {
+    sizeAnalysisTreemapDrawFrame = 0;
+    drawSizeTreemap(app.sizeAnalysis.report);
+  });
+}
+
 function drawSizeTreemap(report) {
   const canvas = document.getElementById("size-analysis-treemap");
   if (!canvas) {
@@ -8971,20 +9350,37 @@ function drawSizeTreemap(report) {
   const availableHeight = panel ? panel.clientHeight - (head?.offsetHeight || 0) - (detailRow?.offsetHeight || 0) - 18 : 0;
   const height = Math.max(160, Math.min(560, availableHeight || Math.round(width * 0.36)));
   const ratio = window.devicePixelRatio || 1;
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
-  canvas.width = Math.round(width * ratio);
-  canvas.height = Math.round(height * ratio);
+  // Assigning canvas.width reallocates the backing store even when unchanged,
+  // so only touch the size when it actually differs (hover redraws reuse it).
+  const cssWidth = `${width}px`;
+  const cssHeight = `${height}px`;
+  if (canvas.style.width !== cssWidth) canvas.style.width = cssWidth;
+  if (canvas.style.height !== cssHeight) canvas.style.height = cssHeight;
+  const pixelWidth = Math.round(width * ratio);
+  const pixelHeight = Math.round(height * ratio);
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
   const ctx = canvas.getContext("2d");
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.globalAlpha = 1;
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "#101716";
   ctx.fillRect(0, 0, width, height);
   const hierarchy = sizeAnalysisTreemapHierarchy(report);
   const focused = sizeAnalysisTreemapFocusNode(hierarchy);
-  renderSizeAnalysisMapNavigation(report, hierarchy);
+  const layoutCache = sizeAnalysisTreemapLayoutCache;
+  const layoutCurrent =
+    layoutCache.hierarchy === hierarchy &&
+    layoutCache.focused === focused &&
+    layoutCache.width === width &&
+    layoutCache.height === height &&
+    layoutCache.treemapRects === app.sizeAnalysis.treemapRects;
+  if (!layoutCurrent) {
+    renderSizeAnalysisMapNavigation(report, hierarchy);
+  }
   const measuredTotal = sizeAnalysisTreemapTotal(report);
   if (!focused?.children?.length || measuredTotal <= 0) {
+    sizeAnalysisTreemapLayoutCache = { hierarchy: null, focused: null, width: 0, height: 0, rects: null, treemapRects: null };
     app.sizeAnalysis.treemapRects = [];
     ctx.fillStyle = "#dbe6e1";
     ctx.font = "600 14px Segoe UI, sans-serif";
@@ -8997,7 +9393,25 @@ function drawSizeTreemap(report) {
     );
     return;
   }
-  const rects = splitHierarchicalSizeTreemap(focused.children, { x: 0, y: 0, w: width, h: height });
+  const rects = layoutCurrent
+    ? layoutCache.rects
+    : splitHierarchicalSizeTreemap(focused.children, { x: 0, y: 0, w: width, h: height });
+  if (!layoutCurrent) {
+    layoutSizeAnalysisTreemapRects(report, rects);
+    sizeAnalysisTreemapLayoutCache = {
+      hierarchy,
+      focused,
+      width,
+      height,
+      rects,
+      treemapRects: app.sizeAnalysis.treemapRects
+    };
+  }
+  describeSizeAnalysisTreemap(canvas, focused);
+  paintSizeAnalysisTreemapRects(ctx, rects);
+}
+
+function layoutSizeAnalysisTreemapRects(report, rects) {
   const hoverKey = app.sizeAnalysis.treemapHover?.key || "";
   const selectedKey = app.sizeAnalysis.treemapSelection?.key || "";
   app.sizeAnalysis.treemapRects = rects.map(({ item, rect, depth }) => ({
@@ -9028,6 +9442,9 @@ function drawSizeTreemap(report) {
     app.sizeAnalysis.treemapSelection = null;
     setSizeAnalysisMapDetail(null);
   }
+}
+
+function describeSizeAnalysisTreemap(canvas, focused) {
   const groupCount = app.sizeAnalysis.treemapRects.filter((item) => item.treemapGroup).length;
   const mappedFileCount = app.sizeAnalysis.treemapRects.length - groupCount;
   canvas.setAttribute(
@@ -9040,6 +9457,9 @@ function drawSizeTreemap(report) {
   if (mapCount) {
     mapCount.textContent = `${groupCount.toLocaleString()} folders / ${mappedFileCount.toLocaleString()} files`;
   }
+}
+
+function paintSizeAnalysisTreemapRects(ctx, rects) {
   rects.forEach((item, index) => {
     const { item: node, rect, depth } = item;
     if (!node || rect.w < 0.7 || rect.h < 0.7) return;
@@ -9106,8 +9526,17 @@ function drawSizeTreemap(report) {
   });
 }
 
+let clipboardPathKeyCache = { paths: null, keys: null };
+
 function clipboardHasPath(itemPath) {
-  return app.fileClipboard.mode === "move" && app.fileClipboard.paths.some((pathItem) => samePath(pathItem, itemPath));
+  if (app.fileClipboard.mode !== "move") {
+    return false;
+  }
+  const paths = app.fileClipboard.paths;
+  if (clipboardPathKeyCache.paths !== paths) {
+    clipboardPathKeyCache = { paths, keys: new Set(paths.map(normalizedPathKey)) };
+  }
+  return clipboardPathKeyCache.keys.has(normalizedPathKey(itemPath));
 }
 
 function emptyFileClipboard() {
@@ -9276,8 +9705,27 @@ function copyNamesTargetsForPane(paneName = app.activePane) {
   const tab = tabOf(paneName);
   const selection = selectedPaths(paneName);
   const paths = selection.length ? selection : [tab.path].filter(Boolean);
+  // Selected paths are normally the entries' own path strings, so an exact
+  // lookup covers Select All in huge folders; normalized keys are only built
+  // if some path does not match verbatim.
+  const indexEntries = (keyOf) => {
+    const index = new Map();
+    for (const item of tab.entries) {
+      const key = keyOf(item.path);
+      if (!index.has(key)) index.set(key, item);
+    }
+    return index;
+  };
+  const exactEntries = indexEntries((itemPath) => itemPath);
+  let normalizedEntries = null;
+  const entryFor = (itemPath) => {
+    const exact = exactEntries.get(itemPath);
+    if (exact) return exact;
+    normalizedEntries ||= indexEntries(normalizedPathKey);
+    return normalizedEntries.get(normalizedPathKey(itemPath));
+  };
   return paths.map((itemPath) => {
-    const entry = tab.entries.find((item) => samePath(item.path, itemPath));
+    const entry = entryFor(itemPath);
     return {
       path: itemPath,
       name: entry?.name || labelForPath(itemPath),
@@ -9614,17 +10062,26 @@ async function runChecksumsReport() {
     return showToast("Select files first");
   }
   renderChecksumsDialog("Hashing...");
+  const session = app.checksums;
+  const optionsVersion = session.optionsVersion || 0;
   const report = await request("/api/checksums", {
     method: "POST",
     body: JSON.stringify({
-      paths: app.checksums.targets.map((target) => target.path),
+      paths: session.targets.map((target) => target.path),
       ...checksumOptionsFromForm()
     })
   });
-  app.checksums.report = report;
+  if (!checksumSessionCurrent(session, optionsVersion)) {
+    return null;
+  }
+  session.report = report;
   renderChecksumsDialog();
   setStatus(checksumSummaryText(report));
   return report;
+}
+
+function checksumSessionCurrent(session, optionsVersion) {
+  return app.checksums === session && (session.optionsVersion || 0) === optionsVersion;
 }
 
 async function copyChecksumManifest() {
@@ -9670,6 +10127,8 @@ async function verifyChecksumManifest() {
     return showToast("Select one checksum manifest file first");
   }
   renderChecksumsDialog("Verifying...");
+  const session = app.checksums;
+  const optionsVersion = session.optionsVersion || 0;
   const report = await request("/api/checksums/verify", {
     method: "POST",
     body: JSON.stringify({
@@ -9677,7 +10136,10 @@ async function verifyChecksumManifest() {
       ...checksumOptionsFromForm()
     })
   });
-  app.checksums.report = report;
+  if (!checksumSessionCurrent(session, optionsVersion)) {
+    return null;
+  }
+  session.report = report;
   renderChecksumsDialog();
   setStatus(checksumSummaryText(report));
   return report;
@@ -9686,6 +10148,7 @@ async function verifyChecksumManifest() {
 function resetChecksumReportForOptions() {
   if (app.checksums) {
     app.checksums.report = null;
+    app.checksums.optionsVersion = (app.checksums.optionsVersion || 0) + 1;
     renderChecksumsDialog("Options changed");
   }
 }
@@ -9747,19 +10210,18 @@ function startNativeFileDrag(event, paths) {
   }
 }
 
-function selectedPathsForDrag(paneName, entryPath, row) {
+function selectedPathsForDrag(paneName, entryPath) {
   const tab = tabOf(paneName);
   app.activePane = paneName;
   if (!tab.selected.has(entryPath)) {
     tab.selected = new Set([entryPath]);
     tab.focusedPath = entryPath;
     tab.anchorPath = entryPath;
-    row?.classList.add("selected", "focused");
-    row?.setAttribute("aria-selected", "true");
   } else {
     tab.focusedPath = entryPath;
     tab.anchorPath = entryPath;
   }
+  updatePaneSelectionDom(paneName);
   updateActivePaneChrome();
   renderInspector();
   return selectedPaths(paneName);
@@ -9840,7 +10302,7 @@ function handleEntryDragStart(event) {
     return;
   }
   hideContextMenu();
-  const paths = selectedPathsForDrag(paneName, row.dataset.entryPath, row);
+  const paths = selectedPathsForDrag(paneName, row.dataset.entryPath);
   if (!paths.length) {
     event.preventDefault();
     return;
@@ -9861,6 +10323,14 @@ function handleEntryDragStart(event) {
   document.body.classList.add("is-dragging-files");
   updateSelectionReadout();
   const nativeDragStarted = startNativeFileDrag(event, paths);
+  if (nativeDragStarted) {
+    // The HTML drag was cancelled in favour of an OS drag, so no dragend will
+    // arrive to clear this transfer. Drops back into the app arrive as Windows
+    // files and go through pathsFromExternalDrop; remember the source pane so
+    // a move still refreshes it.
+    app.nativeDragSource = { paneName, paths };
+    clearDragTransfer({ keepStatus: true });
+  }
   setStatus(
     nativeDragStarted
       ? `Drag ${itemWord(paths.length, "item")}: drop in Explore Better or Windows`
@@ -10075,6 +10545,15 @@ async function handleExternalFileDrop(event, paneName) {
     setStatus("Drop paths unavailable");
     return;
   }
+  const nativeSource = app.nativeDragSource;
+  app.nativeDragSource = null;
+  const droppedKeys = new Set(paths.map(normalizedPathKey));
+  const sourcePane =
+    nativeSource &&
+    nativeSource.paths.length === paths.length &&
+    nativeSource.paths.every((itemPath) => droppedKeys.has(normalizedPathKey(itemPath)))
+      ? nativeSource.paneName
+      : null;
   const reason = invalidDropReason({ paths }, targetDir, mode);
   if (reason) {
     showToast(reason);
@@ -10085,6 +10564,7 @@ async function handleExternalFileDrop(event, paneName) {
     paths: pathsForDrop({ paths }, targetDir, mode),
     mode,
     targetDir,
+    sourcePane,
     targetPane: paneName
   });
 }
@@ -10451,7 +10931,15 @@ function parseSelectSizeValue(value) {
 }
 
 function entryComparableSize(entry) {
-  const value = Number(entry?.size);
+  // Unsized folders (and missing sizes) are unknown, not 0 bytes.
+  if (entry?.isDirectory && !entry.folderSizeKnown) {
+    return null;
+  }
+  const raw = entry?.size;
+  if (raw === null || raw === undefined || raw === "") {
+    return null;
+  }
+  const value = Number(raw);
   return Number.isFinite(value) ? value : null;
 }
 
@@ -10949,9 +11437,16 @@ function selectionSetDraftFromPane(paneName = app.activePane, existing = null) {
   };
 }
 
-function selectionSetStats(selectionSet = currentSelectionSet(), paneName = app.activePane) {
-  const entries = new Map(tabOf(paneName).entries.map((entry) => [normalizedPathKey(entry.path), entry]));
-  const selected = new Set([...tabOf(paneName).selected].map(normalizedPathKey));
+function selectionSetPaneIndex(paneName = app.activePane) {
+  const tab = tabOf(paneName);
+  return {
+    entries: new Set(tab.entries.map((entry) => normalizedPathKey(entry.path))),
+    selected: new Set([...tab.selected].map(normalizedPathKey))
+  };
+}
+
+function selectionSetStats(selectionSet = currentSelectionSet(), paneName = app.activePane, paneIndex = selectionSetPaneIndex(paneName)) {
+  const { entries, selected } = paneIndex;
   const paths = selectionSet?.paths || [];
   const present = paths.filter((itemPath) => entries.has(normalizedPathKey(itemPath)));
   const selectedPresent = present.filter((itemPath) => selected.has(normalizedPathKey(itemPath)));
@@ -10992,16 +11487,17 @@ function renderSelectionSetsDialog(message = null) {
     app.activeSelectionSetId = sets[0].id;
   }
   const active = currentSelectionSet();
+  const paneIndex = selectionSetPaneIndex(app.activePane);
   const summary = document.getElementById("selection-set-summary");
   if (summary) {
-    const stats = active ? selectionSetStats(active) : null;
+    const stats = active ? selectionSetStats(active, app.activePane, paneIndex) : null;
     summary.textContent =
       message || (active ? `${stats.present}/${stats.total} visible / ${sets.length} saved` : `${sets.length} saved`);
   }
   list.innerHTML = sets.length
     ? sets
         .map((selectionSet) => {
-          const stats = selectionSetStats(selectionSet);
+          const stats = selectionSetStats(selectionSet, app.activePane, paneIndex);
           const selected = selectionSet.id === active?.id ? " active" : "";
           return `<button type="button" class="${selected}" data-select-selection-set="${escapeHtml(selectionSet.id)}">
             <span>${escapeHtml(`${stats.present}/${stats.total}`)}</span>
@@ -11021,8 +11517,7 @@ function renderSelectionSetsDialog(message = null) {
     detail.innerHTML = `<div class="empty-state">Save the current pane selection to reuse it later.</div>`;
     return;
   }
-  const currentEntries = new Map(tabOf(app.activePane).entries.map((entry) => [normalizedPathKey(entry.path), entry]));
-  const currentSelected = new Set([...tabOf(app.activePane).selected].map(normalizedPathKey));
+  const { entries: currentEntries, selected: currentSelected } = paneIndex;
   const rows = (active.items || active.paths.map((itemPath) => ({ path: itemPath, name: labelForPath(itemPath) })))
     .slice(0, 200)
     .map((item, index) => {
@@ -13523,6 +14018,20 @@ async function mountModelViewport(container, preview, scope) {
   }
 }
 
+function renderInspectorAfterViewerCloses() {
+  const dialog = document.getElementById("viewer-dialog");
+  if (!dialog || app.inspectorAwaitsViewerClose) {
+    return;
+  }
+  app.inspectorAwaitsViewerClose = true;
+  dialog.addEventListener("close", () => {
+    app.inspectorAwaitsViewerClose = false;
+    if (!dialog.open && document.querySelector("#inspector [data-model-deferred]")) {
+      renderInspector();
+    }
+  }, { once: true });
+}
+
 async function renderInspector(options = {}) {
   const inspector = document.getElementById("inspector");
   const body = inspector.querySelector(".inspector-body");
@@ -13627,9 +14136,15 @@ async function renderInspector(options = {}) {
       return;
     }
     if (preview.type === "model") {
-      body.innerHTML = `<h3 class="preview-name">${escapeHtml(
-        preview.name
-      )}</h3>${meta}${labelPanel}${previewActionBar(preview)}${modelViewportMarkup("inspector")}`;
+      const modelHeader = `<h3 class="preview-name">${escapeHtml(preview.name)}</h3>${meta}${labelPanel}${previewActionBar(preview)}`;
+      if (document.getElementById("viewer-dialog")?.open) {
+        // The viewer already renders this model; a second hidden viewport
+        // would repeat the STEP conversion and hold another WebGL context.
+        body.innerHTML = `${modelHeader}<div class="muted" data-model-deferred>3D preview is showing in the Viewer</div>`;
+        renderInspectorAfterViewerCloses();
+        return;
+      }
+      body.innerHTML = `${modelHeader}${modelViewportMarkup("inspector")}`;
       await mountModelViewport(body.querySelector('[data-model-viewport="inspector"]'), preview, "inspector");
       return;
     }
@@ -14669,6 +15184,9 @@ function beginInlineRename(paneName, itemPath = null) {
   if (entry.unavailable) {
     return showToast("Unavailable items cannot be renamed");
   }
+  if (app.inlineRename?.committing && samePath(app.inlineRename.path, entry.path)) {
+    return showToast("Rename in progress");
+  }
   const tab = tabOf(paneName);
   app.activePane = paneName;
   tab.selected = new Set([entry.path]);
@@ -14742,18 +15260,34 @@ async function commitInlineRename(input = null) {
     cancelInlineRename({ status: "Rename unchanged" });
     return;
   }
-  app.inlineRename = { ...rename, value: nextName, committing: true };
+  const sourceParent = parentPathOf(rename.path);
+  const collision = tabOf(paneName).entries.find(
+    (entry) =>
+      !samePath(entry.path, rename.path) &&
+      String(entry.name || "").toLowerCase() === nextName.toLowerCase() &&
+      samePath(parentPathOf(entry.path), sourceParent)
+  );
+  if (collision) {
+    showToast(`An item named ${collision.name} already exists here`);
+    focusInlineRenameInput(false);
+    return;
+  }
+  // Another inline rename may start while this one saves; only touch
+  // app.inlineRename while it still refers to this commit.
+  const committing = { ...rename, value: nextName, committing: true };
+  app.inlineRename = committing;
   setStatus(`Renaming ${rename.originalName}`);
   try {
     const result = await request("/api/rename", {
       method: "POST",
       body: JSON.stringify({ path: rename.path, name: nextName })
     });
-    app.inlineRename = null;
+    if (app.inlineRename === committing) app.inlineRename = null;
     await refreshPane(paneName);
     const renamedPath = renameResultPath(result, rename, nextName);
     await syncStateAndChrome();
-    if (selectRenamedEntryInPane(paneName, renamedPath, nextName, rename.path)) {
+    // Leave selection alone if the user has started renaming something else.
+    if (!app.inlineRename && selectRenamedEntryInPane(paneName, renamedPath, nextName, rename.path)) {
       renderPane(paneName);
       scrollFocusedEntryIntoView(paneName);
     }
@@ -14761,9 +15295,11 @@ async function commitInlineRename(input = null) {
     renderInspector();
     showToast(`Renamed to ${labelForPath(renamedPath)}`);
   } catch (error) {
-    app.inlineRename = { ...rename, value: nextName, committing: false };
-    renderPane(paneName);
-    focusInlineRenameInput(false);
+    if (app.inlineRename === committing) {
+      app.inlineRename = { ...rename, value: nextName, committing: false };
+      renderPane(paneName);
+      focusInlineRenameInput(false);
+    }
     showToast(error.message);
     setStatus("Rename failed");
   }
@@ -14782,15 +15318,26 @@ function cancelAsyncDialogTask(dialogId) {
 
 function beginAsyncDialogTask(dialogId, payload, owner = null, paneName = null) {
   cancelAsyncDialogTask(dialogId);
+  const tab = paneName ? tabOf(paneName) : null;
+  // Pane-bound scans track the tab's location rather than the pane load
+  // counter, so a silent auto-refresh of the same folder does not drop results.
   const task = { dialogId, controller: new AbortController(), payload: JSON.parse(JSON.stringify(payload)), owner,
-    paneName, tab: paneName ? tabOf(paneName) : null, paneRevision: paneName ? app.paneLoads[paneName].id : null };
+    paneName, tab, tabLocation: tab ? { path: tab.path, searchMode: Boolean(tab.searchMode), virtualMode: tab.virtualMode || "" } : null };
   asyncDialogTasks.set(dialogId, task);
   return task;
 }
 
+function asyncDialogTaskPaneCurrent(task) {
+  if (!task.paneName) return true;
+  const tab = tabOf(task.paneName);
+  const location = task.tabLocation;
+  return tab === task.tab && samePath(tab.path, location.path) && Boolean(tab.searchMode) === location.searchMode &&
+    (tab.virtualMode || "") === location.virtualMode;
+}
+
 function ownsAsyncDialogTask(task) {
   return asyncDialogTasks.get(task.dialogId) === task && document.getElementById(task.dialogId)?.open &&
-    !task.controller.signal.aborted && (!task.paneName || (tabOf(task.paneName) === task.tab && app.paneLoads[task.paneName].id === task.paneRevision));
+    !task.controller.signal.aborted && asyncDialogTaskPaneCurrent(task);
 }
 
 async function requestDialogTask(task, url, options) {
@@ -16106,7 +16653,7 @@ function pathDiagnosticTimingText(report) {
 }
 
 function renderPathDiagnostics(report) {
-  app.properties.diagnostics = report;
+  if (app.properties) app.properties.diagnostics = report;
   const status = pathDiagnosticStatus(report);
   const metrics = [
     ["Kind", pathDiagnosticKindText(report)],
@@ -16156,12 +16703,33 @@ function renderPathDiagnostics(report) {
   `;
 }
 
+// Late properties/diagnostics responses must not render into a dialog that was
+// closed or reopened for another selection, or over a newer run's results.
+function beginPropertiesRun(key) {
+  const owner = app.properties;
+  const run = Symbol(key);
+  if (owner) owner[key] = run;
+  return () => app.properties === owner && (!owner || owner[key] === run) &&
+    document.getElementById("properties-dialog")?.open === true;
+}
+
+async function awaitPropertiesRun(isCurrent, promise) {
+  try {
+    const result = await promise;
+    return isCurrent() ? result : null;
+  } catch (error) {
+    if (!isCurrent()) return null;
+    throw error;
+  }
+}
+
 async function runPathDiagnostics() {
   const paneName = app.properties?.paneName || app.activePane;
   const targetPath = app.properties?.paths?.[0] || tabOf(paneName).path;
   if (!targetPath) {
     return showToast("Select a path first");
   }
+  const isCurrent = beginPropertiesRun("diagnosticsRun");
   const output = document.getElementById("properties-diagnostics");
   output.innerHTML = `<div class="path-diagnostic-loading">Diagnosing ${escapeHtml(labelForPath(targetPath))}...</div>`;
   const params = new URLSearchParams({
@@ -16169,7 +16737,8 @@ async function runPathDiagnostics() {
     timeoutMs: "3500",
     sampleLimit: "12"
   });
-  const report = await request(`/api/path/diagnostics?${params}`);
+  const report = await awaitPropertiesRun(isCurrent, request(`/api/path/diagnostics?${params}`));
+  if (!report) return null;
   renderPathDiagnostics(report);
   const status = pathDiagnosticStatus(report);
   setStatus(`Path health ${status.text.toLowerCase()} / ${pathDiagnosticTimingText(report)}`);
@@ -16181,12 +16750,15 @@ async function runPropertiesReport() {
   if (!app.properties?.paths?.length) {
     return showToast("Select an item first");
   }
+  const isCurrent = beginPropertiesRun("reportRun");
   document.getElementById("properties-summary").textContent = "Analyzing...";
-  const report = await request("/api/properties", {
+  const report = await awaitPropertiesRun(isCurrent, request("/api/properties", {
     method: "POST",
     body: JSON.stringify(propertiesPayload())
-  });
+  }));
+  if (!report) return null;
   renderPropertiesReport(report);
+  return report;
 }
 
 async function trashSelected(paneName) {
@@ -16477,7 +17049,9 @@ function duplicateTab(paneName) {
     sortKey: current.sortKey,
     sortDir: current.sortDir,
     viewMode: current.viewMode,
-    searchMode: false,
+    // Search/flat results are copied as-is, so the copy must stay a result tab
+    // instead of claiming those entries are the folder's listing.
+    searchMode: current.searchMode === true,
     virtualMode: current.virtualMode || "",
     virtual: current.virtual ? { ...current.virtual } : null,
     title: current.title,
@@ -16676,11 +17250,26 @@ async function reopenClosedTab(paneName = app.activePane) {
   app.closedTabs = closedTabs.filter((_, index) => index !== recordIndex);
   const targetPane = isPaneName(record.paneName) ? record.paneName : paneName;
   const pane = panes[targetPane];
+  const sourceTab = tabOf(targetPane);
   const insertIndex = Math.min(pane.activeTab + 1, pane.tabs.length);
-  pane.tabs.splice(insertIndex, 0, normalizeSavedTab(record.tab, record.tab.path));
+  const reopenedTab = normalizeSavedTab(record.tab, record.tab.path);
+  pane.tabs.splice(insertIndex, 0, reopenedTab);
   pane.activeTab = insertIndex;
   app.activePane = targetPane;
-  await loadPane(targetPane, record.tab.path, false, { allowLockedNavigation: true });
+  try {
+    const loaded = await loadPane(targetPane, record.tab.path, false, { allowLockedNavigation: true });
+    if (!loaded || tabOf(targetPane) !== reopenedTab) return false;
+  } catch (error) {
+    // Keep the closed-tab record (and its history) so the reopen can be retried.
+    removeTabByIdentity(targetPane, reopenedTab, sourceTab);
+    if (!(app.closedTabs || []).includes(record)) {
+      const restored = [...(app.closedTabs || [])];
+      restored.splice(Math.min(recordIndex, restored.length), 0, record);
+      app.closedTabs = restored.slice(0, 20);
+    }
+    renderPane(targetPane);
+    throw error;
+  }
   showToast(`Reopened ${labelForPath(record.tab.path)}`);
   focusPaneList(targetPane);
   return true;
@@ -17347,7 +17936,7 @@ function applySearchResultToPane(paneName, result, label, options = {}) {
 
 async function runBackgroundSearch(options, label, paneName, task) {
   const response = await requestDialogTask(task, `/api/background-indexes/search?${backgroundSearchParams(options).toString()}`);
-  if (!response || JSON.stringify(searchOptionsFromForm()) !== JSON.stringify(task.payload)) return { canceled: true };
+  if (!response || JSON.stringify(searchOptionsFromForm()) !== task.formKey) return { canceled: true };
   const result = backgroundSearchResultFromResponse(response, options);
   applySearchResultToPane(paneName, result, label);
   if (!result.indexed) {
@@ -17368,6 +17957,9 @@ async function runBackgroundSearch(options, label, paneName, task) {
 async function runAdvancedSearch() {
   const paneName = app.activePane;
   const options = searchOptionsFromForm();
+  // Validation normalizes options in place (sizeBytes, numeric dateDays), so
+  // the staleness check compares fresh form reads against this raw snapshot.
+  const formKey = JSON.stringify(options);
   const validation = searchCriteriaValidation(options);
   if (!validation.valid) {
     document.getElementById("search-summary").textContent = validation.message;
@@ -17377,6 +17969,7 @@ async function runAdvancedSearch() {
   const label = searchCriteriaLabel(options);
   cancelPaneLoad(paneName);
   const task = beginAsyncDialogTask("search-dialog", options, null, paneName);
+  task.formKey = formKey;
   setStatus(`Searching ${label}`);
   if (options.backgroundCache) {
     return runBackgroundSearch(options, label, paneName, task);
@@ -17385,7 +17978,7 @@ async function runAdvancedSearch() {
     method: "POST",
     body: JSON.stringify(options)
   });
-  if (!result || JSON.stringify(searchOptionsFromForm()) !== JSON.stringify(task.payload)) return { canceled: true };
+  if (!result || JSON.stringify(searchOptionsFromForm()) !== task.formKey) return { canceled: true };
   applySearchResultToPane(paneName, result, label);
   setStatus(`${result.entries.length} matches`);
 }
@@ -18088,12 +18681,18 @@ function renderOpenWithDialog(message = null) {
   renderOpenWithPresets();
 }
 
+function containingFolderForItemPath(itemPath) {
+  const parent = String(itemPath || "").replace(/[\\/][^\\/]*$/, "");
+  // "C:\file.txt" -> "C:\" rather than the drive-relative "C:".
+  return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
+}
+
 function defaultOpenWithCwd() {
   const first = app.openWith?.targets?.[0];
   if (!first) {
     return tabOf(app.activePane).path;
   }
-  return first.isDirectory ? first.path : first.path.replace(/[\\/][^\\/]*$/, "") || tabOf(app.activePane).path;
+  return first.isDirectory ? first.path : containingFolderForItemPath(first.path) || tabOf(app.activePane).path;
 }
 
 function fillOpenWithForm({ appPath = "", args = "{path}", cwd = null } = {}) {
@@ -18605,6 +19204,8 @@ function contextMenuItems(menu = app.contextMenu) {
   return items;
 }
 
+let contextMenuReturnFocus = null;
+
 function renderContextMenu() {
   const menuEl = document.getElementById("context-menu");
   if (!menuEl || !app.contextMenu) {
@@ -18617,14 +19218,18 @@ function renderContextMenu() {
         ? labelForPath(app.contextMenu.entryPath)
         : labelForPath(tabOf(app.contextMenu.paneName).path);
   const items = contextMenuItems(app.contextMenu);
+  if (!menuEl.contains(document.activeElement)) {
+    contextMenuReturnFocus = document.activeElement;
+  }
+  menuEl.setAttribute("aria-label", header);
   menuEl.innerHTML = `
-    <div class="context-menu-title">${escapeHtml(header)}</div>
+    <div class="context-menu-title" aria-hidden="true">${escapeHtml(header)}</div>
     ${items
       .map((item) => {
         if (item.separator) {
-          return `<div class="context-menu-separator"></div>`;
+          return `<div class="context-menu-separator" role="separator"></div>`;
         }
-        return `<button class="${item.danger ? "danger" : ""}" data-context-action="${escapeHtml(
+        return `<button type="button" role="menuitem" tabindex="-1" class="${item.danger ? "danger" : ""}" data-context-action="${escapeHtml(
           item.action
         )}" ${item.disabled ? "disabled" : ""}>
           <span>${escapeHtml(item.label)}</span>
@@ -18633,6 +19238,7 @@ function renderContextMenu() {
       })
       .join("")}
   `;
+  menuEl.onkeydown = handleContextMenuKeydown;
   menuEl.hidden = false;
   menuEl.style.left = `${app.contextMenu.x}px`;
   menuEl.style.top = `${app.contextMenu.y}px`;
@@ -18641,15 +19247,71 @@ function renderContextMenu() {
   const top = Math.max(8, Math.min(app.contextMenu.y, window.innerHeight - rect.height - 8));
   menuEl.style.left = `${left}px`;
   menuEl.style.top = `${top}px`;
+  contextMenuFocusableItems(menuEl)[0]?.focus({ preventScroll: true });
 }
 
-function hideContextMenu() {
+function contextMenuFocusableItems(menuEl = document.getElementById("context-menu")) {
+  return menuEl ? [...menuEl.querySelectorAll("[role='menuitem']:not(:disabled)")] : [];
+}
+
+function handleContextMenuKeydown(event) {
+  const menuEl = event.currentTarget;
+  const items = contextMenuFocusableItems(menuEl);
+  const index = items.indexOf(document.activeElement);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    const offset = event.key === "ArrowDown" ? 1 : -1;
+    const start = index === -1 ? (offset > 0 ? -1 : 0) : index;
+    items[(start + offset + items.length) % items.length]?.focus();
+  } else if (event.key === "Home" || event.key === "End") {
+    items[event.key === "Home" ? 0 : items.length - 1]?.focus();
+  } else if (event.key === "Escape" || event.key === "Tab") {
+    hideContextMenu({ restoreFocus: true });
+  } else if (event.key === "Enter" || event.key === " ") {
+    // Buttons activate natively; keep list and global shortcuts from also handling the key.
+    event.stopPropagation();
+    return;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function hideContextMenu({ restoreFocus = false } = {}) {
   const menuEl = document.getElementById("context-menu");
+  const returnFocus = contextMenuReturnFocus;
+  contextMenuReturnFocus = null;
   app.contextMenu = null;
   if (menuEl) {
+    // Hand focus back before the focused item is removed so keyboard users are not dropped on <body>.
+    const hadFocus = menuEl.contains(document.activeElement);
     menuEl.hidden = true;
     menuEl.innerHTML = "";
+    if ((restoreFocus || hadFocus) && returnFocus?.isConnected) {
+      returnFocus.focus({ preventScroll: true });
+    }
   }
+}
+
+function keyboardContextMenuPoint(element) {
+  const rect = element?.getBoundingClientRect?.();
+  if (!rect || (!rect.width && !rect.height)) {
+    return null;
+  }
+  return {
+    x: Math.round(rect.left + Math.min(24, rect.width / 2)),
+    y: Math.round(Math.min(rect.bottom, rect.top + 32))
+  };
+}
+
+function keyboardContextEntryPath(paneName) {
+  const tab = tabOf(paneName);
+  const available = (entryPath) =>
+    Boolean(entryPath) && tab.entries.some((entry) => samePath(entry.path, entryPath));
+  if (available(tab.focusedPath) && tab.selected.has(tab.focusedPath)) {
+    return tab.focusedPath;
+  }
+  return [...tab.selected].find(available) || (available(tab.focusedPath) ? tab.focusedPath : null);
 }
 
 function prepareContextSelection(paneName, entryPath) {
@@ -18678,6 +19340,8 @@ function openContextMenu(event) {
   if (document.querySelector("dialog[open]")) {
     return false;
   }
+  // Shift+F10 / the Menu key report button -1 (0 in older engines); a right click reports 2.
+  const fromKeyboard = event.button !== 2;
   const columnButton = event.target.closest?.("[data-column-id]");
   const columnHead = event.target.closest?.(".file-head");
   if (columnButton || columnHead) {
@@ -18689,12 +19353,16 @@ function openContextMenu(event) {
     event.preventDefault();
     app.activePane = paneName;
     updateActivePaneChrome();
+    const point = (fromKeyboard && keyboardContextMenuPoint(columnButton || columnHead)) || {
+      x: event.clientX,
+      y: event.clientY
+    };
     app.contextMenu = {
       type: "columns",
       paneName,
       columnId: columnButton?.dataset.columnId || columnsForTab(tabOf(paneName))[0]?.id || "name",
-      x: event.clientX,
-      y: event.clientY
+      x: point.x,
+      y: point.y
     };
     renderContextMenu();
     return true;
@@ -18707,12 +19375,26 @@ function openContextMenu(event) {
     return false;
   }
   event.preventDefault();
-  prepareContextSelection(paneName, row?.dataset.entryPath || null);
+  // A keyboard-invoked menu targets the focused list, not a row: act on the
+  // focused/selected entry instead of clearing the selection.
+  const entryPath =
+    row?.dataset.entryPath || (fromKeyboard && fileList ? keyboardContextEntryPath(paneName) : null) || null;
+  prepareContextSelection(paneName, entryPath);
+  let point = { x: event.clientX, y: event.clientY };
+  if (fromKeyboard) {
+    if (entryPath && !row) {
+      scrollFocusedEntryIntoView(paneName);
+    }
+    point =
+      keyboardContextMenuPoint(row || entryElementForPath(paneName, entryPath)) ||
+      keyboardContextMenuPoint(fileList || pane) ||
+      point;
+  }
   app.contextMenu = {
     paneName,
-    entryPath: row?.dataset.entryPath || null,
-    x: event.clientX,
-    y: event.clientY
+    entryPath,
+    x: point.x,
+    y: point.y
   };
   renderContextMenu();
   return true;
@@ -18890,12 +19572,17 @@ async function pollOperationState({ silent = false } = {}) {
   app.operationPollBusy = true;
   const previousActive = activeOperations().map((operation) => operation.id);
   try {
-    const state = await request("/api/state");
-    const nextOperations = Array.isArray(state.operations) ? state.operations : [];
+    const { operations } = await request("/api/operations");
+    const nextOperations = Array.isArray(operations) ? operations : [];
     app.state.operations = nextOperations;
     const finished = previousActive
       .map((operationId) => nextOperations.find((operation) => operation.id === operationId))
       .filter((operation) => operation && !operationIsActive(operation));
+    if (finished.length) {
+      // Finished operations may have moved labels, collections or basket items server-side.
+      clearListingCache();
+      await refreshServerOwnedState().catch(() => {});
+    }
     renderOperations();
     if (finished.length && !silent) {
       setStatus(`${finished.length} operation${finished.length === 1 ? "" : "s"} finished`);
@@ -18972,6 +19659,96 @@ function paneEntryInteractionRecent(paneName, thresholdMs = 750) {
   return Boolean(interaction?.paneName === paneName && Date.now() - interaction.at < thresholdMs);
 }
 
+function folderWatchBaseline(tab) {
+  const stored = tab.folderWatchVersion;
+  if (stored !== null && stored !== undefined && Number.isFinite(Number(stored))) {
+    return Number(stored);
+  }
+  // Seed from the watcher version the listing was built against so changes
+  // between the listing and the first poll (or a cached Back navigation) are
+  // still detected instead of silently becoming the new baseline.
+  const cache = tab.lastLoadTiming?.cache;
+  if (cache?.watcherAvailable === true && Number.isFinite(Number(cache.watcherVersion))) {
+    return Number(cache.watcherVersion);
+  }
+  return null;
+}
+
+function autoRefreshTabCurrent(paneName, tab, watchedPath) {
+  return tabOf(paneName) === tab && tab.path === watchedPath;
+}
+
+function autoRefreshPane(paneName) {
+  return refreshPane(paneName, {
+    preserveSelection: true,
+    save: false,
+    silent: true,
+    autoRefresh: true
+  });
+}
+
+async function pollAutoRefreshPane(paneName) {
+  const tab = tabOf(paneName);
+  const watchedPath = tab.path;
+  const baseline = folderWatchBaseline(tab);
+  const watch = await folderWatchForPath(watchedPath, baseline);
+  if (!autoRefreshTabCurrent(paneName, tab, watchedPath) || paneLoadInFlight(paneName)) {
+    return false;
+  }
+  if (watch.available) {
+    const version = Number(watch.version || 0);
+    if (baseline === null) {
+      tab.folderWatchVersion = version;
+      return false;
+    }
+    // A lower version means the watcher was recreated; changes may have been missed.
+    if (!watch.changed && version >= baseline) {
+      tab.folderWatchVersion = version;
+      return false;
+    }
+    if (paneEntryInteractionRecent(paneName)) {
+      return false;
+    }
+    if (!(await autoRefreshPane(paneName))) {
+      return false;
+    }
+    if (tabOf(paneName) === tab) {
+      tab.folderWatchVersion = version;
+    }
+    return true;
+  }
+  // Listings are fetched without signatures, so the fallback keeps its own
+  // baseline and ties it to the path it was computed for.
+  const previous = tab.folderSignaturePath === watchedPath ? tab.folderSignature : null;
+  const next = await folderSignatureForPath(watchedPath, {
+    includeDimensions: tab.listingIncludesDimensions === true || tabNeedsDimensions(tab),
+    includeLinks: tab.listingIncludesLinks === true || tabNeedsLinks(tab),
+    includeAttributes:
+      tab.listingIncludesAttributes === true ||
+      tabNeedsAttributes(tab) ||
+      !showHiddenEntriesEnabled()
+  });
+  if (!autoRefreshTabCurrent(paneName, tab, watchedPath) || paneLoadInFlight(paneName)) {
+    return false;
+  }
+  if (!previous?.signature || !signatureChanged(previous, next)) {
+    tab.folderSignature = next;
+    tab.folderSignaturePath = watchedPath;
+    return false;
+  }
+  if (paneEntryInteractionRecent(paneName)) {
+    return false;
+  }
+  if (!(await autoRefreshPane(paneName))) {
+    return false;
+  }
+  if (autoRefreshTabCurrent(paneName, tab, watchedPath)) {
+    tab.folderSignature = next;
+    tab.folderSignaturePath = watchedPath;
+  }
+  return true;
+}
+
 async function pollAutoRefresh({ force = false } = {}) {
   if (app.autoRefreshBusy || !app.state || (!force && (!autoRefreshEnabled() || document.hidden))) {
     return;
@@ -18983,70 +19760,18 @@ async function pollAutoRefresh({ force = false } = {}) {
       if (paneLoadInFlight(paneName)) {
         continue;
       }
-      const tab = tabOf(paneName);
-      const previous = tab.folderSignature;
-      const watch = await folderWatchForPath(tab.path, tab.folderWatchVersion);
-      if (watch.available) {
-        if (
-          tab.folderWatchVersion === null ||
-          tab.folderWatchVersion === undefined ||
-          !Number.isFinite(Number(tab.folderWatchVersion))
-        ) {
-          tab.folderWatchVersion = Number(watch.version || 0);
-          continue;
-        }
-        if (watch.changed) {
-          if (paneEntryInteractionRecent(paneName)) {
-            continue;
-          }
-          const didRefresh = await refreshPane(paneName, {
-            preserveSelection: true,
-            save: false,
-            silent: true,
-            autoRefresh: true
-          });
-          if (!didRefresh) continue;
-          tab.folderWatchVersion = Number(watch.version || 0);
+      try {
+        if (await pollAutoRefreshPane(paneName)) {
           refreshed.push(paneName);
-        } else {
-          tab.folderWatchVersion = Number(watch.version || 0);
         }
-        continue;
-      }
-      const next = await folderSignatureForPath(tab.path, {
-        includeDimensions: tab.listingIncludesDimensions === true || tabNeedsDimensions(tab),
-        includeLinks: tab.listingIncludesLinks === true || tabNeedsLinks(tab),
-        includeAttributes:
-          tab.listingIncludesAttributes === true ||
-          tabNeedsAttributes(tab) ||
-          !showHiddenEntriesEnabled()
-      });
-      if (!previous?.signature) {
-        tab.folderSignature = next;
-        continue;
-      }
-      if (signatureChanged(previous, next)) {
-        if (paneEntryInteractionRecent(paneName)) {
-          continue;
+      } catch (error) {
+        if (force) {
+          setStatus(error.message);
         }
-        const didRefresh = await refreshPane(paneName, {
-          preserveSelection: true,
-          save: false,
-          silent: true,
-          autoRefresh: true
-        });
-        if (!didRefresh) continue;
-        refreshed.push(paneName);
-      } else {
-        tab.folderSignature = next;
       }
     }
     if (refreshed.length) {
       setStatus(`Auto refreshed ${refreshed.map((paneName) => paneName.toUpperCase()).join(" / ")}`);
-    }
-  } catch (error) {
-    if (force) {
-      setStatus(error.message);
     }
   } finally {
     app.autoRefreshBusy = false;
@@ -19058,7 +19783,7 @@ function startAutoRefresh() {
   renderShowHiddenToggle();
   scheduleAutoRefresh(1600);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
+    if (!document.hidden && autoRefreshEnabled()) {
       pollAutoRefresh({ force: true });
     }
     scheduleAutoRefresh(250);
@@ -19952,9 +20677,19 @@ function applyConfigurationToState(configuration, replaceExisting) {
     nextState.layout = jsonClone(configuration.layout);
   }
   if (configuration.settings) {
+    const existingSettings = nextState.settings || {};
     nextState.settings = replaceExisting
       ? jsonClone(configuration.settings)
-      : { ...(nextState.settings || {}), ...jsonClone(configuration.settings) };
+      : { ...existingSettings, ...jsonClone(configuration.settings) };
+    if (!replaceExisting && Array.isArray(existingSettings.hotkeys) && Array.isArray(configuration.settings.hotkeys)) {
+      // Imported bindings win per id and per combo; unrelated local hotkeys are kept.
+      const importedCombos = new Set(configuration.settings.hotkeys.map((hotkey) => comboKey(hotkey?.combo)));
+      nextState.settings.hotkeys = mergeConfigArray(
+        "hotkeys",
+        existingSettings.hotkeys.filter((hotkey) => !importedCombos.has(comboKey(hotkey?.combo))),
+        configuration.settings.hotkeys
+      );
+    }
   }
   for (const key of configPackageArrayKeys) {
     if (!Array.isArray(configuration[key])) {
@@ -20216,23 +20951,14 @@ async function openCollectionInPane(collectionId = app.activeCollectionId, paneN
   if (!collection) {
     return showToast("Create a collection first");
   }
-  const result = await request("/api/collections/resolve", {
-    method: "POST",
-    body: JSON.stringify({ collectionId: collection.id })
-  });
-  const tab = tabOf(paneName);
-  tab.entries = result.entries;
-  tab.selected = new Set();
-  tab.focusedPath = null;
-  tab.anchorPath = null;
-  tab.searchMode = true;
-  tab.virtualMode = "";
-  tab.virtual = null;
-  tab.title = `Collection: ${result.collection?.name || collection.name}`;
-  tab.parent = null;
-  renderPane(paneName);
-  renderRoots();
-  renderInspector();
+  const result = await openResolvedItemsInPane(
+    paneName,
+    { collectionId: collection.id },
+    (data) => `Collection: ${data.collection?.name || collection.name}`
+  );
+  if (!result) {
+    return;
+  }
   setStatus(
     result.available === result.total
       ? itemWord(result.total, "collection item")
@@ -20373,36 +21099,72 @@ async function openBasketDialog() {
   document.getElementById("basket-dialog").showModal();
 }
 
-async function resolveBasketPaths(paths = basketActionPaths()) {
-  if (!paths.length) {
-    showToast("Basket is empty");
-    return null;
-  }
-  return request("/api/collections/resolve", {
-    method: "POST",
-    body: JSON.stringify({ paths })
+async function openResolvedItemsInPane(paneName, body, titleFor) {
+  // Owns the pane load while resolving so a newer navigation aborts this view
+  // (and this view cancels any older in-flight listing) instead of racing it.
+  const load = beginPaneLoad(paneName, {
+    detail: `${paneName === "left" ? "Left" : "Right"} pane resolving items`
   });
+  const tab = load.tab;
+  try {
+    const result = await request("/api/collections/resolve", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: load.controller.signal
+    });
+    if (!isCurrentPaneLoad(paneName, load)) {
+      return null;
+    }
+    tab.entries = result.entries;
+    tab.selected = new Set();
+    tab.focusedPath = null;
+    tab.anchorPath = null;
+    tab.searchMode = true;
+    tab.virtualMode = "";
+    tab.virtual = null;
+    tab.title = titleFor(result);
+    tab.parent = null;
+    setPaneActivity(paneName, load, "ready", {
+      count: result.entries.length,
+      wallMs: performance.now() - load.startedAt
+    });
+    renderPane(paneName);
+    renderRoots();
+    renderInspector();
+    return result;
+  } catch (error) {
+    if (isAbortError(error)) {
+      return null;
+    }
+    setPaneActivity(paneName, load, "error", {
+      detail: `${paneName === "left" ? "Left" : "Right"} pane could not resolve items: ${error.message}`
+    });
+    throw error;
+  } finally {
+    finishPaneLoad(paneName, load);
+  }
 }
 
 async function openBasketInPane(paneName = app.activePane) {
-  const result = await resolveBasketPaths();
+  const paths = basketActionPaths();
+  if (!paths.length) {
+    return showToast("Basket is empty");
+  }
+  const result = await openResolvedItemsInPane(paneName, { paths }, () => "Basket");
   if (!result) {
     return;
   }
-  const tab = tabOf(paneName);
-  tab.entries = result.entries;
-  tab.selected = new Set();
-  tab.focusedPath = null;
-  tab.anchorPath = null;
-  tab.searchMode = true;
-  tab.virtualMode = "";
-  tab.virtual = null;
-  tab.title = "Basket";
-  tab.parent = null;
-  renderPane(paneName);
-  renderRoots();
-  renderInspector();
   setStatus(`${result.available}/${result.total} basket items`);
+}
+
+function basketTargetDirectory(verb) {
+  const tab = tabOf(app.activePane);
+  // Virtual views keep the last real folder in tab.path, which is not what the user sees.
+  if (tab.searchMode || tab.virtualMode) {
+    showToast(`Open a folder to ${verb} basket items into`);
+    return null;
+  }
+  return tab.path;
 }
 
 async function copyBasketHere() {
@@ -20410,9 +21172,13 @@ async function copyBasketHere() {
   if (!paths.length) {
     return showToast("Basket is empty");
   }
+  const targetDir = basketTargetDirectory("copy");
+  if (!targetDir) {
+    return;
+  }
   await request("/api/copy", {
     method: "POST",
-    body: JSON.stringify({ paths, targetDir: tabOf(app.activePane).path })
+    body: JSON.stringify({ paths, targetDir })
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
@@ -20424,9 +21190,13 @@ async function moveBasketHere() {
   if (!paths.length) {
     return showToast("Basket is empty");
   }
+  const targetDir = basketTargetDirectory("move");
+  if (!targetDir) {
+    return;
+  }
   await request("/api/move", {
     method: "POST",
-    body: JSON.stringify({ paths, targetDir: tabOf(app.activePane).path })
+    body: JSON.stringify({ paths, targetDir })
   });
   const moving = new Set(paths.map(normalizedPathKey));
   await saveBasketItems(fileBasketItems().filter((item) => !moving.has(normalizedPathKey(item.path))));
@@ -21192,7 +21962,7 @@ async function clearLabelsFromSelection() {
 }
 
 async function showLabeledPath(itemPath) {
-  const targetDir = itemPath ? itemPath.replace(/[\\/][^\\/]*$/, "") : null;
+  const targetDir = itemPath ? containingFolderForItemPath(itemPath) : null;
   if (!targetDir) {
     return;
   }
@@ -21355,18 +22125,54 @@ async function restoreSavedLayout(layoutId) {
   if (!layout) {
     return showToast("Layout not found");
   }
+  if (!(await disposeTerminalsForTabs([...panes.left.tabs, ...panes.right.tabs]))) {
+    return;
+  }
   app.state.layout = layout.layout;
   hydratePanesFromLayout(layout.layout);
-  await Promise.all([
-    loadPane("left", tabOf("left").path || app.roots.cwd, false),
-    loadPane("right", tabOf("right").path || app.roots.home, false)
-  ]);
+  const fallbacks = { left: app.roots.cwd, right: app.roots.home };
+  const results = await Promise.allSettled(
+    ["left", "right"].map((paneName) =>
+      loadStartupPane(paneName, tabOf(paneName).path || fallbacks[paneName], fallbacks[paneName])
+    )
+  );
+  const failed = [];
+  for (const [index, paneName] of ["left", "right"].entries()) {
+    if (results[index].status === "fulfilled") {
+      continue;
+    }
+    failed.push(`${paneName === "left" ? "Left" : "Right"}: ${results[index].reason?.message || results[index].reason}`);
+    try {
+      await loadPane(paneName, app.roots.home, false, { linkedFollow: true, silent: true, save: false });
+    } catch (error) {
+      setStatus(error.message);
+    }
+  }
+  await ensureVisiblePaneTerminals(["left", "right"]);
   renderRoots();
   renderAll();
   renderInspector();
   await saveStateNow();
   document.getElementById("layouts-dialog").close();
-  showToast(`Restored ${layout.name}`);
+  showToast(failed.length ? `Restored ${layout.name}; recovered ${failed.join("; ")}` : `Restored ${layout.name}`);
+}
+
+async function disposeTerminalsForTabs(tabs) {
+  // Tabs being replaced wholesale must release their shells, like closeTab does.
+  const busy = tabs.some((tab) => app.terminals.sessions.get(tab?.id)?.busy);
+  if (busy && !window.confirm("A terminal in the tabs being replaced is running a command. Close it and its child processes?")) {
+    return false;
+  }
+  await Promise.all(tabs.map((tab) => disposeTerminalForTab(tab, { confirmBusy: false })));
+  return true;
+}
+
+async function ensureVisiblePaneTerminals(paneNames) {
+  for (const paneName of paneNames) {
+    if (app.terminals.visible[paneName]) {
+      await ensureTerminalForPane(paneName).catch((error) => setStatus(error.message));
+    }
+  }
 }
 
 function tabGroupTabCount(group) {
@@ -21501,6 +22307,9 @@ async function restoreSavedTabGroup(groupId) {
     return showToast("Tab group not found");
   }
   const paneName = app.activePane;
+  if (!(await disposeTerminalsForTabs([...panes[paneName].tabs]))) {
+    return;
+  }
   panes[paneName].tabs = group.tabs.map((savedTab) => normalizeSavedTab(savedTab, savedTab.path || app.roots.cwd));
   panes[paneName].activeTab = Math.max(0, Math.min(Number(group.activeTab || 0), panes[paneName].tabs.length - 1));
   const active = tabOf(paneName);
@@ -21509,6 +22318,7 @@ async function restoreSavedTabGroup(groupId) {
     linkedFollow: true,
     save: false
   });
+  await ensureVisiblePaneTerminals([paneName]);
   renderRoots();
   renderAll();
   renderInspector();
@@ -22148,9 +22958,18 @@ function operationSupportsRetryRemaining(operation) {
 
 const elevatedRetryOperationTypes = new Set(["copy", "move", "delete"]);
 
+function operationElevatedRetryLaunched(operation) {
+  const elevation = operationRecovery(operation)?.elevation;
+  return Boolean(elevation?.launchedAt || elevation?.status === "launched");
+}
+
 function operationSupportsElevatedRetry(operation) {
   const recovery = operationRecovery(operation);
+  // Once a helper has been launched, relaunching would replay copy/move/delete
+  // behind a second admin prompt.
   return (
+    !operationElevatedRetryLaunched(operation) &&
+    !app.elevatedRetryPending?.has(operation?.id) &&
     operationSupportsRetryRemaining(operation) &&
     elevatedRetryOperationTypes.has(recovery?.retry?.type) &&
     Array.isArray(recovery?.remaining) &&
@@ -22797,16 +23616,7 @@ async function cancelOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   renderOperations();
   scheduleOperationPoll(200);
   showToast("Cancel requested");
@@ -22817,16 +23627,7 @@ async function pauseOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   renderOperations();
   scheduleOperationPoll(200);
   showToast("Operation paused");
@@ -22837,16 +23638,7 @@ async function resumeOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   renderOperations();
   scheduleOperationPoll(200);
   showToast("Operation resumed");
@@ -22870,16 +23662,7 @@ async function retryOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   showToast("Retry complete");
@@ -22890,16 +23673,7 @@ async function retryRemainingOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   showToast("Remaining work retried");
@@ -22910,16 +23684,7 @@ async function retrySelectedRemainingOperation(operationId, indexes) {
     method: "POST",
     body: JSON.stringify({ operationId, indexes })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   renderOperationDetails();
@@ -22942,13 +23707,32 @@ function upsertOperationInState(operation) {
 
 async function elevatedRetryOperation(operationId, indexes = []) {
   const selectedIndexes = Array.isArray(indexes) ? indexes : [];
-  const result = await request("/api/operation/elevated-retry", {
-    method: "POST",
-    body: JSON.stringify({ operationId, indexes: selectedIndexes, launch: true })
-  });
-  if (result.operation) {
-    upsertOperationInState(result.operation);
+  const operation = operationById(operationId);
+  if (operation && !operationSupportsElevatedRetry(operation)) {
+    return showToast(
+      operationElevatedRetryLaunched(operation)
+        ? "An elevated helper was already launched for this operation"
+        : "Elevated retry is not available for this operation"
+    );
   }
+  app.elevatedRetryPending = app.elevatedRetryPending || new Set();
+  app.elevatedRetryPending.add(operationId);
+  renderOperations();
+  renderOperationDetails();
+  let result;
+  try {
+    result = await request("/api/operation/elevated-retry", {
+      method: "POST",
+      body: JSON.stringify({ operationId, indexes: selectedIndexes, launch: true })
+    });
+  } catch (error) {
+    app.elevatedRetryPending.delete(operationId);
+    renderOperations();
+    renderOperationDetails();
+    throw error;
+  }
+  app.elevatedRetryPending.delete(operationId);
+  upsertOperationInState(result.operation);
   renderOperations();
   renderOperationDetails();
   if (result.launched) {
@@ -22975,16 +23759,7 @@ async function recoverSelectedOperationBackups(operationId, action, indexes) {
     method: "POST",
     body: JSON.stringify({ operationId, action, indexes })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   const operation = operationById(operationId);
@@ -23416,17 +24191,74 @@ function listHasKeyboardFocus(event) {
   return Boolean(activeList || eventList);
 }
 
+// Control characters the terminal would receive for the tab shortcuts that are also shell editing keys.
+const terminalTabShortcutInput = new Map([
+  ["close-tab", "\x17"],
+  ["duplicate-tab", "\x14"]
+]);
+
+function tabShortcutActionForKey(event) {
+  if (event.altKey || !(event.ctrlKey || event.metaKey)) {
+    return null;
+  }
+  const key = String(event.key || "").toLowerCase();
+  if (event.shiftKey) {
+    if (key === "t") return "reopen-tab";
+    if (key === "tab" || key === "pageup") return "previous-tab";
+    return null;
+  }
+  if (key === "t") return "duplicate-tab";
+  if (key === "w") return "close-tab";
+  if (key === "tab" || key === "pagedown") return "next-tab";
+  if (key === "pageup") return "previous-tab";
+  return null;
+}
+
+// Ctrl+W / Ctrl+T are text-editing keys in terminals (delete word, transpose) and must not
+// close or duplicate a tab while the user is typing; tab cycling and reopen stay available.
+function tabShortcutFocusGuard(action, target = document.activeElement) {
+  if (!terminalTabShortcutInput.has(action)) {
+    return "";
+  }
+  const element = target instanceof Element ? target : null;
+  if (element?.closest("[data-terminal-host]")) {
+    return "terminal";
+  }
+  return isTypingTarget(element) ? "typing" : "";
+}
+
+function forwardTabShortcutToTerminal(action, target = document.activeElement) {
+  const paneName = target instanceof Element ? target.closest("[data-terminal-host]")?.dataset.terminalHost : "";
+  const session = isPaneName(paneName) ? activeTerminalSession(paneName) : null;
+  const input = terminalTabShortcutInput.get(action);
+  if (session?.sessionId && input) {
+    desktopTerminalBridge()?.write(session.sessionId, input);
+  }
+}
+
 async function handleDesktopShortcutAction(action) {
   if (document.querySelector("dialog[open]")) {
     return false;
   }
-  const paneName = isPaneName(app.activePane) ? app.activePane : "left";
+  const guard = tabShortcutFocusGuard(action);
+  if (guard === "terminal") {
+    // Electron main swallowed the keystroke before the terminal saw it, so hand it back.
+    forwardTabShortcutToTerminal(action);
+    return true;
+  }
+  if (guard) {
+    return false;
+  }
+  return runTabShortcutAction(action, isPaneName(app.activePane) ? app.activePane : "left");
+}
+
+async function runTabShortcutAction(action, paneName) {
   if (action === "duplicate-tab") {
-    duplicateTab(paneName);
+    await duplicateTab(paneName);
     return true;
   }
   if (action === "close-tab") {
-    closeTab(paneName);
+    await closeTab(paneName);
     return true;
   }
   if (action === "next-tab") {
@@ -23445,10 +24277,15 @@ async function handleDesktopShortcutAction(action) {
 }
 
 async function handlePaneShortcut(event) {
-  if (document.querySelector("dialog[open]") || isTypingTarget(event.target)) {
+  if (document.querySelector("dialog[open]")) {
     return false;
   }
-  if (event.target.closest?.("button, a, select, summary, [role='button'], [role='menuitem'], [role='tab']")) {
+  // Tab shortcuts share the desktop path's focus guard; everything else stays out of text fields.
+  const tabAction = tabShortcutActionForKey(event);
+  if (tabAction ? tabShortcutFocusGuard(tabAction, event.target) : isTypingTarget(event.target)) {
+    return false;
+  }
+  if (!tabAction && event.target.closest?.("button, a, select, summary, [role='button'], [role='menuitem'], [role='tab']")) {
     return false;
   }
 
@@ -23456,8 +24293,14 @@ async function handlePaneShortcut(event) {
   if (!isPaneName(paneName)) {
     return false;
   }
-  app.activePane = paneName;
-  updateActivePaneChrome();
+  if (app.activePane !== paneName) {
+    app.activePane = paneName;
+    updateActivePaneChrome();
+  }
+  if (tabAction) {
+    event.preventDefault();
+    return runTabShortcutAction(tabAction, paneName);
+  }
 
   const key = event.key;
   const lowerKey = key.toLowerCase();
@@ -23476,37 +24319,7 @@ async function handlePaneShortcut(event) {
     openSelectMaskDialog(paneName);
     return true;
   }
-  if (hasCtrlShift && lowerKey === "t") {
-    event.preventDefault();
-    await reopenClosedTab(paneName);
-    return true;
-  }
-  if (hasCtrlShift && (lowerKey === "tab" || key === "PageUp")) {
-    event.preventDefault();
-    await cyclePaneTab(paneName, -1);
-    return true;
-  }
 
-  if (hasOnlyCtrl && lowerKey === "t") {
-    event.preventDefault();
-    duplicateTab(paneName);
-    return true;
-  }
-  if (hasOnlyCtrl && lowerKey === "w") {
-    event.preventDefault();
-    closeTab(paneName);
-    return true;
-  }
-  if (hasOnlyCtrl && (lowerKey === "tab" || key === "PageDown")) {
-    event.preventDefault();
-    await cyclePaneTab(paneName, 1);
-    return true;
-  }
-  if (hasOnlyCtrl && key === "PageUp") {
-    event.preventDefault();
-    await cyclePaneTab(paneName, -1);
-    return true;
-  }
   if (hasOnlyCtrl && lowerKey === "a") {
     event.preventDefault();
     selectAll(paneName);
@@ -24032,10 +24845,15 @@ function renderSpeedDialog(message = "") {
   }
 }
 
+// Status polls only feed the dialog; reopening it refreshes both from the server.
+function speedDialogOpen() {
+  return document.getElementById("speed-dialog")?.open === true;
+}
+
 async function refreshBackgroundIndexes() {
   app.speed.background = await request("/api/background-indexes");
   renderSpeedDialog();
-  if (backgroundIndexRunningCount()) {
+  if (backgroundIndexRunningCount() && speedDialogOpen()) {
     clearBackgroundSpeedPoll();
     app.speed.backgroundPollTimer = setTimeout(
       () => refreshBackgroundIndexes().catch((error) => renderSpeedDialog(error.message)),
@@ -24058,7 +24876,7 @@ async function refreshSpeedStatus() {
     clearSpeedPoll();
   }
   renderSpeedDialog();
-  if (app.speed.status?.job?.status === "running") {
+  if (app.speed.status?.job?.status === "running" && speedDialogOpen()) {
     clearSpeedPoll();
     app.speed.pollTimer = setTimeout(() => refreshSpeedStatus().catch((error) => renderSpeedDialog(error.message)), 650);
   }
@@ -24379,7 +25197,11 @@ function loadCommandCenterState() {
   if (app.commandPalette.loaded) return;
   app.commandPalette.loaded = true;
   try {
-    const saved = JSON.parse(localStorage.getItem(commandCenterStorageKey) || "{}");
+    // Saved settings survive relaunches; localStorage does not in the desktop app (its origin port changes).
+    const persisted = app.state?.settings?.commandCenter;
+    const saved = persisted && typeof persisted === "object"
+      ? persisted
+      : JSON.parse(localStorage.getItem(commandCenterStorageKey) || "{}");
     const pins = Array.isArray(saved.pins) ? saved.pins.filter((value) => typeof value === "string").slice(0, 64) : [];
     const recents = Array.isArray(saved.recents) ? saved.recents.filter((value) => typeof value === "string").slice(0, 12) : [];
     app.commandPalette.pins = new Set(pins);
@@ -24391,11 +25213,13 @@ function loadCommandCenterState() {
 }
 
 function saveCommandCenterState() {
+  const saved = { pins: [...app.commandPalette.pins].slice(0, 64), recents: app.commandPalette.recents.slice(0, 12) };
+  if (app.state) {
+    app.state.settings = { ...(app.state.settings || {}), commandCenter: saved };
+    scheduleStateSave();
+  }
   try {
-    localStorage.setItem(
-      commandCenterStorageKey,
-      JSON.stringify({ pins: [...app.commandPalette.pins].slice(0, 64), recents: app.commandPalette.recents.slice(0, 12) })
-    );
+    localStorage.setItem(commandCenterStorageKey, JSON.stringify(saved));
   } catch {
     // Command history is an optional convenience and must never block execution.
   }
@@ -24595,11 +25419,15 @@ async function runCommandPaletteItem(index = app.commandPalette.activeIndex) {
     return;
   }
   const dialog = document.getElementById("command-dialog");
-  recordCommandPaletteRecent(item.key);
   if (dialog?.open) {
     dialog.close();
   }
-  await item.run();
+  try {
+    await item.run();
+  } finally {
+    // Recorded afterwards so the settings save cannot race state changes the command makes on the server.
+    recordCommandPaletteRecent(item.key);
+  }
 }
 
 async function handleCommandPaletteKey(event) {
@@ -24632,7 +25460,11 @@ async function handleCommandPaletteKey(event) {
   }
   if (event.key === "Enter") {
     event.preventDefault();
-    await runCommandPaletteItem();
+    try {
+      await runCommandPaletteItem();
+    } catch (error) {
+      reportUnexpectedUiError(error);
+    }
     return true;
   }
   return false;
@@ -24963,10 +25795,16 @@ async function runScriptCode(code, outputElement = null, metadata = {}) {
   if (outputElement) {
     outputElement.textContent = text;
   }
-  await refreshPane(app.activePane);
-  await loadState();
-  renderOperations();
-  renderSavedCommandStrip();
+  // The script already ran; a failed follow-up refresh must not read as a script failure and invite a rerun.
+  try {
+    await refreshPane(app.activePane);
+    await loadState();
+    renderOperations();
+    renderSavedCommandStrip();
+  } catch (error) {
+    console.warn(error);
+    showToast(`Script finished, but the view could not refresh: ${error.message}`);
+  }
   return text;
 }
 
@@ -25048,6 +25886,10 @@ async function terminalCapabilities() {
       app.terminals.capabilities = capabilities;
       renderTerminalProfileChoices();
       return capabilities;
+    }, (error) => {
+      // A transient failure must not poison every later terminal request.
+      app.terminals.capabilitiesPromise = null;
+      throw error;
     });
   }
   return app.terminals.capabilitiesPromise;
@@ -25088,7 +25930,16 @@ function activeTerminalSession(paneName = app.activePane) {
   return app.terminals.sessions.get(tabOf(paneName)?.id) || null;
 }
 
+function syncTerminalViewVisibility() {
+  const shown = new Set(["left", "right"]
+    .filter((paneName) => app.terminals.visible[paneName] === true)
+    .map((paneName) => tabOf(paneName)?.id)
+    .filter(Boolean));
+  for (const [tabId, session] of app.terminals.sessions) session.view?.setVisible?.(shown.has(tabId));
+}
+
 function renderPaneTerminal(paneName) {
+  syncTerminalViewVisibility();
   const pane = document.querySelector(`.pane[data-pane="${paneName}"]`);
   const drawer = document.querySelector(`[data-terminal-drawer="${paneName}"]`);
   const resizer = document.querySelector(`[data-layout-resize="terminal-${paneName}"]`);
@@ -25161,10 +26012,18 @@ function terminalCreateRequest(tab, session = null, overrides = {}) {
   };
 }
 
+// Mirrors lib/shell-quote.mjs (kept inline so the unbundled app.js fallback still
+// loads as a classic script); scripts/shell-quoting.test.mjs checks they agree.
 function shellQuoteDroppedPath(profileId, value) {
   const pathValue = String(value || "");
-  if (profileId === "command-prompt") return `"${pathValue.replaceAll('"', '""')}"`;
-  return `'${pathValue.replaceAll("'", "''")}'`;
+  if (profileId === "command-prompt") {
+    return pathValue.split("%").map((part) => {
+      const text = part.replaceAll('"', '""');
+      const body = text.replace(/\\+$/, "");
+      return `"${body}"${text.slice(body.length)}`;
+    }).join("^%");
+  }
+  return `'${pathValue.replace(/['\u2018-\u201B]/g, "$&$&")}'`;
 }
 
 function insertDroppedTerminalFiles(session, files) {
@@ -25203,6 +26062,12 @@ function handleTerminalEvent(message) {
   const session = app.terminals.bySessionId.get(String(message?.sessionId || ""));
   if (!session) return queueEarlyTerminalEvent(message);
   if (session.disposed) return;
+  // Output is streamed straight to the view; chrome re-renders only on state changes.
+  let changed = message.type !== "data";
+  if (session.error && (message.type === "data" || message.type === "busy" || message.type === "cwd")) {
+    session.error = "";
+    changed = true;
+  }
   if (message.type === "data") session.view?.write(message.data);
   if (message.type === "busy") session.busy = message.busy === true;
   if (message.type === "cwd") session.cwd = String(message.cwd || session.cwd);
@@ -25218,6 +26083,7 @@ function handleTerminalEvent(message) {
     retireTerminalSession(session.sessionId);
     session.sessionId = "";
   }
+  if (!changed) return;
   const paneName = paneNameForTerminalTab(session.tabId);
   if (paneName && tabOf(paneName)?.id === session.tabId) renderPaneTerminal(paneName);
 }
@@ -25289,6 +26155,9 @@ async function createTerminalForTab(paneName, tab = tabOf(paneName), overrides =
     });
     Object.assign(session, metadata, { starting: false, exited: false, error: "" });
     app.terminals.bySessionId.set(session.sessionId, session);
+    // The native terminal started at a default size before this view existed.
+    const dimensions = session.view.dimensions();
+    bridge.resize(session.sessionId, dimensions.cols, dimensions.rows);
     replayEarlyTerminalEvents(session.sessionId);
     if (session.sessionId && session.requestedCwd && session.requestedCwd !== session.cwd && currentSettings().terminalFollowDirectory) {
       await bridge.syncDirectory(session.sessionId, session.requestedCwd);
@@ -25399,7 +26268,9 @@ async function restartPaneTerminal(paneName = app.activePane, overrides = {}) {
   if (!session || !session.sessionId) {
     if (session && !(await disposeTerminalForTab(tab))) return null;
     app.terminals.visible[paneName] = true;
-    return createTerminalForTab(paneName, tab, overrides);
+    // Restarting an exited terminal keeps its shell and elevation choice.
+    const retained = session ? { profileId: session.profileId, elevation: session.elevation } : {};
+    return createTerminalForTab(paneName, tab, { ...retained, ...overrides });
   }
   const bridge = desktopTerminalBridge();
   const focusOwner = document.activeElement;
@@ -25519,16 +26390,8 @@ async function handleAction(action, paneName) {
 }
 
 function wireEvents() {
-  for (const dialog of document.querySelectorAll("dialog")) {
-    const title = dialog.querySelector(".dialog-head strong, .dialog-head h1, .dialog-head h2");
-    if (title && !dialog.hasAttribute("aria-labelledby") && !dialog.hasAttribute("aria-label")) {
-      title.id ||= `${dialog.id}-title`;
-      dialog.setAttribute("aria-labelledby", title.id);
-    }
-    for (const button of dialog.querySelectorAll("[data-close-dialog]")) {
-      if (!button.hasAttribute("aria-label")) button.setAttribute("aria-label", `Close ${title?.textContent?.trim() || "dialog"}`);
-    }
-  }
+  // Dialog names and close-button labels come from index.html markup, with
+  // enhanceDialogAccessibility() filling any gaps before wiring starts.
   for (const name of ["search", "flat", "duplicates", "compare", "bulk", "transfer"]) {
     const dialog = document.getElementById(`${name}-dialog`);
     dialog.addEventListener("close", () => { if (!dialog.open) cancelAsyncDialogTask(dialog.id); });
@@ -26299,6 +27162,8 @@ function wireEvents() {
 
     const sortButton = event.target.closest("[data-sort]");
     if (sortButton) {
+      // A click that ends a column resize lands on the grip inside the button.
+      if (event.target.closest("[data-column-resize]")) return;
       const paneName = sortButton.dataset.pane;
       await sortPaneByColumn(paneName, sortButton.dataset.sort);
       return;
@@ -26768,7 +27633,11 @@ function wireEvents() {
     }
   });
 
-  document.body.addEventListener("keydown", async (event) => {
+  document.body.addEventListener("keydown", (event) => {
+    handleBodyKeydown(event).catch(reportUnexpectedUiError);
+  });
+
+  async function handleBodyKeydown(event) {
     const paneFilter = event.target.closest?.("[data-filter]");
     if (paneFilter && event.key === "Escape") {
       event.preventDefault();
@@ -26907,7 +27776,7 @@ function wireEvents() {
     if (await handlePaneShortcut(event)) {
       return;
     }
-  });
+  }
 
   document.body.addEventListener("click", async (event) => {
     const previewActionButton = event.target.closest("[data-preview-action]");
@@ -28028,6 +28897,10 @@ function wireEvents() {
     sizeAnalysisDialog.addEventListener("cancel", cancelActiveSizeAnalysis);
     sizeAnalysisDialog.addEventListener("close", cancelActiveSizeAnalysis);
   }
+  document.getElementById("speed-dialog")?.addEventListener("close", () => {
+    clearSpeedPoll();
+    clearBackgroundSpeedPoll();
+  });
   const viewerDialog = document.getElementById("viewer-dialog");
   if (viewerDialog) {
     viewerDialog.addEventListener("close", () => {
@@ -28654,8 +29527,16 @@ function initializeDesktopEvents() {
   });
 }
 
+function reportUnexpectedUiError(error) {
+  if (isAbortError(error)) return;
+  console.error(error);
+  showToast(error?.message || String(error || "Unexpected error"));
+}
+
 async function init() {
   const startupStartedAt = performance.now();
+  // Last-resort reporting for async UI handlers that do not catch their own failures.
+  window.addEventListener("unhandledrejection", (event) => reportUnexpectedUiError(event.reason));
   wireEvents();
   initializeDesktopEvents();
   initializeMcpUiObservation();
@@ -28728,7 +29609,9 @@ async function init() {
     window.addEventListener("explorebetter:first-pane-window", schedule, { once: true });
     secondaryStartupTimer = setTimeout(schedule, 1500);
   });
-  const terminalInitialization = initializeTerminalBridge();
+  // The terminal is optional; a failed capability probe must not abort startup or polling.
+  const terminalInitialization = initializeTerminalBridge()
+    .catch((error) => console.warn(`Could not initialize terminal: ${error?.message || error}`));
   const loadInitialPane = (paneName) =>
     loadStartupPane(
       paneName,
@@ -28777,7 +29660,10 @@ async function init() {
   scheduleDeviceRefresh();
   setTimeout(() => loadDevicesReport().catch((error) => console.warn(`Could not load devices: ${error.message}`)), 0);
   window.addEventListener("focus", () => {
-    if (document.visibilityState === "visible") loadDevicesReport({ refresh: true }).catch(() => {});
+    // A forced refresh spawns a PowerShell inventory on the server, so rapid Alt+Tab cycles share one.
+    if (document.visibilityState !== "visible" || Date.now() - (app.devices.lastFocusRefreshAt || 0) < 30_000) return;
+    app.devices.lastFocusRefreshAt = Date.now();
+    loadDevicesReport({ refresh: true }).catch(() => {});
   });
   initializeAppUpdates().catch((error) => console.warn(`Could not initialize app updates: ${error.message}`));
   setTimeout(() => {

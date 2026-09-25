@@ -136,6 +136,106 @@ async function inspectKeyboardLayout(page) {
   });
 }
 
+// Minimal desktop terminal bridge so the integrated terminal can take focus in a plain browser.
+const terminalMockScript = `(() => {
+  const state = { writes: [], disposes: [], listeners: new Set(), next: 1 };
+  window.__terminalMock = state;
+  window.exploreBetterDesktop = {
+    terminal: {
+      capabilities: async () => ({ available: true, defaultProfileId: 'windows-powershell', elevationAvailable: false, profiles: [{ id: 'windows-powershell', label: 'Windows PowerShell' }] }),
+      create: async (request) => ({ sessionId: 'mock-session-' + state.next++, profileId: 'windows-powershell', profileLabel: 'Windows PowerShell', elevation: request.elevation, cwd: request.cwd }),
+      write: (sessionId, data) => { state.writes.push({ sessionId, data }); return true; },
+      resize: () => true,
+      syncDirectory: async (sessionId, cwd) => ({ queued: false, cwd }),
+      restart: async () => { throw new Error('not supported by mock'); },
+      dispose: async (sessionId) => { state.disposes.push(sessionId); return true; },
+      onEvent: (listener) => { state.listeners.add(listener); return () => state.listeners.delete(listener); }
+    }
+  };
+})();`;
+
+function leftTabCount(page) {
+  return page.evaluate(() => document.querySelectorAll('button.tab-label[data-pane="left"]').length);
+}
+
+async function desktopShortcut(page, action) {
+  await page.evaluate((detail) => {
+    window.dispatchEvent(new CustomEvent("explore-better-desktop-shortcut", { detail }));
+  }, action);
+  await page.waitForTimeout(250);
+}
+
+async function checkTabShortcutsInTextInput(page, checks) {
+  await page.locator('[data-list="left"]').focus();
+  const baseline = await leftTabCount(page);
+  await desktopShortcut(page, "duplicate-tab");
+  const duplicated = await leftTabCount(page);
+
+  // Two tabs are open, so a wrongly handled Ctrl+W would visibly close one.
+  await page.locator('[data-path-input="left"]').focus();
+  await desktopShortcut(page, "close-tab");
+  await desktopShortcut(page, "duplicate-tab");
+  await page.keyboard.press("Control+W");
+  await page.keyboard.press("Control+T");
+  await page.waitForTimeout(250);
+  const focusedPathInput = await page.evaluate(
+    () => document.activeElement?.matches?.('[data-path-input="left"]') === true
+  );
+  const afterTyping = await leftTabCount(page);
+  check(
+    checks,
+    "tab-shortcuts-ignored-in-text-input",
+    afterTyping === duplicated && focusedPathInput,
+    `Tabs after Ctrl+W/Ctrl+T in the path input: ${afterTyping} (expected ${duplicated}); focus kept=${focusedPathInput}.`
+  );
+
+  await page.locator('[data-list="left"]').focus();
+  await desktopShortcut(page, "close-tab");
+  const closed = await leftTabCount(page);
+  check(
+    checks,
+    "desktop-tab-shortcuts-from-list",
+    duplicated === baseline + 1 && closed === baseline,
+    `Tabs: baseline=${baseline}, after Ctrl+T=${duplicated}, after Ctrl+W=${closed}.`
+  );
+}
+
+async function checkTabShortcutsInTerminal(browser, baseUrl, checks, pageErrors) {
+  const page = await browser.newPage({ viewport: { width: 1366, height: 860 } });
+  try {
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await page.addInitScript({ content: terminalMockScript });
+    await page.goto(`${baseUrl}/?left=${encodeURIComponent(fixture)}&right=${encodeURIComponent(fixture)}`, {
+      waitUntil: "domcontentloaded"
+    });
+    await page.waitForFunction(() => Boolean(window.__exploreBetterStartup?.completedAt), null, { timeout: 15000 });
+    // Open a second tab first so a Ctrl+W that leaked through would actually close one.
+    await page.locator('[data-list="left"]').focus();
+    await desktopShortcut(page, "duplicate-tab");
+    await page.click('[data-terminal-toggle="left"]');
+    const terminalInput = page.locator('[data-terminal-host="left"] textarea').first();
+    await terminalInput.waitFor({ state: "attached", timeout: 15000 });
+    await terminalInput.focus();
+    const baseline = await leftTabCount(page);
+    await desktopShortcut(page, "close-tab");
+    await desktopShortcut(page, "duplicate-tab");
+    const result = await page.evaluate(() => ({
+      writes: window.__terminalMock.writes.map((item) => item.data),
+      disposes: window.__terminalMock.disposes.length,
+      terminalFocused: Boolean(document.activeElement?.closest?.('[data-terminal-host="left"]'))
+    }));
+    const tabs = await leftTabCount(page);
+    check(
+      checks,
+      "desktop-tab-shortcuts-forwarded-to-terminal",
+      baseline >= 2 && tabs === baseline && result.disposes === 0 && result.writes.includes("\x17") && result.writes.includes("\x14"),
+      `Tabs ${baseline} -> ${tabs}; disposes=${result.disposes}; writes=${JSON.stringify(result.writes)}; focused=${result.terminalFocused}.`
+    );
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 function markdownReport(report) {
   const rows = report.checks
     .map((item) => `| ${item.status.toUpperCase()} | ${item.id} | ${String(item.detail).replace(/\|/g, "\\|")} |`)
@@ -358,6 +458,8 @@ async function main() {
       "quick search closed"
     );
     check(checks, "quick-search-escape-closes", closed.hidden === true, `Quick search hidden=${closed.hidden}.`);
+    await checkTabShortcutsInTextInput(page, checks);
+    await checkTabShortcutsInTerminal(browser, baseUrl, checks, pageErrors);
     check(checks, "browser-console-clean", pageErrors.length === 0, `${pageErrors.length} page error(s).`);
   } catch (error) {
     check(checks, "smoke-execution", false, error.message);

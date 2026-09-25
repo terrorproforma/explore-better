@@ -92,6 +92,22 @@ function terminalOptions(settings = {}) {
   };
 }
 
+let webglAddonLoader = null;
+
+// Every view shares one script load; a failed load leaves the DOM renderer.
+function loadWebglAddon() {
+  if (window.ExploreBetterWebglAddon?.create) return Promise.resolve(window.ExploreBetterWebglAddon);
+  webglAddonLoader ||= new Promise((resolve) => {
+    const script = document.createElement("script");
+    script.src = "/generated/terminal-webgl.js";
+    script.async = true;
+    script.onload = () => resolve(window.ExploreBetterWebglAddon?.create ? window.ExploreBetterWebglAddon : null);
+    script.onerror = () => resolve(null);
+    document.head.append(script);
+  });
+  return webglAddonLoader;
+}
+
 function createView({ host, settings = {}, onInput, onResize, onDropPaths }) {
   const terminal = new Terminal(terminalOptions(settings));
   const fit = new FitAddon();
@@ -100,31 +116,46 @@ function createView({ host, settings = {}, onInput, onResize, onDropPaths }) {
   terminal.loadAddon(search);
   terminal.open(host);
 
+  // Chromium caps live WebGL contexts, so only shown views hold one; hidden
+  // views fall back to the DOM renderer until they are shown again.
   let webgl = null;
+  let webglUnsupported = false;
+  let webglTimer = null;
+  let visible = true;
   let disposed = false;
-  const webglTimer = setTimeout(() => {
-    const enableWebgl = () => {
-      if (disposed) return;
-      try {
-        webgl = window.ExploreBetterWebglAddon?.create?.();
-        if (!webgl) return;
-        webgl.onContextLoss(() => {
-          webgl?.dispose();
-          webgl = null;
-        });
-        terminal.loadAddon(webgl);
-      } catch {
-        webgl?.dispose();
-        webgl = null;
+  const releaseWebgl = () => {
+    const addon = webgl;
+    webgl = null;
+    try { addon?.dispose(); } catch {}
+  };
+  const enableWebgl = () => {
+    webglTimer = null;
+    if (disposed || !visible || webgl || webglUnsupported) return;
+    loadWebglAddon().then((factory) => {
+      if (disposed || !visible || webgl || webglUnsupported) return;
+      if (!factory) {
+        webglUnsupported = true;
+        return;
       }
-    };
-    if (window.ExploreBetterWebglAddon?.create) return enableWebgl();
-    const script = document.createElement("script");
-    script.src = "/generated/terminal-webgl.js";
-    script.async = true;
-    script.onload = enableWebgl;
-    document.head.append(script);
-  }, 1500);
+      let addon = null;
+      try {
+        addon = factory.create();
+        addon.onContextLoss(() => {
+          if (webgl === addon) webgl = null;
+          try { addon.dispose(); } catch {}
+        });
+        terminal.loadAddon(addon);
+        webgl = addon;
+      } catch {
+        webglUnsupported = true;
+        try { addon?.dispose(); } catch {}
+      }
+    });
+  };
+  const scheduleWebgl = (delay) => {
+    if (!webglTimer && !webgl && !webglUnsupported) webglTimer = setTimeout(enableWebgl, delay);
+  };
+  scheduleWebgl(1500);
 
   const inputDisposable = terminal.onData((data) => onInput?.(data));
   const resizeDisposable = terminal.onResize(({ cols, rows }) => onResize?.(cols, rows));
@@ -204,6 +235,19 @@ function createView({ host, settings = {}, onInput, onResize, onDropPaths }) {
     dimensions() {
       return { cols: Math.max(2, terminal.cols), rows: Math.max(1, terminal.rows) };
     },
+    setVisible(next) {
+      const shown = next !== false;
+      if (disposed || shown === visible) return;
+      visible = shown;
+      if (!shown) {
+        clearTimeout(webglTimer);
+        webglTimer = null;
+        releaseWebgl();
+        return;
+      }
+      scheduleWebgl(150);
+      fitNow();
+    },
     dispose() {
       disposed = true;
       clearTimeout(webglTimer);
@@ -213,7 +257,7 @@ function createView({ host, settings = {}, onInput, onResize, onDropPaths }) {
       host.removeEventListener("drop", drop);
       inputDisposable.dispose();
       resizeDisposable.dispose();
-      webgl?.dispose();
+      releaseWebgl();
       terminal.dispose();
     }
   };

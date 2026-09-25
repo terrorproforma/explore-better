@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -23,6 +24,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Microsoft/go-winio"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -598,18 +600,95 @@ func (b *bridgeClient) close() {
 	}
 }
 
+// The stdio transport has no session ID. One stable ID per sidecar process keeps
+// operation previews valid when the bridge pipe reconnects mid-session.
+var processSessionID = "stdio-" + randomID()
+
+func stableSessionID(id string) string {
+	if id == "" {
+		return processSessionID
+	}
+	return id
+}
+
 func sessionIdentity(requestSession *mcp.ServerSession) (string, any) {
 	if requestSession == nil {
-		return randomID(), map[string]any{"name": "unknown", "version": "unknown"}
+		return processSessionID, map[string]any{"name": "unknown", "version": "unknown"}
 	}
 	params := requestSession.InitializeParams()
 	if params == nil || params.ClientInfo == nil {
-		return requestSession.ID(), map[string]any{"name": "unknown", "version": "unknown"}
+		return stableSessionID(requestSession.ID()), map[string]any{"name": "unknown", "version": "unknown"}
 	}
-	return requestSession.ID(), params.ClientInfo
+	return stableSessionID(requestSession.ID()), params.ClientInfo
 }
 
+type cachedRoots struct {
+	roots    []string
+	provided bool
+}
+
+// rootsCache remembers each session's roots/list answer until the client sends
+// notifications/roots/list_changed, instead of asking on every request.
+type rootsCache struct {
+	mu          sync.Mutex
+	entries     map[any]cachedRoots
+	generations map[any]uint64
+}
+
+const maxCachedRootSessions = 64
+
+func newRootsCache() *rootsCache {
+	return &rootsCache{entries: make(map[any]cachedRoots), generations: make(map[any]uint64)}
+}
+
+func (c *rootsCache) get(ctx context.Context, key any, fetch func(context.Context) ([]string, bool, error)) ([]string, bool, error) {
+	c.mu.Lock()
+	if cached, ok := c.entries[key]; ok {
+		c.mu.Unlock()
+		return cached.roots, cached.provided, nil
+	}
+	generation := c.generations[key]
+	c.mu.Unlock()
+	roots, provided, err := fetch(ctx)
+	if err != nil {
+		return roots, provided, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// A change notification that arrived during the fetch makes this answer stale.
+	if c.generations[key] == generation {
+		if len(c.entries) >= maxCachedRootSessions {
+			c.entries = make(map[any]cachedRoots)
+			c.generations = make(map[any]uint64)
+		}
+		c.entries[key] = cachedRoots{roots: roots, provided: provided}
+	}
+	return roots, provided, nil
+}
+
+func (c *rootsCache) invalidate(key any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, key)
+	c.generations[key]++
+}
+
+var sessionRoots = newRootsCache()
+
 func clientRoots(ctx context.Context, session *mcp.ServerSession) ([]string, bool, error) {
+	if session == nil {
+		return nil, false, nil
+	}
+	// Only a client that announces roots change notifications can have its
+	// answer cached; any other client is asked on each request.
+	params := session.InitializeParams()
+	if params == nil || params.Capabilities == nil || params.Capabilities.RootsV2 == nil || !params.Capabilities.RootsV2.ListChanged {
+		return listClientRoots(ctx, session)
+	}
+	return sessionRoots.get(ctx, session, func(ctx context.Context) ([]string, bool, error) { return listClientRoots(ctx, session) })
+}
+
+func listClientRoots(ctx context.Context, session *mcp.ServerSession) ([]string, bool, error) {
 	if session == nil || session.InitializeParams() == nil || session.InitializeParams().Capabilities == nil || session.InitializeParams().Capabilities.RootsV2 == nil {
 		return nil, false, nil
 	}
@@ -626,6 +705,27 @@ func clientRoots(ctx context.Context, session *mcp.ServerSession) ([]string, boo
 		}
 	}
 	return roots, true, nil
+}
+
+// Many clients pass only text content to the model, so the text carries the
+// compact result JSON too. Oversized results are cut with a note; the
+// structured content always holds the complete value.
+const maxToolResultTextBytes = 200 * 1024
+
+func toolResultText(raw json.RawMessage) string {
+	var compact bytes.Buffer
+	text := string(raw)
+	if json.Compact(&compact, raw) == nil {
+		text = compact.String()
+	}
+	if len(text) <= maxToolResultTextBytes {
+		return text
+	}
+	cut := maxToolResultTextBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + fmt.Sprintf("\n[Truncated: showing %d of %d bytes. The complete result is in structuredContent; request a smaller page for the full text.]", cut, len(text))
 }
 
 func toolResult(raw json.RawMessage, err error) *mcp.CallToolResult {
@@ -651,14 +751,8 @@ func toolResult(raw json.RawMessage, err error) *mcp.CallToolResult {
 	if unmarshalErr := json.Unmarshal(raw, &structured); unmarshalErr != nil {
 		return toolResult(nil, unmarshalErr)
 	}
-	status := "ok"
-	if object, ok := structured.(map[string]any); ok {
-		if value, ok := object["status"].(string); ok {
-			status = value
-		}
-	}
 	return &mcp.CallToolResult{
-		Content:           []mcp.Content{&mcp.TextContent{Text: "Explore Better completed the request with status " + status + "."}},
+		Content:           []mcp.Content{&mcp.TextContent{Text: toolResultText(raw)}},
 		StructuredContent: structured,
 	}
 }
@@ -756,6 +850,11 @@ func main() {
 			UnsubscribeHandler: func(ctx context.Context, request *mcp.UnsubscribeRequest) error {
 				sessionID, clientInfo := sessionIdentity(request.Session)
 				return bridge.setSubscription(ctx, sessionID, clientInfo, request.Params.URI, false)
+			},
+			RootsListChangedHandler: func(_ context.Context, request *mcp.RootsListChangedRequest) {
+				if request != nil && request.Session != nil {
+					sessionRoots.invalidate(request.Session)
+				}
 			},
 		},
 	)

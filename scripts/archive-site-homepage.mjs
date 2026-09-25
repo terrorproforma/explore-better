@@ -37,8 +37,20 @@ try {
   if (error.code !== "ENOENT") throw error;
 }
 
-let html = await fs.readFile(sourcePath, "utf8");
+const siteUrl = "https://terrorproforma.github.io/explore-better/";
+const archiveUrl = `${siteUrl}${archiveName}`;
+const archiveTitle = version
+  ? `Explore Better ${version} - Legacy homepage snapshot, ${displayDate}`
+  : `Explore Better - Legacy homepage snapshot, ${displayDate}`;
+const source = await fs.readFile(sourcePath, "utf8");
+let html = source;
 html = html
+  // Structured data would duplicate the live homepage's #website/#software entities.
+  .replace(/[ \t]*<script type="application\/ld\+json">[\s\S]*?<\/script>\r?\n?/g, "")
+  .replace(
+    `<meta property="og:url" content="${siteUrl}" />`,
+    `<meta property="og:url" content="${archiveUrl}" />`
+  )
   .replace(
     /<meta name="robots" content="[^"]+" \/>/,
     '<meta name="robots" content="noindex,nofollow" />'
@@ -49,20 +61,33 @@ html = html
   )
   .replace(
     /<title>[^<]+<\/title>/,
-    `<title>Explore Better - Legacy homepage snapshot, ${displayDate}</title>`
+    `<title>${archiveTitle}</title>`
   )
   .replace(
-    '<link rel="canonical" href="https://terrorproforma.github.io/explore-better/" />',
-    `<link rel="canonical" href="https://terrorproforma.github.io/explore-better/${archiveName}" />`
+    `<link rel="canonical" href="${siteUrl}" />`,
+    `<link rel="canonical" href="${archiveUrl}" />`
   )
   .replace(
     '<body class="pitch-home">',
     `<body class="pitch-home">\n    <aside class="legacy-notice" aria-label="Archived page notice">\n      ${archiveNotice}. All original content is preserved here.\n      <a href="index.html">Return to the current homepage</a>\n    </aside>`
   );
 
-if (!html.includes(archiveNotice) || !html.includes('content="noindex,nofollow"')) {
-  throw new Error("Could not apply the archive notice and indexing protections.");
+if (
+  !html.includes(archiveNotice) ||
+  !html.includes('content="noindex,nofollow"') ||
+  !html.includes(`<title>${archiveTitle}</title>`) ||
+  !html.includes(`<link rel="canonical" href="${archiveUrl}" />`) ||
+  !html.includes(`<meta property="og:url" content="${archiveUrl}" />`) ||
+  html.includes("application/ld+json")
+) {
+  throw new Error("Could not apply the archive notice, title, URLs, and indexing protections.");
 }
 
+// Point the live homepage's "Previous Homepage" footer link at the snapshot just taken.
+const previousLink = /<a href="legacy-[^"]+\.html">Previous Homepage<\/a>/;
+if (!previousLink.test(source)) throw new Error("site/index.html has no Previous Homepage footer link to update.");
+const homepage = source.replace(previousLink, `<a href="${archiveName}">Previous Homepage</a>`);
+
 await fs.writeFile(archivePath, html, "utf8");
-console.log(`Archived site/index.html as site/${archiveName}.`);
+if (homepage !== source) await fs.writeFile(sourcePath, homepage, "utf8");
+console.log(`Archived site/index.html as site/${archiveName} and linked it as the Previous Homepage.`);

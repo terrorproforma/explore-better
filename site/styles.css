@@ -355,7 +355,7 @@ h3 {
 }
 
 .button--ghost img,
-.site-header:not(.scrolled) .nav-toggle img,
+.site-header .nav-toggle img,
 .button--dark img {
   filter: invert(1);
 }
@@ -2039,13 +2039,14 @@ h3 {
   font-size: 0.8rem;
 }
 
-.reveal {
+/* Only hide reveal content once script.js has run, so it stays visible without JS. */
+.js .reveal {
   opacity: 0;
   transform: translateY(24px);
   transition: opacity 520ms ease, transform 520ms ease;
 }
 
-.reveal.visible {
+.js .reveal.visible {
   opacity: 1;
   transform: translateY(0);
 }
@@ -2674,7 +2675,7 @@ h3 {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
-  .reveal {
+  .js .reveal {
     opacity: 1;
     transform: none;
   }

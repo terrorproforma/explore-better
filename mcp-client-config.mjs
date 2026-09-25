@@ -4,18 +4,25 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import { replaceTomlServer, serializeClientEdit, writeClientConfigIfUnchanged } from "./mcp/config-file.mjs";
+import { mcpClientConfigPaths, roamingAppDataRoot } from "./mcp/client-paths.mjs";
+import { renameWithRetry } from "./lib/atomic-write.mjs";
 
 const require = createRequire(import.meta.url);
 const TOML = require("@iarna/toml");
 const { applyEdits, modify, parse, printParseErrorCode } = require("jsonc-parser");
 const serverName = "explore-better";
+const maxBackupsPerClient = 20;
+const byteOrderMark = "﻿";
 
 function localAppData() {
   return process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 }
 
-function roamingAppData() {
-  return process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+// Editors such as Notepad may save configuration with a UTF-8 byte order mark.
+// Parse without it and write it back so the file keeps its encoding.
+function decodeConfig(buffer, fallback) {
+  const text = buffer?.toString("utf8") ?? fallback;
+  return text.startsWith(byteOrderMark) ? { text: text.slice(1), bom: byteOrderMark } : { text, bom: "" };
 }
 
 function sha256(buffer) {
@@ -36,7 +43,7 @@ async function atomicWrite(file, data) {
   const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   try {
     await fs.writeFile(temp, data, { mode: 0o600 });
-    await fs.rename(temp, file);
+    await renameWithRetry(temp, file);
     await fs.chmod(file, 0o600).catch(() => {});
   } finally {
     await fs.rm(temp, { force: true }).catch(() => {});
@@ -50,7 +57,7 @@ function timestamp() {
 export function createMcpClientConfigurator(runtime) {
   const homeDir = runtime.homeDir || os.homedir();
   const localRoot = runtime.localAppData || localAppData();
-  const roamingRoot = runtime.roamingAppData || roamingAppData();
+  const roamingRoot = runtime.roamingAppData || roamingAppDataRoot();
   const root = path.join(localRoot, "ExploreBetter", "MCP");
   const binRoot = path.join(root, "bin");
   const backupRoot = path.join(root, "backups");
@@ -59,12 +66,7 @@ export function createMcpClientConfigurator(runtime) {
   const sourceSidecar = runtime.packaged
     ? path.join(runtime.resourcesPath, "native", "ExploreBetterMcp.exe")
     : path.join(runtime.appPath, "native", "bin", "ExploreBetterMcp.exe");
-  const paths = {
-    codex: path.join(homeDir, ".codex", "config.toml"),
-    claude: path.join(roamingRoot, "Claude", "claude_desktop_config.json"),
-    cursor: path.join(homeDir, ".cursor", "mcp.json"),
-    vscode: path.join(roamingRoot, "Code", "User", "mcp.json")
-  };
+  const paths = mcpClientConfigPaths({ homeDir, roamingAppData: roamingRoot });
 
   function sidecarArgs(profileId) {
     const args = ["--profile", profileId, "--app", runtime.executablePath];
@@ -83,7 +85,18 @@ export function createMcpClientConfigurator(runtime) {
     await fs.mkdir(dir, { recursive: true });
     const target = path.join(dir, `${timestamp()}-${crypto.randomBytes(4).toString("hex")}-${path.basename(file)}.bak`);
     await fs.writeFile(target, existing, { mode: 0o600 });
+    await pruneBackups(dir, target).catch(() => {});
     return { path: target, sha256: sha256(existing), bytes: existing.length };
+  }
+
+  // Timestamped names sort chronologically; keep the newest backups only.
+  async function pruneBackups(dir, keep) {
+    const names = (await fs.readdir(dir)).filter((name) => name.endsWith(".bak")).sort();
+    const stale = names.slice(0, Math.max(0, names.length - maxBackupsPerClient));
+    await Promise.all(stale
+      .map((name) => path.join(dir, name))
+      .filter((file) => file !== keep)
+      .map((file) => fs.rm(file, { force: true })));
   }
 
   async function deploy() {
@@ -131,7 +144,8 @@ export function createMcpClientConfigurator(runtime) {
     const file = paths[client];
     const existing = await readOptional(file);
     if (remove && !existing) return { client, file, installed: false, backup: null, changed: false };
-    const text = existing?.toString("utf8") || "{}\n";
+    const decoded = decodeConfig(existing, "{}\n");
+    const text = decoded.text || "{}\n";
     parseJsonc(text, client);
     const container = ["claude", "cursor"].includes(client) ? "mcpServers" : "servers";
     const value = remove ? undefined : stdioDefinition(client, profileId);
@@ -141,7 +155,7 @@ export function createMcpClientConfigurator(runtime) {
     const updated = applyEdits(text, edits);
     if (updated === text) return { client, file, installed: !remove, backup: null, changed: false };
     const backupRecord = await backup(client, file, existing);
-    await writeClientConfigIfUnchanged(file, Buffer.from(updated, "utf8"), existing);
+    await writeClientConfigIfUnchanged(file, Buffer.from(decoded.bom + updated, "utf8"), existing);
     return { client, file, installed: !remove, backup: backupRecord };
   }
 
@@ -149,11 +163,12 @@ export function createMcpClientConfigurator(runtime) {
     const file = paths.codex;
     const existing = await readOptional(file);
     if (remove && !existing) return { client: "codex", file, installed: false, backup: null, changed: false };
-    const text = existing?.toString("utf8") || "";
+    const decoded = decodeConfig(existing, "");
+    const text = decoded.text;
     const updated = replaceTomlServer(text, serverName, remove ? undefined : stdioDefinition("codex", profileId));
     if (updated === text) return { client: "codex", file, installed: !remove, backup: null, changed: false };
     const backupRecord = await backup("codex", file, existing);
-    await writeClientConfigIfUnchanged(file, Buffer.from(updated, "utf8"), existing);
+    await writeClientConfigIfUnchanged(file, Buffer.from(decoded.bom + updated, "utf8"), existing);
     return { client: "codex", file, installed: !remove, backup: backupRecord };
   }
 
@@ -178,11 +193,12 @@ export function createMcpClientConfigurator(runtime) {
     const existing = await readOptional(paths[client]);
     if (!existing) return { client, file: paths[client], installed: false };
     try {
+      const { text } = decodeConfig(existing, "");
       if (client === "codex") {
-        const document = TOML.parse(existing.toString("utf8"));
+        const document = TOML.parse(text);
         return { client, file: paths[client], installed: Boolean(document.mcp_servers?.[serverName]) };
       }
-      const document = parseJsonc(existing.toString("utf8"), client);
+      const document = parseJsonc(text, client);
       const container = ["claude", "cursor"].includes(client) ? "mcpServers" : "servers";
       return { client, file: paths[client], installed: Boolean(document[container]?.[serverName]) };
     } catch (error) {

@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { createProvenanceTracker } from "./verify-provenance.mjs";
 
 const workspace = process.cwd();
 const artifactsDir = path.join(workspace, "artifacts");
@@ -94,8 +95,16 @@ async function readJsonArtifact(name, checks) {
     generatedAt,
     ageMs
   });
+  // Different-commit evidence is reported separately (and only fails in strict
+  // mode) so the pass/warn summary that goal-stress consumes is unchanged.
+  const provenanceIssue = provenance?.inspect(name, stat);
+  if (provenanceIssue?.kind === "mismatch" && provenance.strict) {
+    checks.push({ area: "evidence", id: `provenance:${name}`, status: "fail", detail: provenanceIssue.detail, path: filePath });
+  }
   return { data, path: filePath, generatedAt, ageMs };
 }
+
+let provenance = null;
 
 function addStatusCheck(checks, area, id, ok, detail, extra = {}) {
   checks.push({
@@ -255,6 +264,7 @@ ${checkRows || "| PASS | all | none | No warnings or failures. |"}
 
 async function main() {
   await fs.mkdir(artifactsDir, { recursive: true });
+  provenance = await createProvenanceTracker(workspace, artifactsDir);
   const checks = [];
   const metrics = [];
   const snapshots = [];
@@ -1468,7 +1478,8 @@ async function main() {
     snapshots,
     metrics,
     hotMetrics: hottestMetrics(metrics, 14),
-    checks
+    checks,
+    provenance: provenance.summary()
   };
 
   await fs.writeFile(latestJsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
@@ -1477,6 +1488,7 @@ async function main() {
   console.log(`hottest metric: ${report.hotMetrics[0]?.name || "n/a"} (${report.hotMetrics[0]?.percentOfBudget ?? "n/a"}% budget)`);
   console.log(`wrote ${latestJsonPath}`);
   console.log(`wrote ${latestMdPath}`);
+  provenance.warn("speed health");
   if (summary.fail > 0) {
     process.exitCode = 1;
   }

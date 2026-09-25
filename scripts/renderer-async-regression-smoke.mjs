@@ -100,6 +100,46 @@ try {
     assert.match(await page.locator('[data-list="left"]').innerText(), /target\.txt/);
     assert.doesNotMatch(await page.locator('[data-list="left"]').innerText(), /stale\.txt/);
   });
+  await test("same-folder-refresh-keeps-running-search", async page => {
+    const old = gate();
+    await page.route("**/api/search", async route => { old.arrive(); await old.allowed; await route.fulfill({ json: result(fixture, "survivor.txt") }).catch(() => {}); });
+    await view(page, "search"); await submit(page, "search"); await old.received;
+    await ui(page, { type: "semantic", actionId: "pane.refresh", pane: "left", inputs: {} });
+    old.release();
+    await page.waitForFunction(() => document.getElementById("search-results").textContent.includes("survivor.txt"));
+    assert.match(await page.locator('[data-list="left"]').innerText(), /survivor\.txt/);
+  });
+  await test("inline-rename-collision-is-rejected-locally", async page => {
+    const renames = [];
+    await page.route("**/api/rename", async route => { renames.push(route.request().postDataJSON()); await route.fulfill({ json: {} }); });
+    await select(page, "alpha.txt"); await page.keyboard.press("F2");
+    const input = page.locator("[data-inline-rename]"); await input.waitFor();
+    await input.fill("BETA.txt"); await input.press("Enter"); await settle(page);
+    assert.equal(renames.length, 0, "a rename onto a sibling's name must not reach the server");
+    assert.equal(await input.count(), 1, "the rename field stays open for correction");
+    await input.fill("ALPHA.txt"); await input.press("Enter");
+    await page.waitForFunction(() => !document.querySelector("[data-inline-rename]"));
+    assert.deepEqual(renames.map(item => item.name), ["ALPHA.txt"], "case-only renames are still allowed");
+  });
+  await test("reopen-closed-tab-failure-keeps-record", async page => {
+    const tabs = page.locator('.pane[data-pane="left"] .tab');
+    await ui(page, { type: "show", pane: "left", path: target, mode: "newTab" });
+    await ui(page, { type: "semantic", actionId: "tab.close", pane: "left", inputs: {} });
+    const tabCount = await tabs.count();
+    let fail = true;
+    await page.route("**/api/list?**", async route => {
+      if (!fail || new URL(route.request().url()).searchParams.get("path") !== target) return route.continue();
+      await route.fulfill({ status: 500, json: { error: "Fixture listing failure" } });
+    });
+    // Age out the renderer's short-lived listing cache so the reopen hits the network.
+    await page.evaluate(() => { const now = Date.now.bind(Date); Date.now = () => now() + 60000; });
+    const reopen = async () => { await page.locator('[data-list="left"]').focus(); await page.keyboard.press("Control+Shift+T"); await settle(page); await page.waitForTimeout(150); };
+    await reopen();
+    assert.equal(await tabs.count(), tabCount, "failed reopen must not leave an empty tab behind");
+    fail = false; await reopen();
+    assert.equal(await tabs.count(), tabCount + 1, "closed-tab record must survive a failed reopen");
+    await page.waitForFunction(() => document.querySelector('[data-list="left"]').innerText.includes("target.txt"));
+  });
   for (const kind of ["bulk", "transfer"]) await test(`${kind}-closed-apply-cannot-submit-new-dialog`, async page => {
     const api = kind === "bulk" ? "bulk-rename" : "transfer", old = gate(), commits = [];
     let defer = false;
@@ -154,7 +194,7 @@ try {
   });
   await test("operation-poll-keeps-keyboard-focus", async page => {
     let completed = 0;
-    await page.route("**/api/state", async route => {
+    await page.route(/\/api\/(state|operations)$/, async route => {
       const response = await route.fetch(), state = await response.json();
       state.operations = [{ id: "fixture-operation", type: "copy", label: "Fixture operation", status: "running", progress: { total: 10, completed }, undo: {} }];
       await route.fulfill({ json: state });
@@ -255,6 +295,25 @@ try {
     await page.evaluate(() => window.__terminal.disposeRelease()); await page.evaluate(() => window.__firstClose);
     const description = await ui(page, { type: "describe", request: { type: "semantic", actionId: "tab.select", pane: "left", inputs: { index: 1 } } });
     assert.ok(description.paths.includes(target), JSON.stringify(description));
+  });
+  await test("tab-group-restore-disposes-replaced-terminals", async page => {
+    await page.locator('[data-terminal-toggle="left"]').click();
+    await page.waitForFunction(() => window.__terminal.creates === 1);
+    await view(page, "tabGroups"); await page.locator("#tab-group-name").fill("Async fixture group"); await submit(page, "tab-group");
+    await page.locator("[data-tab-group-restore]").first().click();
+    await page.waitForFunction(() => window.__terminal.disposes.includes("fixture-1"));
+    await page.waitForFunction(() => window.__terminal.creates === 2);
+  });
+  await test("basket-copy-refuses-virtual-view-target", async page => {
+    const copies = [];
+    await page.route("**/api/copy", async route => { copies.push(route.request().postDataJSON()); await route.fulfill({ json: { copied: [] } }); });
+    await select(page, "alpha.txt"); await view(page, "basket");
+    await page.locator('[data-basket-action="add"]').click();
+    await page.locator('[data-basket-action="open"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-list="left"]')?.textContent.includes("alpha.txt"));
+    await page.locator('[data-basket-action="copy"]').click();
+    await page.waitForFunction(() => /Open a folder to copy basket items into/.test(document.getElementById("toast")?.textContent || ""));
+    assert.equal(copies.length, 0, JSON.stringify(copies));
   });
   const source = await fs.readFile(path.join(root, "public", "app.js"), "utf8");
   try {

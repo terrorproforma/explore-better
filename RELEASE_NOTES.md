@@ -1,6 +1,44 @@
 # Explore Better Release Notes
 
-## Unreleased
+## v0.2.7 - 2026-09-25
+
+### Security
+
+- The desktop backend no longer hands its launch capability to HTTP clients; Electron installs it directly on its own session. Absolute-form request targets are rejected, the capability is compared in constant time, and raw file previews can no longer be loaded as scripts, workers, or stylesheets.
+- File names can no longer inject commands: PowerShell quoting now doubles curly single quotes (U+2018–U+201B), cmd.exe quoting escapes `%`, and `.cmd`/`.bat` launches pass arguments verbatim.
+- Integrated terminals no longer inherit the backend port, host, or capability. Prompt markers carry a per-session nonce, remote UNC folder markers are ignored, and the elevated terminal broker is bound to its launch arguments.
+- AI Bridge: archive creation stays inside allowed roots, UNC paths outside roots are rejected before any network access, sync items and dangling links are authorized individually, and writes to Startup folders and MCP client configuration files are refused.
+- Release builds install and compile without a repository write token, releases are gated on the full Windows CI, and MCP bundle checksums are attested.
+
+### File Safety
+
+- Inline rename refuses to replace an existing item (case-only renames still work), and bulk rename can no longer overwrite a selected item whose name is unchanged.
+- Failed copies keep their completed list, undo, and retry-remaining details. Retry keeps every remaining item instead of the first 500, and concurrent retries of the same operation are refused.
+- Sync applies exactly the items it previewed, overwrite plans cannot replace a folder that contains a source, and same-named sources get unique names instead of blocking the transfer.
+- Archive extraction stages into a hidden sibling folder, and partially created links and shortcuts can be undone.
+- Large non-ASCII text saves, PowerShell output, native helper output, and clipboard paths are decoded as UTF-8 without corrupting characters split across chunks.
+- The elevated delete helper removes junctions and symbolic links without following them.
+- Explorer integration keeps the original shell backup, understands localized `reg.exe` output, writes UTF-16 `.reg` files, restores the shell default first during cleanup, and handles drive-root launches.
+- Renderer saves send only changed fields, so labels and collections changed by the AI Bridge or during moves are no longer reverted.
+
+### Reliability
+
+- Fixed size- and date-filtered searches never showing results, auto-refresh reload loops when a folder watcher is unavailable, Ctrl+W in the terminal closing its tab, stale native-drag drops, column resizing reversing the sort, and orphaned shells after restoring tab groups or layouts.
+- Access-denied folders, missing Open With programs, locked or deleted preview files, and helper crashes no longer produce server errors or crash the backend. A crashed renderer reloads automatically.
+- Folder and state watchers start from canonical long paths, so browsing a folder through an 8.3 short name (for example `C:\PROGRA~1`) no longer aborts the backend.
+- Timed-out scripts stop making changes, custom command timeouts end the whole process tree, and folder watchers recover after errors.
+- Background indexes keep links searchable without reading their targets, watch each root recursively, and reject unsafe root ids.
+
+### Performance
+
+- Operation progress is persisted at most once per second (copying 1,000 files dropped from 111 s to 5 s), and the operations poll uses a lightweight endpoint.
+- Disk Map reports exact allocation from directory metadata, counts hardlinks once, includes cloud and compressed files, handles long paths, and scans small files several times faster.
+- Path autocomplete is debounced and cached, filtering reuses the sorted order, drive probes run in parallel with timeouts, and device inventory is cached.
+- The installer's application archive is 18.8 MB smaller.
+
+### Accessibility
+
+- Keyboard focus is visible on every button, icons remain visible in High Contrast, the context menu is fully keyboard operable, every dialog is named in markup, and reduced-motion preferences are honoured.
 
 ### File Safety And Recovery
 
