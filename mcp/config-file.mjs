@@ -3,6 +3,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import { isDeepStrictEqual } from "node:util";
+import { renameWithRetry } from "../lib/atomic-write.mjs";
 
 const TOML = createRequire(import.meta.url)("@iarna/toml");
 const editChains = new Map();
@@ -16,11 +17,17 @@ export function serializeClientEdit(file, edit) {
 }
 
 export async function writeClientConfigIfUnchanged(file, bytes, expected) {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
+  // A symlinked configuration (for example one kept in a dotfiles folder) is
+  // updated at its real location, so the link itself survives the rename.
+  const target = await fs.realpath(file).catch((error) => {
+    if (error.code === "ENOENT") return file;
+    throw error;
+  });
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const temp = `${target}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
   try {
     await fs.writeFile(temp, bytes, { mode: 0o600 });
-    const current = await fs.readFile(file).catch((error) => {
+    const current = await fs.readFile(target).catch((error) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
@@ -28,14 +35,14 @@ export async function writeClientConfigIfUnchanged(file, bytes, expected) {
       throw Object.assign(new Error("The client configuration changed during setup. Its newer contents were preserved; retry setup."), { code: "CONFIG_CHANGED" });
     }
     if (expected === null) {
-      await fs.link(temp, file).catch((error) => {
+      await fs.link(temp, target).catch((error) => {
         if (error.code === "EEXIST") throw Object.assign(new Error("The client configuration was created by another process during setup. Its contents were preserved; retry setup."), { code: "CONFIG_CHANGED" });
         throw error;
       });
     } else {
-      await fs.rename(temp, file);
+      await renameWithRetry(temp, target);
     }
-    await fs.chmod(file, 0o600).catch(() => {});
+    await fs.chmod(target, 0o600).catch(() => {});
   } finally {
     await fs.rm(temp, { force: true }).catch(() => {});
   }

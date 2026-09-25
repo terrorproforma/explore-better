@@ -3,6 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { renameWithRetry } from "./lib/atomic-write.mjs";
 
 const protocolVersion = 2;
 const maxFrameBytes = 4 * 1024 * 1024;
@@ -20,7 +21,7 @@ async function atomicWriteJson(file, value) {
   const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   try {
     await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    await fs.rename(temp, file);
+    await renameWithRetry(temp, file);
     await fs.chmod(file, 0o600).catch(() => {});
   } finally {
     await fs.rm(temp, { force: true }).catch(() => {});
@@ -216,6 +217,8 @@ export function createMcpBridgeService(options) {
             id: crypto.randomUUID(),
             socket,
             profileId: String(frame.profileId || "").slice(0, 100),
+            // Sidecars send one stable ID per process; the random fallback only
+            // serves clients that omit it, whose plans then end with the pipe.
             sessionId: String(frame.sessionId || crypto.randomUUID()).slice(0, 120),
             clientInfo: frame.clientInfo && typeof frame.clientInfo === "object" ? frame.clientInfo : {},
             clientRoots: Array.isArray(frame.clientRoots) ? frame.clientRoots.slice(0, 100) : [],

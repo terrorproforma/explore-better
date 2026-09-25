@@ -140,7 +140,42 @@ try {
   assert(!(await fs.readdir(temp)).some((name) => name.endsWith(".tmp")), "Failed configuration commits left temporary files behind.");
   assert(claude.includes("existing.exe") && claude.includes("explore-better"), "Claude merge lost unrelated configuration.");
   assert((await fs.stat(configurator.stableSidecar)).size > 1_000_000, "Stable sidecar deployment is missing.");
-  console.log("MCP client setup smoke passed: four adapters, seven delayed-deployment order cases, comment-preserving TOML/JSONC edits, concurrent-edit detection, idempotence, sidecar deployment, and non-destructive removal.");
+
+  // UTF-8 byte order marks (Notepad) are accepted and preserved.
+  await fs.writeFile(configurator.paths.cursor, "﻿{\n  \"mcpServers\": { \"existing\": { \"command\": \"existing.exe\" } }\n}\n");
+  await configurator.install("cursor", "profile-bom");
+  const bomCursor = await fs.readFile(configurator.paths.cursor, "utf8");
+  assert(bomCursor.startsWith("﻿") && bomCursor.includes("profile-bom") && bomCursor.includes("existing.exe"), "A client configuration with a UTF-8 BOM was rejected or lost its BOM.");
+  assert((await configurator.status()).clients.find((client) => client.client === "cursor").installed, "Status could not read a configuration with a UTF-8 BOM.");
+  await fs.writeFile(configurator.paths.codex, `﻿${originalCodex}`);
+  await configurator.install("codex", "profile-bom");
+  const bomCodex = await fs.readFile(configurator.paths.codex, "utf8");
+  assert(bomCodex.startsWith(`﻿${originalCodex}`) && bomCodex.includes("profile-bom"), "A Codex configuration with a UTF-8 BOM was rejected or reformatted.");
+
+  // A symlinked configuration is updated at its real location.
+  const dotfile = path.join(temp, "dotfiles", "claude_desktop_config.json");
+  await fs.mkdir(path.dirname(dotfile), { recursive: true });
+  await fs.writeFile(dotfile, JSON.stringify({ mcpServers: {} }, null, 2));
+  await fs.rm(configurator.paths.claude, { force: true });
+  let symlinked = true;
+  await fs.symlink(dotfile, configurator.paths.claude, "file").catch((error) => {
+    if (!["EPERM", "EACCES"].includes(error.code)) throw error;
+    symlinked = false;
+  });
+  if (symlinked) {
+    await configurator.install("claude", "profile-link");
+    assert((await fs.lstat(configurator.paths.claude)).isSymbolicLink(), "Setup replaced a symlinked client configuration with a plain file.");
+    assert((await fs.readFile(dotfile, "utf8")).includes("profile-link"), "Setup did not update the symlinked configuration's target.");
+  } else {
+    console.log("Skipped symlinked configuration check: creating symbolic links needs Developer Mode or elevation.");
+    await fs.writeFile(configurator.paths.claude, "{}\n");
+  }
+
+  // Backups are capped per client.
+  for (let index = 0; index < 24; index += 1) await configurator.install("claude", `backup-${index}`);
+  const backups = await fs.readdir(path.join(runtime.localAppData, "ExploreBetter", "MCP", "backups", "claude"));
+  assert(backups.length <= 20 && backups.length > 0, `Client configuration backups were not capped: ${backups.length}.`);
+  console.log("MCP client setup smoke passed: four adapters, seven delayed-deployment order cases, comment-preserving TOML/JSONC edits, UTF-8 BOM, symlinked configs, backup retention, concurrent-edit detection, idempotence, sidecar deployment, and non-destructive removal.");
 } finally {
   await removeTreeEventually(temp);
 }
