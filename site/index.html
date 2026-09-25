@@ -67,8 +67,8 @@
             "@id": "https://terrorproforma.github.io/explore-better/#software",
             "name": "Explore Better",
             "url": "https://terrorproforma.github.io/explore-better/",
-            "downloadUrl": "https://github.com/terrorproforma/explore-better/releases/download/v0.2.7/ExploreBetter-0.2.7-x64-setup.exe",
-            "softwareVersion": "0.2.7",
+            "downloadUrl": "https://github.com/terrorproforma/explore-better/releases/download/v0.2.8/ExploreBetter-0.2.8-x64-setup.exe",
+            "softwareVersion": "0.2.8",
             "operatingSystem": "Windows 10, Windows 11 (x64)",
             "applicationCategory": "UtilitiesApplication",
             "applicationSubCategory": "File manager and local MCP server",
@@ -92,7 +92,7 @@
               "https://terrorproforma.github.io/explore-better/assets/disk-map.png",
               "https://terrorproforma.github.io/explore-better/assets/ai-bridge.png"
             ],
-            "releaseNotes": "https://github.com/terrorproforma/explore-better/releases/tag/v0.2.7",
+            "releaseNotes": "https://github.com/terrorproforma/explore-better/releases/tag/v0.2.8",
             "sameAs": ["https://github.com/terrorproforma/explore-better"]
           },
           {
@@ -190,7 +190,7 @@
               <svg class="icon icon--fill" aria-hidden="true"><use href="#i-play" /></svg>
               Watch the demo
             </a>
-            <p class="hero__note">Free and open source (MIT). <span data-release-version>v0.2.7</span> for Windows 10 and 11, x64.</p>
+            <p class="hero__note">Free and open source (MIT). <span data-release-version>v0.2.8</span> for Windows 10 and 11, x64.</p>
           </div>
           <div class="hero__clients">
             <p>One-click setup for</p>
@@ -531,16 +531,16 @@
       <section class="section release" id="release" aria-labelledby="release-title">
         <div class="shell release__layout">
           <div class="section-head section-head--split">
-            <h2 id="release-title">What’s new in <span data-release-version>v0.2.7</span></h2>
-            <p>A hardening release, with a few things you will notice day to day.</p>
-            <p><a class="text-link" href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.7">Full release notes</a></p>
+            <h2 id="release-title">What’s new in <span data-release-version>v0.2.8</span></h2>
+            <p>Large selections are handled in full, on a newer runtime, building on the v0.2.7 hardening release.</p>
+            <p><a class="text-link" href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.8">Full release notes</a></p>
           </div>
           <ul class="release__list">
-            <li><h3>Harder to misuse</h3><p>File names can no longer inject shell commands, terminals no longer inherit backend credentials, and AI writes to Startup folders and client configs are refused.</p></li>
-            <li><h3>Much faster copies</h3><p>Copying 1,000 files dropped from 111 s to 5 s. Disk Map reads exact allocation from directory metadata and counts hardlinks once.</p></li>
-            <li><h3>3D previews</h3><p>Orbit, pan and measure STL and STEP models in the preview pane, tessellated locally.</p></li>
-            <li><h3>Extract Here</h3><p>ZIP files extract into a sibling folder from the right-click menu, staged first and undoable.</p></li>
-            <li><h3>Keyboard and contrast</h3><p>Visible focus on every button, icons that survive High Contrast, and reduced-motion support.</p></li>
+            <li><h3>Every selected item</h3><p>Copies and moves of thousands of items are planned in full. Selections beyond the limit are refused with a clear message instead of being quietly cut short.</p></li>
+            <li><h3>Honest progress</h3><p>A running copy shows its crash-recovery checkpoint as progress, not as a failure.</p></li>
+            <li><h3>Electron 44</h3><p>A current Chromium and Node runtime, with desktop, terminal and update behaviour verified unchanged.</p></li>
+            <li><h3>Harder to misuse <small>(v0.2.7)</small></h3><p>File names can no longer inject shell commands, terminals no longer inherit backend credentials, and AI writes to Startup folders and client configs are refused.</p></li>
+            <li><h3>Much faster copies <small>(v0.2.7)</small></h3><p>Copying 1,000 files dropped from 111 s to 5 s. Disk Map reads exact allocation from directory metadata and counts hardlinks once.</p></li>
           </ul>
         </div>
       </section>
@@ -552,7 +552,7 @@
             <p>Free and open source under the MIT license. The installer is per-user, normal use needs no administrator rights, and File Explorer stays installed.</p>
             <dl class="props props--compact">
               <div><dt>System</dt><dd>Windows 10 or 11, x64</dd></div>
-              <div><dt>Size</dt><dd data-installer-size>105.3 MiB</dd></div>
+              <div><dt>Size</dt><dd data-installer-size>115.1 MiB</dd></div>
               <div><dt>Hosted on</dt><dd>GitHub Releases</dd></div>
             </dl>
           </div>
@@ -564,18 +564,18 @@
             </div>
             <a
               class="button button--primary button--wide"
-              href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.7/ExploreBetter-0.2.7-x64-setup.exe"
+              href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.8/ExploreBetter-0.2.8-x64-setup.exe"
               aria-describedby="unsigned-preview-note"
             >
               <svg class="icon" aria-hidden="true"><use href="#i-download" /></svg>
-              Download Explore Better v0.2.7
+              Download Explore Better v0.2.8
             </a>
 
             <ol class="verify">
               <li>
                 <p>In PowerShell, from the folder you downloaded to, run:</p>
                 <div class="copy-field">
-                  <code data-verify-command>Get-FileHash .\ExploreBetter-0.2.7-x64-setup.exe -Algorithm SHA256</code>
+                  <code data-verify-command>Get-FileHash .\ExploreBetter-0.2.8-x64-setup.exe -Algorithm SHA256</code>
                   <button
                     class="copy-button"
                     type="button"
@@ -591,9 +591,9 @@
                 <small class="copy-status" data-command-copy-status aria-live="polite"></small>
               </li>
               <li>
-                <p>Check that the hash it prints matches this one, also listed in <a href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.7/SHA256SUMS.txt">SHA256SUMS.txt</a>:</p>
+                <p>Check that the hash it prints matches this one, also listed in <a href="https://github.com/terrorproforma/explore-better/releases/download/v0.2.8/SHA256SUMS.txt">SHA256SUMS.txt</a>:</p>
                 <div class="copy-field copy-field--hash">
-                  <code data-checksum>6dbcdbaa72502b7aa196af62be887b051426735f3548f5e237c6cb703a3943d2</code>
+                  <code data-checksum>928cb8d35becea11ddc4ef0c68f061b3b2a13d49da044be20ae7396942ea786c</code>
                   <button
                     class="copy-button"
                     type="button"
@@ -614,8 +614,8 @@
             </ol>
 
             <div class="release-links">
-              <a href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.7">Release notes</a>
-              <a href="https://github.com/terrorproforma/explore-better/tree/v0.2.7">Source at v0.2.7</a>
+              <a href="https://github.com/terrorproforma/explore-better/releases/tag/v0.2.8">Release notes</a>
+              <a href="https://github.com/terrorproforma/explore-better/tree/v0.2.8">Source at v0.2.8</a>
               <a href="integrations/">Connect an AI client</a>
             </div>
           </div>
