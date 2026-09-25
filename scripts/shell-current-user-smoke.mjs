@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { createServer } from "node:net";
+import os from "node:os";
 import path from "node:path";
 
 const workspace = process.cwd();
@@ -28,6 +29,26 @@ const registryKeys = [
   "HKCU\\Software\\Classes\\*\\shell\\ExploreBetterLocation\\command"
 ];
 let serverOutput = "";
+
+// This smoke writes to the real HKCU shell keys, so it only runs when explicitly
+// allowed. A reg export of every touched key is kept in a fixed location so a
+// run that is force-killed before its finally block is repaired on the next run.
+const allowRealHkcu = process.env.EB_ALLOW_REAL_HKCU === "1" || Boolean(process.env.CI);
+const crashBackupDir = path.join(
+  process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
+  "ExploreBetter",
+  "test-backups",
+  "shell-current-user-smoke"
+);
+const crashManifestPath = path.join(crashBackupDir, "manifest.json");
+const crashBackupRoots = [
+  { key: "HKCU\\Software\\Classes\\Directory\\shell", shellRoot: true },
+  { key: "HKCU\\Software\\Classes\\Drive\\shell", shellRoot: true },
+  { key: "HKCU\\Software\\Classes\\Directory\\Background\\shell\\ExploreBetter", shellRoot: false },
+  { key: "HKCU\\Software\\Classes\\*\\shell\\ExploreBetterLocation", shellRoot: false }
+];
+let crashBackupActive = false;
+let activeServer = null;
 
 function optionValue(name, fallback = "") {
   const prefix = `${name}=`;
@@ -359,6 +380,74 @@ async function deleteRegistryKeyIfAbsentBefore(key, before) {
   throw new Error(`reg delete failed for ${key}: ${result.stderr || result.stdout || result.error || result.code}`);
 }
 
+async function registryKeyExists(key) {
+  return (await runCommand("reg.exe", ["query", key], { timeoutMs: 20000 })).code === 0;
+}
+
+// Exports every touched key (with subkeys) before the smoke changes anything.
+async function writeCrashBackup() {
+  await fs.mkdir(crashBackupDir, { recursive: true });
+  const keys = [];
+  for (const [index, root] of crashBackupRoots.entries()) {
+    const file = path.join(crashBackupDir, `key-${index}.reg`);
+    await fs.rm(file, { force: true });
+    const existed = await registryKeyExists(root.key);
+    if (existed) {
+      const result = await runCommand("reg.exe", ["export", root.key, file, "/y"], { timeoutMs: 20000 });
+      if (result.code !== 0) {
+        throw new Error(`reg export failed for ${root.key}: ${result.stderr || result.stdout || result.error || result.code}`);
+      }
+    }
+    keys.push({ ...root, existed, file: existed ? file : null });
+  }
+  await fs.writeFile(
+    crashManifestPath,
+    JSON.stringify({ createdAt: new Date().toISOString(), pid: process.pid, keys }, null, 2),
+    "utf8"
+  );
+  crashBackupActive = true;
+}
+
+async function clearCrashBackup() {
+  await fs.rm(crashBackupDir, { recursive: true, force: true });
+  crashBackupActive = false;
+}
+
+// Puts the exported keys back: drops what the smoke may have added (Explore
+// Better verbs, folder/drive defaults) and re-imports the original export.
+async function restoreFromCrashBackup() {
+  const manifest = JSON.parse(await fs.readFile(crashManifestPath, "utf8"));
+  const quiet = (args) => runCommand("reg.exe", args, { timeoutMs: 20000 });
+  for (const entry of manifest.keys || []) {
+    if (entry.shellRoot) {
+      await quiet(["delete", `${entry.key}\\ExploreBetter`, "/f"]);
+      await quiet(["delete", entry.key, entry.existed ? "/ve" : null, "/f"].filter(Boolean));
+    } else {
+      await quiet(["delete", entry.key, "/f"]);
+    }
+    if (entry.existed) {
+      await importRegistryFile(entry.file);
+    }
+  }
+  await clearCrashBackup();
+}
+
+async function emergencyRestore(signal) {
+  console.error(`current-user shell smoke: received ${signal}; restoring HKCU shell keys.`);
+  try {
+    activeServer?.kill();
+  } catch {}
+  try {
+    if (crashBackupActive) {
+      await restoreFromCrashBackup();
+    }
+  } catch (error) {
+    console.error(`HKCU restore failed; the export remains in ${crashBackupDir}: ${error.stack || error.message}`);
+  } finally {
+    process.exit(130);
+  }
+}
+
 function markdownReport(report) {
   const lines = [
     "# Explore Better Current-User Shell Smoke",
@@ -387,6 +476,21 @@ function markdownReport(report) {
 }
 
 async function main() {
+  if (!allowRealHkcu) {
+    console.log(
+      "current-user shell smoke: skipped. It modifies the real HKCU shell keys; set EB_ALLOW_REAL_HKCU=1 (or run in CI) to allow it."
+    );
+    return;
+  }
+  if (await pathExists(crashManifestPath)) {
+    console.warn(`current-user shell smoke: a previous run did not finish; restoring HKCU from ${crashBackupDir}.`);
+    crashBackupActive = true;
+    await restoreFromCrashBackup();
+  }
+  for (const signal of ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"]) {
+    process.on(signal, () => emergencyRestore(signal));
+  }
+
   const checks = [];
   await fs.mkdir(artifactsDir, { recursive: true });
   await fs.mkdir(localAppData, { recursive: true });
@@ -397,7 +501,9 @@ async function main() {
 
   const port = Number(optionValue("--port", process.env.PORT || String(await availablePort())));
   const baseUrl = `http://127.0.0.1:${port}`;
+  await writeCrashBackup();
   const server = startServer(port);
+  activeServer = server;
   let beforeSnapshot = null;
   let afterApplySnapshot = null;
   let apiRestoreSnapshot = null;
@@ -632,13 +738,30 @@ async function main() {
       method: "POST",
       body: JSON.stringify({ mode: "removeFolderDefault" })
     });
+    const sameDefault = (field) =>
+      String(apiRestore.status?.registry?.[field] || "") === String(beforeStatus?.registry?.[field] || "");
+    requireCheck(
+      checks,
+      apiRestore.restoredBackup === true &&
+        apiRestore.partial === true &&
+        sameDefault("directoryDefault") &&
+        sameDefault("driveDefault") &&
+        apiRestore.status?.registry?.contextMenuInstalled === true,
+      "api-restores-original-default",
+      "Default removal restores only the original folder and drive defaults",
+      `directory=${apiRestore.status?.registry?.directoryDefault} drive=${apiRestore.status?.registry?.driveDefault} context=${apiRestore.status?.registry?.contextMenuInstalled}`
+    );
+    const fullRestore = await requestJson(baseUrl, "/api/integration/restore", {
+      method: "POST",
+      body: JSON.stringify({ mode: "restore" })
+    });
     apiRestoreSnapshot = await registrySnapshot();
     requireCheck(
       checks,
-      apiRestore.restoredBackup === true && registrySnapshotsMatch(beforeSnapshot, apiRestoreSnapshot).length === 0,
+      fullRestore.ok === true && registrySnapshotsMatch(beforeSnapshot, apiRestoreSnapshot).length === 0,
       "api-restores-original-shell",
-      "Default removal restores the exact original HKCU shell snapshot",
-      apiRestore.restoredBackup === true ? "Before/restore snapshots match" : "Backup restore was not used"
+      "Full shell restore returns the exact original HKCU shell snapshot",
+      fullRestore.ok === true ? "Before/restore snapshots match" : "Backup restore was not used"
     );
   } catch (error) {
     addCheck(checks, "fail", "current-user-shell-install", "Current-user shell install phase", error.stack || error.message);
@@ -674,6 +797,22 @@ async function main() {
       addCheck(checks, "fail", "post-restore-status", "Read post-restore shell status", error.stack || error.message);
     }
     await stopServer(server);
+    activeServer = null;
+
+    // Safety net: if the app-level restore did not return HKCU to its original
+    // state, fall back to the reg export taken before the run.
+    try {
+      if (crashBackupActive) {
+        const leftover = !restored || !afterRestoreSnapshot || registrySnapshotsMatch(beforeSnapshot, afterRestoreSnapshot).length > 0;
+        if (leftover) {
+          await restoreFromCrashBackup();
+        } else {
+          await clearCrashBackup();
+        }
+      }
+    } catch (error) {
+      addCheck(checks, "fail", "crash-backup-restore", "Restore HKCU shell keys from the reg export backup", error.stack || error.message);
+    }
   }
 
   const mismatchedKeys = registrySnapshotsMatch(beforeSnapshot, afterRestoreSnapshot);

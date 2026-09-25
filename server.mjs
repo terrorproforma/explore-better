@@ -13,6 +13,7 @@ import { pipeline } from "node:stream/promises";
 import { StringDecoder } from "node:string_decoder";
 import { powerShellLiteral as quotePowerShellLiteral, cmdQuote } from "./lib/shell-quote.mjs";
 import { pathSnapshot, validSnapshot, decodeEditableText, encodeEditableText, readEditableTextFile, assertSafeDestination, physicalPath, insidePath, durableWrite, replaceFileTransaction, sameFileIdentity } from "./filesystem-integrity.mjs";
+import * as shellRegistry from "./lib/shell-registry.mjs";
 
 const require = createRequire(import.meta.url);
 const yauzl = require("yauzl");
@@ -13670,22 +13671,26 @@ async function registryKeyExists(key) {
   return result.code === 0;
 }
 
-function parseRegistryValue(stdout, name = null) {
-  const label = name || "(Default)";
-  const pattern = new RegExp(`^\\s*${escapeRegex(label)}\\s+(REG_\\w+)\\s*(.*)$`, "i");
-  for (const line of String(stdout || "").split(/\r?\n/)) {
-    const match = line.match(pattern);
-    if (!match) {
-      continue;
-    }
-    const type = match[1];
-    const value = (match[2] || "").trim();
-    if (!value || value === "(value not set)") {
-      return { valueExists: false, type, value: null };
-    }
-    return { valueExists: true, type, value };
+// Queries one value with reg.exe without relying on the localized "(Default)" and
+// "(value not set)" labels. Returns null when the key (or named value) is missing.
+async function queryRegistryValue(key, name = null) {
+  const args = ["query", key, name ? "/v" : "/ve"];
+  if (name) {
+    args.push(name);
   }
-  return { valueExists: false, type: null, value: null };
+  const result = await runProcess("reg.exe", args);
+  if (result.code !== 0) {
+    return null;
+  }
+  let listing = null;
+  if (!name) {
+    const parsed = shellRegistry.parseRegQueryValue(result.stdout);
+    if (parsed && shellRegistry.regDataMayBeNotSetPlaceholder(parsed.data)) {
+      const full = await runProcess("reg.exe", ["query", key]);
+      listing = full.code === 0 ? full.stdout : null;
+    }
+  }
+  return shellRegistry.resolveRegistryValue(result.stdout, name, listing);
 }
 
 async function readRegistryValueSnapshot(key, name = null) {
@@ -13693,15 +13698,8 @@ async function readRegistryValueSnapshot(key, name = null) {
   if (!keyExists) {
     return { keyExists: false, valueExists: false, type: null, value: null };
   }
-  const args = ["query", key, name ? "/v" : "/ve"];
-  if (name) {
-    args.push(name);
-  }
-  const result = await runProcess("reg.exe", args);
-  if (result.code !== 0) {
-    return { keyExists: true, valueExists: false, type: null, value: null };
-  }
-  return { keyExists: true, ...parseRegistryValue(result.stdout, name) };
+  const value = await queryRegistryValue(key, name);
+  return { keyExists: true, ...(value || { valueExists: false, type: null, value: null }) };
 }
 
 async function createShellRegistryEntry(spec) {
@@ -13734,11 +13732,46 @@ function absentShellRegistryEntry(spec) {
   };
 }
 
-async function createShellRegistryBackup(mode = "manual") {
-  const entries = [];
-  for (const spec of shellRegistrySnapshotSpec) {
-    entries.push(await createShellRegistryEntry(spec));
+// Snapshots registry entries in one PowerShell/.NET read so values survive
+// non-ASCII text exactly; falls back to per-value reg.exe queries.
+async function createShellRegistryEntries(specs) {
+  try {
+    const requests = specs.flatMap((spec) => spec.values.map((valueSpec) => ({ key: spec.key, name: valueSpec.name })));
+    const result = await shellRegistry.runProcessUtf8(
+      "powershell.exe",
+      shellRegistry.powerShellEncodedArgs(shellRegistry.registrySnapshotScript(requests)),
+      { timeoutMs: 30000 }
+    );
+    if (result.code !== 0) {
+      throw new Error(result.stderr || `Registry snapshot exited with ${result.code}`);
+    }
+    const rows = shellRegistry.parseRegistrySnapshotOutput(result.stdout, requests.length);
+    let index = 0;
+    return specs.map((spec) => {
+      const values = {};
+      for (const valueSpec of spec.values) {
+        values[valueSpec.id] = rows[index];
+        index += 1;
+      }
+      return {
+        id: spec.id,
+        key: spec.key,
+        kind: spec.kind,
+        keyExists: Object.values(values).some((value) => value.keyExists),
+        values
+      };
+    });
+  } catch {
+    const entries = [];
+    for (const spec of specs) {
+      entries.push(await createShellRegistryEntry(spec));
+    }
+    return entries;
   }
+}
+
+async function createShellRegistryBackup(mode = "manual") {
+  const entries = await createShellRegistryEntries(shellRegistrySnapshotSpec);
   return {
     version: 2,
     id: crypto.randomUUID(),
@@ -13748,7 +13781,7 @@ async function createShellRegistryBackup(mode = "manual") {
   };
 }
 
-function shellRestoreRegistryContent(backup) {
+function shellRestoreRegistryContent(backup, entryIds = null) {
   const lines = [
     "Windows Registry Editor Version 5.00",
     "",
@@ -13757,7 +13790,7 @@ function shellRestoreRegistryContent(backup) {
   ];
   for (const entry of backup?.entries || []) {
     const spec = shellRegistrySnapshotSpec.find((item) => item.id === entry.id);
-    if (!spec) {
+    if (!spec || (entryIds && !entryIds.includes(entry.id))) {
       continue;
     }
     lines.push("");
@@ -13774,33 +13807,60 @@ function shellRestoreRegistryContent(backup) {
   return lines.join("\r\n");
 }
 
-async function writeShellRestoreFile(backup) {
-  const paths = integrationPaths();
+async function writeRegistryFile(filePath, content) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, shellRegistry.registryFileBuffer(content));
+  return filePath;
+}
+
+async function writeShellRestoreFile(backup, { entryIds = null, filePath = integrationPaths().registryRestoreRegPath } = {}) {
   await fs.mkdir(integrationRoot, { recursive: true });
-  await fs.writeFile(paths.registryRestoreRegPath, shellRestoreRegistryContent(backup), "utf8");
-  return paths.registryRestoreRegPath;
+  return writeRegistryFile(filePath, shellRestoreRegistryContent(backup, entryIds));
+}
+
+// Captures the current shell state. It only becomes the stored original backup
+// when no unrestored original exists and Explore Better is not already the
+// default; otherwise it is kept separately as registrySnapshot for reference.
+async function captureShellRegistryBackup(mode = "manual") {
+  const snapshot = await createShellRegistryBackup(mode);
+  const restoreRegPath = integrationPaths().registryRestoreRegPath;
+  const outcome = await mutateState((state) => {
+    const existing = state.integration?.registryBackup || null;
+    const plan = shellRegistry.planShellBackupSave({ existing, snapshot });
+    if (plan.action === "replace") {
+      const savedBackup = { ...snapshot, restoreRegPath };
+      state.integration = {
+        ...state.integration,
+        registryBackup: savedBackup
+      };
+      return { action: plan.action, reason: plan.reason, backup: savedBackup, snapshot: savedBackup };
+    }
+    const latestSnapshot = { ...snapshot, original: false, reason: plan.reason };
+    state.integration = {
+      ...state.integration,
+      registrySnapshot: latestSnapshot
+    };
+    return {
+      action: plan.action,
+      reason: plan.reason,
+      backup: existing?.entries?.length ? existing : null,
+      snapshot: latestSnapshot
+    };
+  });
+  if (outcome.action === "replace") {
+    await writeShellRestoreFile(outcome.backup);
+  }
+  return outcome;
 }
 
 async function saveShellRegistryBackup(mode = "manual") {
-  const backup = await createShellRegistryBackup(mode);
-  const restoreRegPath = await writeShellRestoreFile(backup);
-  const savedBackup = {
-    ...backup,
-    restoreRegPath
-  };
-  await mutateState((state) => {
-    state.integration = {
-      ...state.integration,
-      registryBackup: savedBackup
-    };
-  });
-  return savedBackup;
+  return (await captureShellRegistryBackup(mode)).backup;
 }
 
 async function ensureShellRegistryBackup(mode = "integration") {
   const state = await readState();
   const existing = state.integration?.registryBackup;
-  if (existing?.entries?.length && !existing.restoredAt) {
+  if (shellRegistry.hasUnrestoredShellBackup(existing)) {
     const existingIds = new Set(existing.entries.map((entry) => entry.id));
     const missingSpecs = shellRegistrySnapshotSpec.filter((spec) => !existingIds.has(spec.id));
     if (!missingSpecs.length) return existing;
@@ -13808,11 +13868,8 @@ async function ensureShellRegistryBackup(mode = "integration") {
       ...existing,
       version: 2,
       upgradedAt: new Date().toISOString(),
-      entries: [...existing.entries]
+      entries: [...existing.entries, ...(await createShellRegistryEntries(missingSpecs))]
     };
-    for (const spec of missingSpecs) {
-      upgraded.entries.push(await createShellRegistryEntry(spec));
-    }
     upgraded.restoreRegPath = await writeShellRestoreFile(upgraded);
     await mutateState((nextState) => {
       nextState.integration = {
@@ -13846,7 +13903,30 @@ async function removeRegistryKeyWhenEmpty(key) {
   return { key, removed: true, empty: true };
 }
 
-async function restoreShellRegistryBackup() {
+// A restore must never leave Explore Better as the folder/drive default (for
+// example from a backup captured by an older build while it was already the
+// default); reset just those defaults back to Explorer when that happens.
+async function resetExploreBetterFolderDefaultIfStillSet() {
+  const stillDefault = [];
+  for (const key of ["HKCU\\Software\\Classes\\Directory\\shell", "HKCU\\Software\\Classes\\Drive\\shell"]) {
+    if (shellRegistry.isExploreBetterShellDefault(await readRegistryDefault(key))) {
+      stillDefault.push(key);
+    }
+  }
+  if (!stillDefault.length) {
+    return null;
+  }
+  const resetPath = await writeRegistryFile(
+    path.join(integrationRoot, "reset-folder-default.reg"),
+    shellRegistry.folderDefaultResetRegistryContent()
+  );
+  return { ...(await importRegistryFile(resetPath)), keys: stillDefault };
+}
+
+// entryIds limits the restore to those backup entries (used to put back only the
+// folder/drive default handlers while keeping later context-menu installs).
+async function restoreShellRegistryBackup({ entryIds = null } = {}) {
+  const partial = Array.isArray(entryIds);
   const state = await readState();
   let backup = state.integration?.registryBackup;
   if (!backup?.entries?.length) {
@@ -13866,30 +13946,46 @@ async function restoreShellRegistryBackup() {
       entries: [...backup.entries, ...legacyMissingSpecs.map(absentShellRegistryEntry)]
     };
   }
-  const restoreRegPath = await writeShellRestoreFile(backup);
+  const restoreRegPath = partial
+    ? await writeShellRestoreFile(backup, {
+        entryIds,
+        filePath: path.join(integrationRoot, "restore-previous-folder-default.reg")
+      })
+    : await writeShellRestoreFile(backup);
   const result = await importRegistryFile(restoreRegPath);
   const emptyKeyCleanup = [];
   for (const entry of backup.entries) {
+    if (partial && !entryIds.includes(entry.id)) {
+      continue;
+    }
     if (entry.kind === "defaultOnly" && !entry.keyExists) {
       emptyKeyCleanup.push(await removeRegistryKeyWhenEmpty(entry.key));
     }
   }
+  const folderDefaultReset = await resetExploreBetterFolderDefaultIfStillSet();
   const restoredAt = new Date().toISOString();
   await mutateState((nextState) => {
     nextState.integration = {
       ...nextState.integration,
-      registryBackup: {
-        ...backup,
-        restoreRegPath,
-        restoredAt
-      }
+      // A partial restore leaves the original backup unrestored so a later full
+      // restore (or cleanup) can still return every captured entry.
+      registryBackup: partial
+        ? { ...backup, defaultsRestoredAt: restoredAt }
+        : {
+            ...backup,
+            restoreRegPath,
+            restoredAt
+          }
     };
   });
   return {
     ...result,
     restoredAt,
     backupId: backup.id,
-    emptyKeyCleanup
+    partial,
+    entryIds: partial ? entryIds : null,
+    emptyKeyCleanup,
+    folderDefaultReset
   };
 }
 
@@ -13995,16 +14091,23 @@ async function installPackagedApp() {
   if (!(await pathExists(packagedAppCandidatePath()))) {
     throw new Error("Build the unpacked desktop app first with npm run package:dir.");
   }
+  await shellRegistry.cleanStaleInstallDirectories(installedAppRoot);
   const stagingRoot = `${installedAppRoot}.staging-${Date.now()}`;
-  await fs.rm(stagingRoot, { recursive: true, force: true });
   await fs.mkdir(path.dirname(stagingRoot), { recursive: true });
-  await fs.cp(sourceRoot, stagingRoot, {
-    recursive: true,
-    force: true,
-    verbatimSymlinks: true
+  try {
+    await fs.cp(sourceRoot, stagingRoot, {
+      recursive: true,
+      force: true,
+      verbatimSymlinks: true
+    });
+  } catch (error) {
+    await fs.rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+  // Never delete the live copy first: a locked executable would leave a broken install.
+  await shellRegistry.swapInstalledDirectory(installedAppRoot, stagingRoot, {
+    rename: (source, dest) => renamePathWithRetry(source, dest, 12)
   });
-  await fs.rm(installedAppRoot, { recursive: true, force: true });
-  await renamePathWithRetry(stagingRoot, installedAppRoot, 12);
   const installed = installedAppPath();
   await mutateState((state) => {
     state.integration = {
@@ -14023,7 +14126,13 @@ async function installPackagedApp() {
 }
 
 async function removeInstalledApp() {
-  await fs.rm(installedAppRoot, { recursive: true, force: true });
+  // Move the copy aside first so a locked file cannot leave a half-deleted install.
+  if (await pathExists(installedAppRoot)) {
+    const removedRoot = `${installedAppRoot}.old-${Date.now()}`;
+    await renamePathWithRetry(installedAppRoot, removedRoot, 12);
+    await fs.rm(removedRoot, { recursive: true, force: true }).catch(() => {});
+  }
+  await shellRegistry.cleanStaleInstallDirectories(installedAppRoot);
   await mutateState((state) => {
     state.integration = {
       ...state.integration,
@@ -14060,19 +14169,23 @@ async function writeIntegrationFiles() {
   const shellCommand = integrationShellCommand(launcherPath, launchMode, shellOpenMode);
   const backgroundShellCommand = integrationShellCommand(launcherPath, launchMode, shellOpenMode, "%V");
   const shellIcon = shellCommand.kind === "launcher" ? "imageres.dll,-5302" : shellCommand.target;
+  // Paths are emitted as single-quoted literals: no $/backtick expansion and no
+  // backslash doubling (PowerShell does not treat backslash as an escape).
+  const psLiteral = shellRegistry.powerShellLiteral;
   const scriptContent = `param(
   [string]$TargetPath = $PWD.Path,
   [switch]$DefaultBrowser
 )
 
 $ErrorActionPreference = "Stop"
-$RepoPath = "${repoPath.replaceAll("\\", "\\\\")}"
+${shellRegistry.launcherTargetNormalizationPs}
+$RepoPath = ${psLiteral(repoPath)}
 $Port = ${port}
 $DefaultLaunchMode = "${launchMode}"
 $ShellOpenMode = "${shellOpenMode}"
 $AppProfile = Join-Path $env:LOCALAPPDATA "ExploreBetter\\AppWindowProfile"
-$DesktopApp = "${String(desktopExecutable || "").replaceAll("\\", "\\\\")}"
-$InstalledApp = "${installedAppPath().replaceAll("\\", "\\\\")}"
+$DesktopApp = ${psLiteral(String(desktopExecutable || ""))}
+$InstalledApp = ${psLiteral(installedAppPath())}
 $PackagedApp = Join-Path $RepoPath "dist\\win-unpacked\\Explore Better.exe"
 $ElectronLauncher = Join-Path $RepoPath "node_modules\\.bin\\electron.cmd"
 $ResolvedTarget = (Resolve-Path -LiteralPath $TargetPath).Path
@@ -14169,9 +14282,9 @@ Start-Process $Url
 )
 
 $ErrorActionPreference = "Stop"
-$RepoPath = "${repoPath.replaceAll("\\", "\\\\")}"
+$RepoPath = ${psLiteral(repoPath)}
 $Port = ${port}
-$Launcher = "${launcherPath.replaceAll("\\", "\\\\")}"
+$Launcher = ${psLiteral(launcherPath)}
 
 try {
   Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$Port/api/roots" -TimeoutSec 1 | Out-Null
@@ -14190,14 +14303,14 @@ if ($Open) {
 )
 
 $ErrorActionPreference = "Stop"
-$Launcher = "${launcherPath.replaceAll("\\", "\\\\")}"
-$DesktopApp = "${String(desktopExecutable || "").replaceAll("\\", "\\\\")}"
-$InstalledApp = "${installedAppPath().replaceAll("\\", "\\\\")}"
-$PackagedApp = "${packagedAppCandidatePath().replaceAll("\\", "\\\\")}"
-$BrandIcon = "${path.join(repoPath, "build", "icon.ico").replaceAll("\\", "\\\\")}"
+$Launcher = ${psLiteral(launcherPath)}
+$DesktopApp = ${psLiteral(String(desktopExecutable || ""))}
+$InstalledApp = ${psLiteral(installedAppPath())}
+$PackagedApp = ${psLiteral(packagedAppCandidatePath())}
+$BrandIcon = ${psLiteral(path.join(repoPath, "build", "icon.ico"))}
 $ShellOpenMode = "${shellOpenMode}"
 $StartMenuDir = Join-Path $env:APPDATA "Microsoft\\Windows\\Start Menu\\Programs\\Explore Better"
-$DesktopDir = "${desktopDir.replaceAll("\\", "\\\\")}"
+$DesktopDir = ${psLiteral(desktopDir)}
 $Shell = New-Object -ComObject WScript.Shell
 
 New-Item -ItemType Directory -Force -Path $StartMenuDir | Out-Null
@@ -14233,10 +14346,10 @@ function New-ExploreBetterShortcut {
   $shortcut.Save()
 }
 
-New-ExploreBetterShortcut -ShortcutPath (Join-Path $StartMenuDir "Explore Better.lnk") -TargetPath "${repoPath.replaceAll("\\", "\\\\")}"
+New-ExploreBetterShortcut -ShortcutPath (Join-Path $StartMenuDir "Explore Better.lnk") -TargetPath ${psLiteral(repoPath)}
 
 if ($Desktop) {
-  New-ExploreBetterShortcut -ShortcutPath (Join-Path $DesktopDir "Explore Better.lnk") -TargetPath "${repoPath.replaceAll("\\", "\\\\")}"
+  New-ExploreBetterShortcut -ShortcutPath (Join-Path $DesktopDir "Explore Better.lnk") -TargetPath ${psLiteral(repoPath)}
 }
 
 Write-Output "Shortcuts installed in $StartMenuDir"
@@ -14245,7 +14358,7 @@ Write-Output "Shortcuts installed in $StartMenuDir"
   const shortcutRemoveScriptContent = `$ErrorActionPreference = "Stop"
 $StartMenuDir = Join-Path $env:APPDATA "Microsoft\\Windows\\Start Menu\\Programs\\Explore Better"
 $StartMenuShortcut = Join-Path $StartMenuDir "Explore Better.lnk"
-$DesktopShortcut = Join-Path "${desktopDir.replaceAll("\\", "\\\\")}" "Explore Better.lnk"
+$DesktopShortcut = Join-Path ${psLiteral(desktopDir)} "Explore Better.lnk"
 $Removed = @()
 
 foreach ($ShortcutPath in @($StartMenuShortcut, $DesktopShortcut)) {
@@ -14268,7 +14381,7 @@ if ($Removed.Count) {
 `;
 
   const winEHotkeyContent = `$ErrorActionPreference = "Stop"
-$Launcher = "${launcherPath.replaceAll("\\", "\\\\")}"
+$Launcher = ${psLiteral(launcherPath)}
 $DefaultTarget = [Environment]::GetFolderPath("UserProfile")
 $HotkeyId = 4627
 $ModWin = 0x0008
@@ -14319,8 +14432,8 @@ try {
 `;
 
   const winEInstallScriptContent = `$ErrorActionPreference = "Stop"
-$HotkeyScript = "${winEHotkeyPath.replaceAll("\\", "\\\\")}"
-$BrandIcon = "${path.join(repoPath, "build", "icon.ico").replaceAll("\\", "\\\\")}"
+$HotkeyScript = ${psLiteral(winEHotkeyPath)}
+$BrandIcon = ${psLiteral(path.join(repoPath, "build", "icon.ico"))}
 $RoamingRoot = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $env:USERPROFILE "AppData\\Roaming" }
 $StartupDir = Join-Path $RoamingRoot "Microsoft\\Windows\\Start Menu\\Programs\\Startup"
 $ShortcutPath = Join-Path $StartupDir "Explore Better Win+E.lnk"
@@ -14469,22 +14582,24 @@ ${winERemoveScriptPath}
 The Win+E helper is optional. It installs a current-user Startup shortcut to a resident PowerShell hotkey listener and can be removed without touching registry defaults.
 
 Launch behavior:
-Native Window mode opens the installed current-user app from ${installedAppRoot.replaceAll("\\", "\\\\")} when available, then a packaged Explore Better desktop app from dist\\win-unpacked, then the optional Electron development launcher at node_modules\\.bin\\electron.cmd. App Window mode starts the local Node server if needed and opens Edge/Chrome app mode when available. Browser Tab mode or missing optional launchers fall back to the default browser.
+Native Window mode opens the installed current-user app from ${installedAppRoot} when available, then a packaged Explore Better desktop app from dist\\win-unpacked, then the optional Electron development launcher at node_modules\\.bin\\electron.cmd. App Window mode starts the local Node server if needed and opens Edge/Chrome app mode when available. Browser Tab mode or missing optional launchers fall back to the default browser.
 Shell-open mode:
 The generated launcher currently uses shell mode "${shellOpenMode}". Change this from the Explorer Integration dialog and regenerate files.
 `;
 
-  await fs.writeFile(launcherPath, scriptContent, "utf8");
-  await fs.writeFile(serverScriptPath, serverScriptContent, "utf8");
-  await fs.writeFile(shortcutScriptPath, shortcutScriptContent, "utf8");
-  await fs.writeFile(shortcutRemoveScriptPath, shortcutRemoveScriptContent, "utf8");
-  await fs.writeFile(winEHotkeyPath, winEHotkeyContent, "utf8");
-  await fs.writeFile(winEInstallScriptPath, winEInstallScriptContent, "utf8");
-  await fs.writeFile(winERemoveScriptPath, winERemoveScriptContent, "utf8");
-  await fs.writeFile(paths.contextMenuRegPath, contextMenuReg, "utf8");
-  await fs.writeFile(paths.contextMenuRemoveRegPath, removeContextMenuReg, "utf8");
-  await fs.writeFile(paths.folderDefaultRegPath, folderDefaultReg, "utf8");
-  await fs.writeFile(paths.folderDefaultRemoveRegPath, removeFolderDefaultReg, "utf8");
+  // Windows PowerShell 5.1 needs a UTF-8 BOM to read non-ASCII literals, and
+  // reg import needs UTF-16LE with a BOM (BOM-less files are read as ANSI).
+  await fs.writeFile(launcherPath, shellRegistry.powerShellScriptBuffer(scriptContent));
+  await fs.writeFile(serverScriptPath, shellRegistry.powerShellScriptBuffer(serverScriptContent));
+  await fs.writeFile(shortcutScriptPath, shellRegistry.powerShellScriptBuffer(shortcutScriptContent));
+  await fs.writeFile(shortcutRemoveScriptPath, shellRegistry.powerShellScriptBuffer(shortcutRemoveScriptContent));
+  await fs.writeFile(winEHotkeyPath, shellRegistry.powerShellScriptBuffer(winEHotkeyContent));
+  await fs.writeFile(winEInstallScriptPath, shellRegistry.powerShellScriptBuffer(winEInstallScriptContent));
+  await fs.writeFile(winERemoveScriptPath, shellRegistry.powerShellScriptBuffer(winERemoveScriptContent));
+  await writeRegistryFile(paths.contextMenuRegPath, contextMenuReg);
+  await writeRegistryFile(paths.contextMenuRemoveRegPath, removeContextMenuReg);
+  await writeRegistryFile(paths.folderDefaultRegPath, folderDefaultReg);
+  await writeRegistryFile(paths.folderDefaultRemoveRegPath, removeFolderDefaultReg);
   await fs.writeFile(path.join(integrationRoot, "README.txt"), readme, "utf8");
 
   const generatedAt = new Date().toISOString();
@@ -19493,13 +19608,13 @@ async function runExternalCommand(savedCommand, context) {
   });
 }
 
+// null when the key is missing, "" when its default value is not set.
 async function readRegistryDefault(key) {
-  const result = await runProcess("reg.exe", ["query", key, "/ve"]);
-  if (result.code !== 0) {
+  const value = await queryRegistryValue(key);
+  if (!value) {
     return null;
   }
-  const match = result.stdout.match(/\(Default\)\s+REG_\w+\s+(.+)/i);
-  return match ? match[1].trim() : "";
+  return value.valueExists ? value.value : "";
 }
 
 function preflightItem(id, label, state, detail, action = "") {
@@ -19972,7 +20087,7 @@ async function importRegistryFile(filePath) {
       stderr += chunk.toString();
     });
     child.on("error", reject);
-    child.on("exit", (code) => {
+    child.on("close", (code) => {
       if (code === 0) {
         resolve({ ok: true, file: regFile });
       } else {
@@ -19990,6 +20105,15 @@ function integrationProcessSummary(result = {}) {
   };
 }
 
+// Runs a generated script with UTF-8 console output so non-ASCII paths in its
+// output decode correctly; arguments are passed as PowerShell literals.
+function runIntegrationPowerShell(script, args = []) {
+  return shellRegistry.runProcessUtf8(
+    "powershell.exe",
+    shellRegistry.powerShellEncodedArgs(shellRegistry.integrationScriptCommand(script, args))
+  );
+}
+
 async function runIntegrationPowerShellScript(scriptPath, args = [], label = "Integration script") {
   const script = resolveUserPath(scriptPath);
   if (!script.startsWith(integrationRoot)) {
@@ -19998,14 +20122,7 @@ async function runIntegrationPowerShellScript(scriptPath, args = [], label = "In
   if (!(await pathExists(script))) {
     await writeIntegrationFiles();
   }
-  const result = await runProcess("powershell.exe", [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    script,
-    ...args
-  ]);
+  const result = await runIntegrationPowerShell(script, args);
   if (result.code !== 0) {
     const summary = integrationProcessSummary(result);
     const error = new Error(`${label} failed.`);
@@ -20048,20 +20165,34 @@ async function cleanupCurrentUserIntegration(body = {}) {
   await writeIntegrationFiles();
   const before = await getIntegrationStatus();
   const steps = [];
-
-  const shortcutsResult = await removeShortcutIntegration(paths);
-  steps.push({ id: "shortcuts", label: "Shortcuts", ...shortcutsResult });
-
-  const winEResult = await updateWinEIntegration("remove", paths);
-  steps.push({ id: "winE", label: "Win+E helper", ...winEResult });
+  const errors = [];
+  // Each step runs even when an earlier one fails, and the shell restore runs
+  // first so folders keep opening in Explorer whatever happens afterwards.
+  const runStep = async (id, label, action) => {
+    try {
+      steps.push({ id, label, ...(await action()) });
+    } catch (error) {
+      const failure = { id, label, ok: false, error: error.message, details: error.details || null };
+      steps.push(failure);
+      errors.push(failure);
+    }
+  };
 
   if (before.registry?.contextMenuInstalled || before.registry?.folderDefaultEnabled) {
     if (body.restoreBackup !== false && before.registry?.shellBackup?.available) {
-      const restore = await restoreShellRegistryBackup();
-      steps.push({ id: "shellRestore", label: "Shell restore", ...restore });
+      await runStep("shellRestore", "Shell restore", async () => ({ ok: true, ...(await restoreShellRegistryBackup()) }));
+      if (errors.length) {
+        await runStep("shellHandlers", "Shell handlers", async () => ({
+          ok: true,
+          fallback: true,
+          results: await removeGeneratedShellHandlers(paths)
+        }));
+      }
     } else {
-      const registryResults = await removeGeneratedShellHandlers(paths);
-      steps.push({ id: "shellHandlers", label: "Shell handlers", ok: true, results: registryResults });
+      await runStep("shellHandlers", "Shell handlers", async () => ({
+        ok: true,
+        results: await removeGeneratedShellHandlers(paths)
+      }));
     }
   } else {
     steps.push({
@@ -20073,9 +20204,13 @@ async function cleanupCurrentUserIntegration(body = {}) {
     });
   }
 
+  await runStep("shortcuts", "Shortcuts", () => removeShortcutIntegration(paths));
+  await runStep("winE", "Win+E helper", () => updateWinEIntegration("remove", paths));
+
   return {
-    ok: true,
+    ok: errors.length === 0,
     steps,
+    errors: errors.map((failure) => ({ id: failure.id, label: failure.label, error: failure.error })),
     before: {
       shortcuts: before.shortcuts,
       registry: before.registry
@@ -20838,10 +20973,15 @@ async function handleApi(req, res, url) {
 
   if (route === "POST /api/integration/backup") {
     const body = await readJson(req);
-    const backup = await saveShellRegistryBackup(body.mode || "manual");
+    const outcome = await captureShellRegistryBackup(body.mode || "manual");
     return sendJson(res, 200, {
       ok: true,
-      backup,
+      backup: outcome.backup,
+      savedAsOriginal: outcome.action === "replace",
+      preservedOriginal: outcome.action === "keep-original",
+      refusedOriginal: outcome.action === "refuse-original",
+      message: outcome.reason || undefined,
+      snapshot: outcome.action === "replace" ? undefined : outcome.snapshot,
       status: await getIntegrationStatus()
     });
   }
@@ -21033,14 +21173,7 @@ async function handleApi(req, res, url) {
       await writeIntegrationFiles();
     }
     const targetPath = resolveUserPath(body.path || __dirname);
-    const result = await runProcess("powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      paths.scriptPath,
-      targetPath
-    ]);
+    const result = await runIntegrationPowerShell(paths.scriptPath, [targetPath]);
     if (result.code !== 0) {
       return sendError(res, 500, "Launcher test failed.", {
         stdout: result.stdout,
@@ -21061,7 +21194,8 @@ async function handleApi(req, res, url) {
     if (body.mode === "removeFolderDefault") {
       const status = await getIntegrationStatus();
       if (status.registry?.shellBackup?.available) {
-        const restored = await restoreShellRegistryBackup();
+        // Only the folder/drive default handlers; context-menu entries stay as installed.
+        const restored = await restoreShellRegistryBackup({ entryIds: shellRegistry.shellDefaultEntryIdList() });
         return sendJson(res, 200, {
           ...restored,
           restoredBackup: true,
