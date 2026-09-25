@@ -957,7 +957,13 @@ function runtimeTabId() {
   return globalThis.crypto?.randomUUID?.() || `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+// mcpContextRevision counts published snapshots (wait_for_ui wakes on each).
+// mcpSemanticRevision is the revision at which the semantic context (panes,
+// tabs, paths, selection, focus, open dialogs) last changed; cosmetic updates
+// such as toasts or status text leave earlier revisions valid.
 let mcpContextRevision = 0;
+let mcpSemanticRevision = 0;
+let mcpSemanticDigest = "";
 let mcpContextPublishFrame = 0;
 let mcpLastInteraction = null;
 
@@ -1129,10 +1135,15 @@ async function runAppUpdateAction(action) {
   if (action === "install") {
     const button = document.querySelector('[data-update-action="install"]');
     if (button) button.disabled = true;
-    const status = await bridge.installUpdate();
-    if (!status?.accepted) {
+    try {
+      const status = await bridge.installUpdate();
+      if (!status?.accepted) {
+        if (button) button.disabled = false;
+        showToast("The update is not ready to install yet.");
+      }
+    } catch (error) {
       if (button) button.disabled = false;
-      showToast("The update is not ready to install yet.");
+      showToast(`Could not install the update: ${error?.message || error}`);
     }
   }
 }
@@ -1361,22 +1372,40 @@ function initializeMcpUiObservation() {
       recordMcpInteraction(event, "keyboard");
     }
   }, { capture: true });
+  // Terminal output (xterm's DOM renderer) is deliberately not observed: it
+  // mutates every frame and would force a full snapshot + IPC each time. Only
+  // the drawer itself and its state title are watched, and the title only
+  // counts when its text actually changes (it is rewritten on every data chunk).
+  const terminalTitleText = new WeakMap();
+  const terminalTitleChanged = (title) => {
+    const text = title.textContent;
+    if (terminalTitleText.get(title) === text) return false;
+    terminalTitleText.set(title, text);
+    return true;
+  };
   const observer = new MutationObserver((records) => {
     const relevant = records.some((record) => {
       const element = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
+      const terminalTitle = element?.closest?.("[data-terminal-title]");
+      if (terminalTitle) return terminalTitleChanged(terminalTitle);
       return Boolean(element?.closest?.("dialog[open], #status-pill, #toast, .nav-rail, #update-banner, .pane-terminal"))
         || (record.type === "attributes" && element?.tagName === "DIALOG" && record.attributeName === "open");
     });
     if (relevant) scheduleMcpContextPublish();
   });
-  for (const element of document.querySelectorAll("dialog, #status-pill, #toast, .nav-rail, #update-banner, .pane-terminal")) {
+  const observedAttributes = ["open", "class", "hidden", "disabled", "aria-busy", "aria-expanded", "aria-pressed", "aria-selected"];
+  for (const element of document.querySelectorAll("dialog, #status-pill, #toast, .nav-rail, #update-banner, [data-terminal-title]")) {
     observer.observe(element, {
       attributes: true,
-      attributeFilter: ["open", "class", "hidden", "disabled", "aria-busy", "aria-expanded", "aria-pressed", "aria-selected"],
+      attributeFilter: observedAttributes,
       childList: true,
       characterData: true,
       subtree: true
     });
+  }
+  for (const element of document.querySelectorAll(".pane-terminal")) {
+    for (const title of element.querySelectorAll("[data-terminal-title]")) terminalTitleText.set(title, title.textContent);
+    observer.observe(element, { attributes: true, attributeFilter: observedAttributes });
   }
 }
 
@@ -1396,16 +1425,37 @@ function mcpContextSnapshot() {
     };
   }
   const activeTab = tabOf(app.activePane);
+  const selection = [...(activeTab?.selected || [])].slice(0, 100);
+  const focusedPath = activeTab?.focusedPath || "";
+  const ui = mcpUiSnapshot();
+  const contextRevision = ++mcpContextRevision;
+  const digest = JSON.stringify([
+    app.activePane,
+    app.paneLayout,
+    paneSnapshots,
+    activeTab?.selected?.size || 0,
+    selection,
+    focusedPath,
+    ui.openDialogs.map((dialog) => [dialog.id, dialog.title, dialog.modal])
+  ]);
+  if (digest !== mcpSemanticDigest) {
+    mcpSemanticDigest = digest;
+    mcpSemanticRevision = contextRevision;
+  }
   return {
     live: true,
     activePane: app.activePane,
     paneLayout: app.paneLayout,
     panes: paneSnapshots,
-    selection: [...(activeTab?.selected || [])].slice(0, 100),
-    focusedPath: activeTab?.focusedPath || "",
-    ui: mcpUiSnapshot(),
-    contextRevision: ++mcpContextRevision
+    selection,
+    focusedPath,
+    ui,
+    contextRevision
   };
+}
+
+function mcpContextRevisionIsCurrent(revision) {
+  return Number.isInteger(revision) && revision >= mcpSemanticRevision && revision <= mcpContextRevision;
 }
 
 function scheduleMcpContextPublish(immediate = false) {
@@ -1667,7 +1717,7 @@ async function invokeMcpSemanticAction(action = {}) {
   const paneName = mcpActionPane(action.pane);
   const inputs = action.inputs && typeof action.inputs === "object" && !Array.isArray(action.inputs) ? action.inputs : {};
   validateMcpSemanticInputs(inputs, definition.inputSchema);
-  if (definition.requiresFreshContext && Number.isInteger(action.expectedContextRevision) && action.expectedContextRevision !== mcpContextRevision) {
+  if (definition.requiresFreshContext && Number.isInteger(action.expectedContextRevision) && !mcpContextRevisionIsCurrent(action.expectedContextRevision)) {
     throw Object.assign(new Error("The Explore Better selection or view changed. Read context and retry the action."), {
       code: "STALE_CONTEXT",
       details: { expectedContextRevision: action.expectedContextRevision, currentContextRevision: mcpContextRevision }
@@ -1792,7 +1842,13 @@ function describeMcpUiAction(action = {}) {
     }
   }
   const description = { pane: paneName, paths: [...new Set(paths)] };
-  return { ...description, contextRevision: mcpContextRevision, descriptionToken: JSON.stringify(description) };
+  // Echo a caller's revision while it is still semantically current so the
+  // exact-match fence in the automation service is not tripped by cosmetic
+  // publishes (toasts, status text) that happened after the caller read context.
+  const contextRevision = mcpContextRevisionIsCurrent(action.expectedContextRevision)
+    ? action.expectedContextRevision
+    : mcpContextRevision;
+  return { ...description, contextRevision, descriptionToken: JSON.stringify(description) };
 }
 
 async function handleMcpUiAction(action = {}) {
@@ -1800,7 +1856,7 @@ async function handleMcpUiAction(action = {}) {
   if (action.expectedDescriptionToken !== undefined && action.expectedDescriptionToken !== describeMcpUiAction(action).descriptionToken) {
     throw Object.assign(new Error("The requested UI target changed. Read context and retry the action."), { code: "STALE_CONTEXT" });
   }
-  if (Number.isInteger(action.expectedContextRevision) && action.expectedContextRevision !== mcpContextRevision) {
+  if (Number.isInteger(action.expectedContextRevision) && !mcpContextRevisionIsCurrent(action.expectedContextRevision)) {
     throw Object.assign(new Error("The Explore Better selection or view changed. Read context and retry the action."), { code: "STALE_CONTEXT" });
   }
   if (action.type === "listActions") {
@@ -2357,6 +2413,11 @@ function foregroundRequestKind(url, options = {}) {
   return "";
 }
 
+const listingResponseRoutes = new Set(["/api/list", "/api/archive/list"]);
+// Listing response -> listing cache generation when its request started, so a
+// response that raced a cache clear is never written back into the cache.
+const listingResponseGenerations = new WeakMap();
+
 async function requestWithoutForegroundTracking(url, options = {}) {
   const { invalidateListingCache, ...fetchOptions } = options;
   const method = String(options.method || "GET").toUpperCase();
@@ -2369,6 +2430,7 @@ async function requestWithoutForegroundTracking(url, options = {}) {
   if (shouldWatchOperation && app.state) {
     scheduleOperationPoll(200);
   }
+  const listingGeneration = listingResponseRoutes.has(pathname) ? app.listingCacheGeneration : null;
   const initialListing = method === "GET"
     ? window.__exploreBetterInitialListings?.[url] ||
       (window.__exploreBetterInitialListing?.route === url ? window.__exploreBetterInitialListing : null)
@@ -2400,6 +2462,9 @@ async function requestWithoutForegroundTracking(url, options = {}) {
     }
   }
   const data = expandCompactDirectoryListing(parsed);
+  if (listingGeneration !== null && data && typeof data === "object") {
+    listingResponseGenerations.set(data, listingGeneration);
+  }
   if (shouldInvalidateListingCache(method, pathname, invalidateListingCache)) {
     clearListingCache();
   }
@@ -2422,6 +2487,7 @@ async function request(url, options = {}) {
 
 async function requestSizeAnalysisStream(body, signal, onProgress) {
   const release = beginForegroundActivity("analysis");
+  let reader = null;
   try {
     const response = await fetch("/api/size-analysis/stream", {
       method: "POST",
@@ -2433,7 +2499,7 @@ async function requestSizeAnalysisStream(body, signal, onProgress) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || `Request failed: ${response.status}`);
     }
-    const reader = response.body.getReader();
+    reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let result = null;
@@ -2459,11 +2525,29 @@ async function requestSizeAnalysisStream(body, signal, onProgress) {
     if (!result) throw new Error("Size analysis stream ended before the final result.");
     return result;
   } finally {
+    // Stops the server-side scan when an error event or parse failure ends the
+    // loop early; a no-op once the stream has completed.
+    reader?.cancel().catch(() => {});
     release?.();
   }
 }
 
+// Listings repeat a handful of attribute strings; entries never mutate their
+// attributes object, so identical strings can share one parsed object.
+const compactAttributesCache = new Map();
+
 function attributesFromCompactText(value) {
+  const key = String(value || "");
+  let attributes = compactAttributesCache.get(key);
+  if (!attributes) {
+    attributes = parseCompactAttributesText(key);
+    if (compactAttributesCache.size >= 512) compactAttributesCache.clear();
+    compactAttributesCache.set(key, attributes);
+  }
+  return attributes;
+}
+
+function parseCompactAttributesText(value) {
   const text = String(value || "").toUpperCase();
   return {
     readonly: text.includes("R"),
@@ -3324,37 +3408,84 @@ function renderKindFilterOptions(selectedValue = "all") {
     .join("");
 }
 
+const numericSortKeys = new Set(["size", "dimensions", "modified", "created", "accessed"]);
+// Entry objects are replaced (not mutated) when their searchable fields change,
+// so the lowercase filter text can be computed once per entry object.
+const entrySearchTextCache = new WeakMap();
+// entries array -> Map(sortKey/sortDir/revision -> sorted, unfiltered copy)
+const sortedEntryOrderCache = new WeakMap();
+
+function entrySearchText(entry) {
+  let text = entrySearchTextCache.get(entry);
+  if (text === undefined) {
+    const label = entry.label || {};
+    text = `${entry.name} ${entry.kind} ${entry.parent || ""} ${attributeText(entry)} ${linkTypeText(entry)} ${linkTargetText(
+      entry
+    )} ${imageDimensionsText(entry)} ${label.name || ""} ${label.notes || ""}`.toLowerCase();
+    entrySearchTextCache.set(entry, text);
+  }
+  return text;
+}
+
+function sortedUnfilteredEntries(tab) {
+  const source = tab.entries;
+  const sortKey = tab.sortKey;
+  const key = `${sortKey}\u001f${tab.sortDir}\u001f${Number(tab.visibleEntriesRevision || 0)}\u001f${source.length}`;
+  let byKey = sortedEntryOrderCache.get(source);
+  const cached = byKey?.get(key);
+  if (cached) {
+    byKey.delete(key);
+    byKey.set(key, cached);
+    return cached;
+  }
+  const factor = tab.sortDir === "asc" ? 1 : -1;
+  const numeric = numericSortKeys.has(sortKey);
+  const foldersFirst = sortKey === "name";
+  const values = source.map((entry) => {
+    const value = sortableValue(entry, sortKey);
+    return numeric ? Number(value) || 0 : String(value);
+  });
+  const order = source.map((_entry, index) => index);
+  order.sort((leftIndex, rightIndex) => {
+    const a = source[leftIndex];
+    const b = source[rightIndex];
+    if (foldersFirst && a.isDirectory !== b.isDirectory) {
+      return a.isDirectory ? -1 : 1;
+    }
+    const left = values[leftIndex];
+    const right = values[rightIndex];
+    if (numeric) {
+      return (left - right) * factor;
+    }
+    return paneValueCollator.compare(left, right) * factor;
+  });
+  const sorted = order.map((index) => source[index]);
+  if (!byKey) {
+    byKey = new Map();
+    sortedEntryOrderCache.set(source, byKey);
+  }
+  byKey.set(key, sorted);
+  while (byKey.size > 2) {
+    byKey.delete(byKey.keys().next().value);
+  }
+  return sorted;
+}
+
 function sortedEntries(tab) {
   const filter = tab.filter.trim().toLowerCase();
   const kindFilter = normalizeKindFilter(tab.kindFilter);
   const labelFilter = tab.labelFilter || "all";
-  const entries = tab.entries.filter((entry) => {
-    const label = entry.label || {};
-    const matchesText = filter
-      ? `${entry.name} ${entry.kind} ${entry.parent || ""} ${attributeText(entry)} ${linkTypeText(entry)} ${linkTargetText(
-          entry
-        )} ${imageDimensionsText(entry)} ${label.name || ""} ${label.notes || ""}`
-          .toLowerCase()
-          .includes(filter)
-      : true;
+  const sorted = sortedUnfilteredEntries(tab);
+  if (!filter && kindFilter === "all" && labelFilter === "all") {
+    return sorted.slice();
+  }
+  return sorted.filter((entry) => {
+    const matchesText = filter ? entrySearchText(entry).includes(filter) : true;
     const matchesLabel =
       labelFilter === "all" ||
       (labelFilter === "any" && entry.label) ||
       (entry.label && entry.label.color === labelFilter);
     return matchesText && matchesLabel && entryMatchesKindFilter(entry, kindFilter);
-  });
-
-  const factor = tab.sortDir === "asc" ? 1 : -1;
-  return entries.sort((a, b) => {
-    if (a.isDirectory !== b.isDirectory && tab.sortKey === "name") {
-      return a.isDirectory ? -1 : 1;
-    }
-    const left = sortableValue(a, tab.sortKey);
-    const right = sortableValue(b, tab.sortKey);
-    if (["size", "dimensions", "modified", "created", "accessed"].includes(tab.sortKey)) {
-      return ((left || 0) - (right || 0)) * factor;
-    }
-    return paneValueCollator.compare(String(left), String(right)) * factor;
   });
 }
 
@@ -3683,28 +3814,51 @@ function pruneListingCache() {
   }
 }
 
-function rememberListingCache(cacheKey, data) {
+function rememberListingCache(cacheKey, data, generation = listingResponseGenerations.get(data)) {
+  // A listing requested before the cache was cleared may describe a folder
+  // that has since changed; never let it repopulate the cache.
+  if (generation !== undefined && generation !== app.listingCacheGeneration) {
+    return false;
+  }
   app.listingCache.delete(cacheKey);
   app.listingCache.set(cacheKey, {
     cachedAt: Date.now(),
     data
   });
   pruneListingCache();
+  return true;
 }
 
-function requestFullListingHydration(cacheKey, query) {
-  const key = `${app.listingCacheGeneration}:${cacheKey}`;
-  const existing = app.listingHydrations.get(key);
-  if (existing) {
-    return existing;
+function requestFullListingHydration(cacheKey, query, { signal } = {}) {
+  const generation = app.listingCacheGeneration;
+  const key = `${generation}:${cacheKey}`;
+  let promise = app.listingHydrations.get(key);
+  if (!promise) {
+    // The shared request is not tied to any one caller: if the pane navigates
+    // away, the full listing still lands in the cache for the next visit.
+    promise = request(`/api/list?${query}`, { invalidateListingCache: false })
+      .then((data) => {
+        rememberListingCache(cacheKey, data, generation);
+        return data;
+      })
+      .finally(() => {
+        if (app.listingHydrations.get(key) === promise) {
+          app.listingHydrations.delete(key);
+        }
+      });
+    app.listingHydrations.set(key, promise);
   }
-  const promise = request(`/api/list?${query}`, { invalidateListingCache: false }).finally(() => {
-    if (app.listingHydrations.get(key) === promise) {
-      app.listingHydrations.delete(key);
-    }
+  if (!signal) {
+    return promise;
+  }
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
-  app.listingHydrations.set(key, promise);
-  return promise;
 }
 
 function listingCacheEntry(cacheKey) {
@@ -3851,7 +4005,7 @@ function applyPaneListing(paneName, tab, data, context = {}) {
     options = {}
   } = context;
   const entries = entriesWithCurrentLabels(data.entries);
-  if (pushHistory && previousPath && previousPath !== data.path) {
+  if (pushHistory && previousPath && !samePath(previousPath, data.path)) {
     tab.history.push(previousPath);
     tab.future = [];
   }
@@ -3913,7 +4067,7 @@ function applyZipPaneListing(paneName, tab, data, context = {}) {
     options = {}
   } = context;
   const entries = (data.entries || []).map((entry) => withCurrentLabel({ ...entry }));
-  if (pushHistory && previousPath && previousPath !== data.path) {
+  if (pushHistory && previousPath && !samePath(previousPath, data.path)) {
     tab.history.push(previousPath);
     tab.future = [];
   }
@@ -4230,6 +4384,8 @@ async function openShellNamespaceIndexInPane(index) {
   await openShellNamespaceInPane(item.path);
 }
 
+let shellNamespaceRequestSeq = 0;
+
 async function loadShellNamespace(target = app.shellNamespace?.target || "thisPc", options = {}) {
   app.shellNamespace = app.shellNamespace || { target: "thisPc", stack: [], report: null, loading: false };
   const previousTarget = app.shellNamespace.target;
@@ -4238,17 +4394,24 @@ async function loadShellNamespace(target = app.shellNamespace?.target || "thisPc
   }
   app.shellNamespace.target = target;
   app.shellNamespace.loading = true;
+  // Only the newest request may update the dialog; a slow older response
+  // (or one from a previous dialog session) must not overwrite it.
+  const requestId = ++shellNamespaceRequestSeq;
+  app.shellNamespace.requestId = requestId;
+  const isCurrent = () => app.shellNamespace?.requestId === requestId;
   document.getElementById("shell-namespace-output").textContent = "";
   renderShellNamespaceDialog("Reading Windows locations...");
   try {
     const params = new URLSearchParams({ target, limit: "160" });
     const report = await request(`/api/shell/namespace?${params}`);
+    if (!isCurrent()) return report;
     app.shellNamespace.report = report;
     app.shellNamespace.target = report.target || target;
     app.shellNamespace.loading = false;
     renderShellNamespaceDialog();
     return report;
   } catch (error) {
+    if (!isCurrent()) return null;
     app.shellNamespace.loading = false;
     renderShellNamespaceDialog("Windows locations failed");
     throw error;
@@ -4555,7 +4718,8 @@ async function exportSupportBundle() {
 }
 
 function normalizedPathKey(itemPath) {
-  return String(itemPath || "").replace(/[\\/]+$/, "").toLowerCase();
+  // Windows accepts either separator, so C:/foo and C:\foo share one key.
+  return String(itemPath || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
 }
 
 function samePath(left, right) {
@@ -4566,9 +4730,11 @@ function parentPathOf(itemPath) {
   const trimmed = String(itemPath || "").replace(/[\\/]+$/, "");
   const splitAt = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
   if (splitAt <= 0) {
-    return trimmed;
+    // "D:" alone is drive-relative (the drive's current directory), not its root.
+    return /^[A-Za-z]:$/.test(trimmed) ? `${trimmed}\\` : trimmed;
   }
-  return trimmed.slice(0, splitAt);
+  const parent = trimmed.slice(0, splitAt);
+  return /^[A-Za-z]:$/.test(parent) ? `${parent}${trimmed[splitAt]}` : parent;
 }
 
 function pathSeparatorFor(itemPath) {
@@ -4794,28 +4960,110 @@ function filesystemSuggestionBase(inputPath) {
   };
 }
 
+const pathSuggestDebounceMs = 120;
+const pathSuggestFolderCacheTtlMs = 15_000;
+const pathSuggestFolderCacheMaxEntries = 8;
+// Parent folder -> its sorted subfolders, so typing more characters of a name
+// filters locally instead of listing the parent again on every keystroke.
+const pathSuggestFolderCache = new Map();
+let pathSuggestFetch = null;
+
+function pathSuggestFolderCacheKey(parentPath) {
+  return `${app.listingCacheGeneration}\u001f${showHiddenEntriesEnabled() ? 1 : 0}\u001f${normalizedPathKey(parentPath)}`;
+}
+
+function cachedPathSuggestFolders(key) {
+  const cached = pathSuggestFolderCache.get(key);
+  if (!cached) {
+    return null;
+  }
+  if (Date.now() - cached.cachedAt > pathSuggestFolderCacheTtlMs) {
+    pathSuggestFolderCache.delete(key);
+    return null;
+  }
+  return cached;
+}
+
+function cancelPathSuggestFetch() {
+  clearTimeout(pathSuggestFetch?.timer);
+  pathSuggestFetch?.controller.abort();
+  pathSuggestFetch = null;
+}
+
+function pathSuggestFolders(parentPath, key) {
+  if (pathSuggestFetch?.key === key) {
+    return pathSuggestFetch.promise;
+  }
+  cancelPathSuggestFetch();
+  const controller = new AbortController();
+  const fetchState = { key, controller, timer: null, promise: null };
+  fetchState.promise = new Promise((resolve, reject) => {
+    const abort = () => reject(new DOMException("Aborted", "AbortError"));
+    controller.signal.addEventListener("abort", abort, { once: true });
+    // Debounce so a burst of keystrokes that changes the parent folder costs
+    // one listing instead of one per character.
+    fetchState.timer = setTimeout(async () => {
+      try {
+        const query = new URLSearchParams({
+          path: parentPath,
+          showHidden: showHiddenEntriesEnabled() ? "true" : "false",
+          format: "compact-v2"
+        });
+        const listing = await request(`/api/list?${query}`, { signal: controller.signal, invalidateListingCache: false });
+        const folders = (listing.entries || [])
+          .filter((entry) => entry.isDirectory && !entry.unavailable)
+          .map((entry) => ({ name: entry.name, lowerName: entry.name.toLowerCase(), path: entry.path }))
+          .sort((left, right) => left.name.localeCompare(right.name));
+        const result = { cachedAt: Date.now(), path: listing.path, folders };
+        if (key.startsWith(`${app.listingCacheGeneration}\u001f`)) {
+          pathSuggestFolderCache.delete(key);
+          pathSuggestFolderCache.set(key, result);
+          while (pathSuggestFolderCache.size > pathSuggestFolderCacheMaxEntries) {
+            pathSuggestFolderCache.delete(pathSuggestFolderCache.keys().next().value);
+          }
+        }
+        resolve(result);
+      } catch (error) {
+        reject(error);
+      } finally {
+        controller.signal.removeEventListener("abort", abort);
+        if (pathSuggestFetch === fetchState) {
+          pathSuggestFetch = null;
+        }
+      }
+    }, pathSuggestDebounceMs);
+  });
+  // Callers that were superseded stop listening; avoid unhandled rejections.
+  fetchState.promise.catch(() => {});
+  pathSuggestFetch = fetchState;
+  return fetchState.promise;
+}
+
 async function filesystemPathSuggestions(inputPath) {
   const base = filesystemSuggestionBase(inputPath);
   if (!base?.parent) {
+    cancelPathSuggestFetch();
     return [];
   }
-  const query = new URLSearchParams({
-    path: base.parent,
-    showHidden: showHiddenEntriesEnabled() ? "true" : "false"
-  });
-  const listing = await request(`/api/list?${query}`);
+  const key = pathSuggestFolderCacheKey(base.parent);
+  const cached = cachedPathSuggestFolders(key);
+  if (cached && pathSuggestFetch?.key !== key) {
+    cancelPathSuggestFetch();
+  }
+  const listing = cached || await pathSuggestFolders(base.parent, key);
   const prefix = base.prefix.toLowerCase();
-  return (listing.entries || [])
-    .filter((entry) => entry.isDirectory && !entry.unavailable)
-    .filter((entry) => !prefix || entry.name.toLowerCase().startsWith(prefix))
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .slice(0, 8)
-    .map((entry) => ({
+  const matches = [];
+  for (const folder of listing.folders) {
+    if (prefix && !folder.lowerName.startsWith(prefix)) continue;
+    matches.push({
       kind: "Folder",
-      label: entry.name,
-      path: entry.path,
+      label: folder.name,
+      path: folder.path,
       detail: listing.path
-    }));
+    });
+    if (matches.length >= 8) break;
+  }
+  return matches;
 }
 
 function renderPathSuggestions() {
@@ -4864,6 +5112,7 @@ function hidePathSuggestions(paneName = null) {
   if (paneName && app.pathSuggest?.paneName && app.pathSuggest.paneName !== paneName) {
     return;
   }
+  cancelPathSuggestFetch();
   app.pathSuggest = {
     paneName: null,
     items: [],
@@ -5704,6 +5953,15 @@ function sortableValue(entry, sortKey) {
   if (sortKey === "linkTarget") {
     return linkTargetText(entry);
   }
+  if (sortKey === "modified" || sortKey === "created" || sortKey === "accessed") {
+    // Restored snapshots carry ISO strings; live listings carry epoch numbers.
+    const value = entry[sortKey];
+    if (typeof value === "string") {
+      const parsed = Date.parse(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return value ?? "";
+  }
   return entry[sortKey] ?? "";
 }
 
@@ -5850,8 +6108,10 @@ function renderNavigatorDevices() {
   const list = document.getElementById("nav-devices");
   if (!section || !list) return;
   const devices = navigatorMeaningfulDevices();
-  section.hidden = devices.length === 0;
-  list.innerHTML = devices.slice(0, 8).map((item) => {
+  if (section.hidden !== (devices.length === 0)) section.hidden = devices.length === 0;
+  // Unchanged markup keeps the existing buttons (and keyboard focus) intact
+  // across the periodic device refresh.
+  setStableMarkup(list, devices.slice(0, 8).map((item) => {
     const pathAction = item.path && item.capabilities?.browseInApp
       ? `data-device-nav-path="${escapeHtml(item.path)}"`
       : `data-device-nav-id="${escapeHtml(item.id)}"`;
@@ -5863,7 +6123,7 @@ function renderNavigatorDevices() {
       </button>
       <button class="nav-mini" data-device-nav-id="${escapeHtml(item.id)}" title="View device actions" aria-label="View device actions">&gt;</button>
     </div>`;
-  }).join("");
+  }).join(""));
 }
 
 function folderTreeRoots() {
@@ -5967,7 +6227,9 @@ function renderFolderTreeChildren(itemPath, depth) {
   }
   const children = entries.map((entry) => renderFolderTreeNode(entry, depth)).join("");
   const note = node.truncated
-    ? `<div class="tree-message" style="--tree-depth:${Math.min(depth, 12)}">Showing first ${entries.length} folders</div>`
+    ? `<div class="tree-message" style="--tree-depth:${Math.min(depth, 12)}">Showing first ${
+        entries.filter((entry) => !entry.revealed).length
+      } folders</div>`
     : "";
   return `${children}${note}`;
 }
@@ -6061,7 +6323,20 @@ async function revealPathInFolderTree(itemPath) {
   await loadFolderTreeChildren(current);
   for (const part of parts) {
     const node = folderTreeNodeFor(current);
-    const child = node?.entries?.find((entry) => entry.name.toLowerCase() === part.toLowerCase());
+    let child = node?.entries?.find((entry) => entry.name.toLowerCase() === part.toLowerCase());
+    if (!child && node?.truncated && !node.error) {
+      // The folder is past the node's first-N limit (entries are name-sorted,
+      // so it sorts after them). Add just this segment so the path stays visible.
+      child = {
+        name: part,
+        path: joinPathSegment(current, part, pathSeparatorFor(current)),
+        parent: current,
+        kind: "folder",
+        revealed: true
+      };
+      node.entries = [...(node.entries || []), child];
+      app.folderTree.leafPaths.delete(normalizedPathKey(current));
+    }
     if (!child) {
       break;
     }
@@ -6075,7 +6350,8 @@ async function revealPathInFolderTree(itemPath) {
 function pathSegmentsBetween(rootPath, itemPath) {
   const root = String(rootPath || "").replace(/[\\/]+$/, "");
   const target = String(itemPath || "").replace(/[\\/]+$/, "");
-  if (!target.toLowerCase().startsWith(root.toLowerCase())) {
+  // Require a separator after the root so C:\foo is not treated as containing C:\foobar.
+  if (!pathInsideFolder(target, root || rootPath)) {
     return [];
   }
   return target

@@ -116,14 +116,16 @@
   window.__exploreBetterInitialListings = initialListings;
 
   const params = new URL(window.location.href).searchParams;
-  const scheduleInitialListing = (targetPath, showHidden, paneName) => {
-    if (!targetPath) return;
+  // The prefetch only helps when its route is byte-for-byte the one the app's
+  // first loadPane requests, so `needs` mirrors listingFetchPlan's metadata flags.
+  const scheduleInitialListing = (targetPath, showHidden, paneName, needs = {}) => {
+    if (!targetPath || String(targetPath).startsWith("zip://")) return;
     const query = new URLSearchParams({
       path: targetPath,
       showHidden: showHidden ? "true" : "false",
-      includeDimensions: "false",
-      includeLinks: "false",
-      includeAttributes: showHidden ? "false" : "true",
+      includeDimensions: needs.dimensions ? "true" : "false",
+      includeLinks: needs.links ? "true" : "false",
+      includeAttributes: !showHidden || needs.attributes ? "true" : "false",
       includeSignature: "false",
       offset: "0",
       limit: "48"
@@ -157,15 +159,101 @@
     }, 10000);
   };
 
+  // Mirrors app.js normalizedPathKey / pathInsideFolder / matchingFolderFormat.
+  const pathKey = (value) => String(value || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  const pathInside = (candidate, folder) => {
+    const candidateKey = pathKey(candidate);
+    const folderKey = pathKey(folder);
+    return candidateKey === folderKey || candidateKey.startsWith(`${folderKey}\\`);
+  };
+  const defaultColumns = ["name", "kind", "size", "modified"];
+  const displayUses = (snapshot, ids) => {
+    const columns = Array.isArray(snapshot?.columns) ? snapshot.columns : defaultColumns;
+    return ids.some((id) => snapshot?.sortKey === id || columns.includes(id));
+  };
+  const listingNeeds = (tab, targetPath, loadedState) => {
+    const formats = (loadedState?.folderFormats || []).filter((format) =>
+      format?.path && (format.match === "subtree" ? pathInside(targetPath, format.path) : pathKey(targetPath) === pathKey(format.path))
+    );
+    formats.sort((a, b) => (b.match === "exact") - (a.match === "exact") || pathKey(b.path).length - pathKey(a.path).length);
+    const format = formats[0]?.format || {};
+    const needs = (ids) => displayUses(format, ids) || displayUses(tab, ids);
+    return {
+      dimensions: needs(["dimensions"]),
+      links: needs(["linkType", "linkTarget"]),
+      attributes: needs(["attributes"])
+    };
+  };
+  const isAliasPath = (targetPath, loadedState) => {
+    const match = String(targetPath || "").trim().match(/^([A-Za-z][A-Za-z0-9_-]{1,31}):/);
+    if (!match) return false;
+    const name = match[1].toLowerCase();
+    return (loadedState?.aliases || []).some((alias) => alias?.path && String(alias.name || "").trim().toLowerCase() === name);
+  };
+
+  // Mirrors hydratePanesFromState + applyShellOpenParams: which tab each pane
+  // opens first. Electron loads "/" or "?open=", never ?left=/?right=.
+  const startupTabs = (loadedState, loadedRoots) => {
+    const settings = loadedState?.settings || {};
+    const explicit = ["left", "right", "open", "shellPath"].some((key) => params.has(key));
+    let layout = null;
+    if (!explicit) {
+      const shortcut = (kind, fallback) => loadedRoots?.shortcuts?.find((item) => item.kind === kind)?.path || fallback;
+      const home = loadedRoots?.home || shortcut("home", loadedRoots?.cwd);
+      const pairs = {
+        homeDownloads: [home, shortcut("downloads", home)],
+        workspaceHome: [shortcut("workspace", loadedRoots?.cwd || home), home],
+        documentsDownloads: [shortcut("documents", home), shortcut("downloads", home)]
+      };
+      if (settings.startupMode === "savedLayout") {
+        const layoutId = typeof settings.startupLayoutId === "string" ? settings.startupLayoutId.trim().slice(0, 120) : "";
+        layout = (loadedState?.layouts || []).find((item) => item.id === layoutId)?.layout || null;
+      } else if (pairs[settings.startupMode]) {
+        const [left, right] = pairs[settings.startupMode];
+        layout = { activePane: "left", panes: { left: { tabs: [{ path: left }] }, right: { tabs: [{ path: right }] } } };
+      }
+    }
+    layout ||= loadedState?.layout || {};
+    const fallback = {
+      left: params.get("left") || layout.panes?.left?.tabs?.[0]?.path || loadedRoots?.cwd,
+      right: params.get("right") || layout.panes?.right?.tabs?.[0]?.path || loadedRoots?.home
+    };
+    const tabs = {};
+    for (const paneName of ["left", "right"]) {
+      const savedPane = layout.panes?.[paneName] || {};
+      const savedTabs = Array.isArray(savedPane.tabs) && savedPane.tabs.length ? savedPane.tabs : [{ path: fallback[paneName] }];
+      const activeIndex = params.has(paneName)
+        ? 0
+        : Math.max(0, Math.min(Number(savedPane.activeTab || 0), savedTabs.length - 1));
+      const savedTab = activeIndex === 0 ? { ...savedTabs[0], path: fallback[paneName] } : savedTabs[activeIndex];
+      tabs[paneName] = { ...(savedTab || {}), path: savedTab?.path || fallback[paneName] };
+    }
+    let activePane = layout.activePane === "right" ? "right" : "left";
+    const openPath = params.get("open") || params.get("shellPath");
+    if (openPath) {
+      const mode = params.get("shellMode") || settings.shellOpenMode;
+      const paneName = mode === "rightReplace"
+        ? "right"
+        : mode === "activeReplace" || mode === "activeNewTab" ? activePane : "left";
+      tabs[paneName] = { ...tabs[paneName], path: openPath };
+      activePane = paneName;
+    }
+    tabs.left.path ||= loadedRoots?.cwd;
+    tabs.right.path ||= loadedRoots?.home;
+    return { activePane, tabs };
+  };
+
   const leftPath = params.get("left");
   const rightPath = params.get("right");
   scheduleInitialListing(leftPath || rightPath, true, "left");
   scheduleInitialListing(rightPath || leftPath, true, "right");
-  state.then((loadedState) => {
-    const activePane = loadedState?.layout?.activePane === "right" ? "right" : "left";
-    const otherPane = activePane === "left" ? "right" : "left";
+  Promise.all([state, roots]).then(([loadedState, loadedRoots]) => {
+    const { activePane, tabs } = startupTabs(loadedState, loadedRoots);
     const showHidden = loadedState?.settings?.showHidden !== false;
-    scheduleInitialListing(params.get(activePane) || params.get(otherPane), showHidden, activePane);
-    scheduleInitialListing(params.get(otherPane) || params.get(activePane), showHidden, otherPane);
+    for (const paneName of [activePane, activePane === "left" ? "right" : "left"]) {
+      const tab = tabs[paneName];
+      if (isAliasPath(tab.path, loadedState)) continue;
+      scheduleInitialListing(tab.path, showHidden, paneName, listingNeeds(tab, tab.path, loadedState));
+    }
   }).catch(() => {});
 })();
