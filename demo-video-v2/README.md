@@ -53,6 +53,34 @@ The score comes from `src/audio/industrial-score.mjs` (see below). It is re-time
 
 Generated media (`capture/`, `output/`, `public/live.mp4`) is gitignored. Older cuts (v2–v5) were edited against earlier captures and are kept for reference. Their scripts expect the capture from their own era, which is in git history.
 
+## Music candidates (v7)
+
+```powershell
+cd demo-video-v2
+npm run render:music            # all three candidates, about 30 seconds
+npm run render:music -- B       # one (or any subset) of A, B, C
+```
+
+This replaces only the soundtrack. It reads `chapters-v6.json` and the published picture `site/assets/explore-better-demo.mp4`, then writes three fully arranged and mastered scores. Each one is muxed onto that picture with `-c:v copy`, so the video stream stays bit-identical. Nothing in `site/assets` is changed. The owner picks a candidate before the site MP4 is replaced.
+
+| | Style | Tempo (nominal / per chapter) | Key and harmony |
+| --- | --- | --- | --- |
+| A | Warm electronic: soft four-on-the-floor, detuned supersaw pads with filter movement, pluck arpeggio, round sub, gentle kick-keyed pumping, airy hats and shaker, sparse FM-bell counter-line in the two peak chapters | 114 BPM (111.8–116.1) | F major, vi–IV–I–V loop, breakdown on IV–I/3–ii, final vi–ii–IV–V → Fadd9 |
+| B | Minimal piano + pulse: additive piano ostinato with velocity and humanised timing, soft sub pulse, rim, shaker, felt kick, string swells into each chapter | 99 BPM (96.8–100.8) | D major, I–V/3–vi / IV–I/3–V, final IV–ii–Vsus–V → Dadd9 |
+| C | Upbeat synth-pop: punchy kick and clap, driving eighth-note bass, gated arpeggio, short hook at the title that returns over the final V bar | 123 BPM (120.9–125.8) | G major, IV–V into I at the first chapter, I–V/3–vi–IV, final vi–ii–IV–V → G |
+
+**Timing.** Every chapter is a whole number of beats. Tempo is constant inside a chapter and nudged by at most about 2.5 % between chapters, so every chapter cut and the end card fall exactly on a bar line (0 ms offset, sample-quantised). When a chapter is not a multiple of four beats, the remainder becomes a 1–3 beat pickup bar at the end of that chapter. That bar carries the fill, the stop or the riser into the next downbeat. The music follows the exact picture-cut frames, which scene detection finds within 3 ms of the rounded JSON times. The title card has no hard cut, so the first chapter uses its JSON time. The end card cut (52.900 s) is detected the same way. The title card starts with a pad from 0 s and a one-bar pickup. The last chapter cadences onto the tonic at the end card, and everything decays naturally, with a 0.7 s raised-cosine safety fade that ends on the last frame.
+
+**Synthesis and mix** (`src/audio/score-v7.mjs`, no dependencies). The module uses polyBLEP band-limited oscillators and an additive piano built from inharmonic partials, hammer strike-position comb, two-stage decay, detuned unison strings and a damper. Filters are TPT state-variable (enveloped and LFO-modulated) and RBJ biquads. Envelopes are ADSR. Effects are a cross-fed chorus, a tempo-synced ping-pong delay and an 8-line FDN reverb. Every stem is level-matched to a K-weighted target, EQ-carved (high-passed pads, bass low-passed, hats low-passed at 10–11 kHz) and ducked from the kick where it fits the style. The drum bus is compressed. Mastering applies a 30 Hz 4th-order high-pass, a gentle tilt EQ and glue compression. A BS.1770 loop then sets −16 LUFS integrated, and an offline true-peak limiter caps output at −1.8 dBTP, so the AAC stays at or below −1.5 dBTP. Masters are 48 kHz / 24-bit with TPDF dither.
+
+**Outputs** in `output/music-v7/` (gitignored):
+
+- `explore-better-music-<A|B|C>.wav`: the masters.
+- `explore-better-demo-<A|B|C>.mp4`: preview cuts (AAC 192 kbps, 48 kHz stereo).
+- `review-<X>.png`: log-frequency spectrogram over the waveform. Blue lines mark the cuts; grey lines mark 30 Hz and 10 kHz.
+- `review-<X>-low.png`: 0–500 Hz, for the sub and rumble check.
+- `manifest.json`: tempo map, key, progression per chapter, cue alignment table (chapter time vs nearest bar and beat in ms, plus what a constant tempo would have missed by), per-chapter loudness, and meters for WAV and MP4 (integrated loudness, LRA, true peak, DC offset, band RMS below 30 Hz and above 10 kHz, stereo phase). Everything is measured independently with ffmpeg.
+
 ## v2 (original hype cut)
 
 `npm run render` renders the first continuous-recording cut to `output/explore-better-hype-demo-v2-1080p.mp4`, with a poster, contact sheet, source score and JSON manifest.
