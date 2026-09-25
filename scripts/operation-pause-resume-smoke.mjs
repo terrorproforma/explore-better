@@ -165,6 +165,7 @@ async function main() {
       PORT: String(port),
       LOCALAPPDATA: appData,
       APPDATA: appData,
+      EXPLORE_BETTER_TEST_HOOKS: "1",
       EB_TEST_OPERATION_DELAY_MS: process.env.EB_TEST_OPERATION_DELAY_MS || "1800",
       EB_TEST_OPERATION_DELAY_AFTER_ITEMS: process.env.EB_TEST_OPERATION_DELAY_AFTER_ITEMS || "1"
     },

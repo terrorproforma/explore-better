@@ -35,7 +35,7 @@ async function request(route, body) {
 async function start(extra = {}) {
   child = spawn(process.execPath, [path.join(root, "server.mjs")], {
     cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), EXPLORE_BETTER_APP_DATA_ROOT: appData, EXPLORE_BETTER_WORKSPACE_ROOT: files, EXPLORE_BETTER_DISABLE_STATE_WATCH: "1", ...extra }
+    env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), EXPLORE_BETTER_APP_DATA_ROOT: appData, EXPLORE_BETTER_WORKSPACE_ROOT: files, EXPLORE_BETTER_DISABLE_STATE_WATCH: "1", EXPLORE_BETTER_TEST_HOOKS: "1", ...extra }
   });
   child.stdout.on("data", chunk => serverOutput += chunk);
   child.stderr.on("data", chunk => serverOutput += chunk);

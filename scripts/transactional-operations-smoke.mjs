@@ -36,7 +36,7 @@ async function requestJson(baseUrl, route, options = {}) {
 async function startServer({ port, appData, env = {} }) {
   const child = spawn(process.execPath, [path.join(root, "server.mjs")], {
     cwd: root,
-    env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), LOCALAPPDATA: appData, APPDATA: appData, ...env },
+    env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), LOCALAPPDATA: appData, APPDATA: appData, EXPLORE_BETTER_TEST_HOOKS: "1", ...env },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
   });
