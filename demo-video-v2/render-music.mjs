@@ -1,14 +1,16 @@
 // Renders the three v7 music candidates and muxes each onto the published picture.
 //
-//   npm run render:music            all candidates (A, B, C)
-//   npm run render:music -- B       only candidate B (any subset: A C, ...)
+//   npm run render:music            the current candidates (D, E)
+//   npm run render:music -- A B C   any subset; A-C are the rejected first round, kept for reference
 //
 // Outputs (gitignored) go to output/music-v7/:
 //   explore-better-music-<X>.wav          48 kHz / 24-bit stereo master
 //   explore-better-demo-<X>.mp4           published picture (stream-copied) + AAC 192 kbps
 //   review-<X>.png                        spectrogram (log frequency) over waveform, cut markers
 //   review-<X>-low.png                    0-500 Hz linear spectrogram (sub / rumble check)
+//   beatmap-<X>.json                      beats, bars, tempo map, sections and hit points for re-editing
 //   manifest.json                         tempo map, keys, progressions, cue alignment, meters
+// D and E beat maps are also copied to music/beatmap-<X>.json (tracked) for the picture re-edit.
 //
 // The picture is never re-encoded and site/assets is never written.
 import path from "node:path";
@@ -116,7 +118,8 @@ const rel = (file) => path.relative(root, file).replaceAll("\\", "/");
 
 await fs.mkdir(outDir, { recursive: true });
 const wanted = process.argv.slice(2).map((s) => s.toUpperCase()).filter((s) => PRESETS[s]);
-const ids = wanted.length ? wanted : Object.keys(PRESETS);
+const ids = wanted.length ? wanted : Object.keys(PRESETS).filter((id) => PRESETS[id].status === "candidate");
+const trackedDir = path.join(workDir, "music");
 
 const duration = await probeDuration(picture);
 const cuts = await sceneCuts(picture);
@@ -150,7 +153,7 @@ try {
 for (const id of ids) {
   const started = Date.now();
   console.log(`Candidate ${id}: ${PRESETS[id].name}`);
-  const { L, R, info } = renderCandidate(id, cues, { log: () => {} });
+  const { L, R, info, beatmap } = renderCandidate(id, cues, { log: () => {} });
   const wav = path.join(outDir, `explore-better-music-${id}.wav`);
   const mp4 = path.join(outDir, `explore-better-demo-${id}.mp4`);
   await writeWav24(wav, L, R, 7 + id.charCodeAt(0));
@@ -166,9 +169,20 @@ for (const id of ids) {
     bandLevel(wav, Array(4).fill("highpass=f=10000:poles=2").join(",")),
     stereoPhase(wav)
   ]);
+  const wavSha = await sha256(wav);
+  const beatmapJson = `${JSON.stringify({ ...beatmap, audio: { wav: rel(wav), sha256: wavSha } }, null, 1)}
+`;
+  const beatmapPath = path.join(outDir, `beatmap-${id}.json`);
+  await fs.writeFile(beatmapPath, beatmapJson);
+  if (PRESETS[id].status === "candidate") {
+    await fs.mkdir(trackedDir, { recursive: true });
+    await fs.writeFile(path.join(trackedDir, `beatmap-${id}.json`), beatmapJson);
+  }
   const images = await reviewImages(wav, id, duration, [chapters.chapters[1].start, ...cues.sections.slice(1).map((s) => s.start), cues.endCard]);
+  const master = PRESETS[id].master;
   manifest.candidates[id] = {
     ...info,
+    target: { integratedLufs: master?.targetLufs ?? -16, truePeakDbtpMax: master ? -1.0 : -1.5 },
     meters: {
       wav: wavMeters,
       mp4: mp4Meters,
@@ -180,7 +194,8 @@ for (const id of ids) {
       mp4: rel(mp4),
       review: rel(images.review),
       reviewLow: rel(images.low),
-      sha256: { wav: await sha256(wav), mp4: await sha256(mp4) }
+      beatmap: rel(beatmapPath),
+      sha256: { wav: wavSha, mp4: await sha256(mp4) }
     },
     renderSeconds: +((Date.now() - started) / 1000).toFixed(1)
   };
@@ -194,8 +209,8 @@ manifest = {
   originality: "Every sound is synthesized in src/audio/score-v7.mjs from oscillators and noise. No samples, loops, downloaded audio or existing melodies.",
   picture: { file: rel(picture), durationSeconds: duration, endCardSeconds: cues.endCard, chapterCutCheck: pictureCheck },
   mux: "Picture stream-copied (-c:v copy); AAC-LC 192 kbps, 48 kHz stereo.",
-  target: { integratedLufs: -16, truePeakDbtpMax: -1.5 },
-  candidates: Object.fromEntries(Object.entries(manifest.candidates).sort(([a], [b]) => a.localeCompare(b)))
+  current: Object.keys(PRESETS).filter((id) => PRESETS[id].status === "candidate"),
+  candidates: Object.fromEntries(Object.entries(manifest.candidates).sort(([a], [b]) => a.localeCompare(b)).map(([id, c]) => [id, { ...c, status: PRESETS[id]?.status ?? c.status }]))
 };
 await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 console.log(`Wrote ${rel(manifestPath)}`);

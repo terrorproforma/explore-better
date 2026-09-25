@@ -57,29 +57,60 @@ Generated media (`capture/`, `output/`, `public/live.mp4`) is gitignored. Older 
 
 ```powershell
 cd demo-video-v2
-npm run render:music            # all three candidates, about 30 seconds
-npm run render:music -- B       # one (or any subset) of A, B, C
+npm run render:music            # current candidates D and E, about 25 seconds
+npm run render:music -- A C     # any subset; A-C are the rejected first round
 ```
 
-This replaces only the soundtrack. It reads `chapters-v6.json` and the published picture `site/assets/explore-better-demo.mp4`, then writes three fully arranged and mastered scores. Each one is muxed onto that picture with `-c:v copy`, so the video stream stays bit-identical. Nothing in `site/assets` is changed. The owner picks a candidate before the site MP4 is replaced.
+This replaces only the soundtrack. It reads `chapters-v6.json` and the published picture `site/assets/explore-better-demo.mp4`, then writes fully arranged and mastered scores. Each one is muxed onto that picture with `-c:v copy`, so the video stream stays bit-identical. Nothing in `site/assets` is changed. The owner picks a candidate before the site MP4 is replaced and the picture is re-cut to its beat map.
 
-| | Style | Tempo (nominal / per chapter) | Key and harmony |
+**Current candidates: original dark techno.** The genre and production style follow Gesaffelstein-type dark techno / EBM. No riff, chord sequence, rhythm or sound is taken from any existing track.
+
+| | Style | Tempo | Key and harmony |
 | --- | --- | --- | --- |
-| A | Warm electronic: soft four-on-the-floor, detuned supersaw pads with filter movement, pluck arpeggio, round sub, gentle kick-keyed pumping, airy hats and shaker, sparse FM-bell counter-line in the two peak chapters | 114 BPM (111.8–116.1) | F major, vi–IV–I–V loop, breakdown on IV–I/3–ii, final vi–ii–IV–V → Fadd9 |
-| B | Minimal piano + pulse: additive piano ostinato with velocity and humanised timing, soft sub pulse, rim, shaker, felt kick, string swells into each chapter | 99 BPM (96.8–100.8) | D major, I–V/3–vi / IV–I/3–V, final IV–ii–Vsus–V → Dadd9 |
-| C | Upbeat synth-pop: punchy kick and clap, driving eighth-note bass, gated arpeggio, short hook at the title that returns over the final V bar | 123 BPM (120.9–125.8) | G major, IV–V into I at the first chapter, I–V/3–vi–IV, final vi–ii–IV–V → G |
+| D | Club: relentless 4/4, saturated kick with a reverb rumble, rolling 16th off-beat distorted bass (octave and flat-2 flicks, bit-crush in places), gritty hats, metal hits, a sparse gliding square riff on the two AI chapters, stabs with gated reverb, impacts on the cuts | 128 BPM, with free-time stops before the disk and transfer cuts; 125.8–130.9 elsewhere | F minor with phrygian Gb; i–bVI–bVII, bII tension, breakdown bVI–iv–V, final V → i |
+| E | Cinematic march (the *Pursuit*-style lane): massive dry distorted kick, huge cold claps with a metallic layer in a dark hall, saturated detuned brass stabs with dissonant voicings (b9, #11, tritone, two minor triads a half step apart) and pitch dives, sustained brass chords with builds that open the filter, an eerie held high line with vibrato and slow drift, sparse ticks, stops before key cuts, and a drone-and-stabs breakdown mid-video | 122 BPM (120.9–122.7), with free-time stops before the transfer and scope cuts | E phrygian; i–bVI–bII, breakdown bVI–iv–V, final V → i |
 
-**Timing.** Every chapter is a whole number of beats. Tempo is constant inside a chapter and nudged by at most about 2.5 % between chapters, so every chapter cut and the end card fall exactly on a bar line (0 ms offset, sample-quantised). When a chapter is not a multiple of four beats, the remainder becomes a 1–3 beat pickup bar at the end of that chapter. That bar carries the fill, the stop or the riser into the next downbeat. The music follows the exact picture-cut frames, which scene detection finds within 3 ms of the rounded JSON times. The title card has no hard cut, so the first chapter uses its JSON time. The end card cut (52.900 s) is detected the same way. The title card starts with a pad from 0 s and a one-bar pickup. The last chapter cadences onto the tonic at the end card, and everything decays naturally, with a 0.7 s raised-cosine safety fade that ends on the last frame.
+The first round (A warm electronic, B minimal piano, C synth-pop; −16 LUFS masters) was rejected and is kept in the module for reference.
 
-**Synthesis and mix** (`src/audio/score-v7.mjs`, no dependencies). The module uses polyBLEP band-limited oscillators and an additive piano built from inharmonic partials, hammer strike-position comb, two-stage decay, detuned unison strings and a damper. Filters are TPT state-variable (enveloped and LFO-modulated) and RBJ biquads. Envelopes are ADSR. Effects are a cross-fed chorus, a tempo-synced ping-pong delay and an 8-line FDN reverb. Every stem is level-matched to a K-weighted target, EQ-carved (high-passed pads, bass low-passed, hats low-passed at 10–11 kHz) and ducked from the kick where it fits the style. The drum bus is compressed. Mastering applies a 30 Hz 4th-order high-pass, a gentle tilt EQ and glue compression. A BS.1770 loop then sets −16 LUFS integrated, and an offline true-peak limiter caps output at −1.8 dBTP, so the AAC stays at or below −1.5 dBTP. Masters are 48 kHz / 24-bit with TPDF dither.
+**Timing.** Every chapter is a whole number of beats, so every chapter cut and the end card land exactly on a bar line (0 ms offset, sample-quantised). A chapter either nudges its tempo slightly, or keeps the preset tempo and ends in a short free-time stop (0.2–0.45 s of silence plus tails and a reversed-reverb swell) that absorbs the remainder. With the stop, the next downbeat hits on the cut as a drop. When a chapter is not a multiple of four beats, the remainder becomes a 1–3 beat pickup bar carrying the fill, stop or riser. The music follows the exact picture-cut frames, which scene detection finds within 3 ms of the rounded JSON times. The title card has no hard cut, so the first chapter uses its JSON time. The end card cut (52.900 s) is detected the same way. The title plays a drone, a riser and a reversed swell, and the groove slams in at 2.5 s. The last impact lands on the end card, followed by a dark tail that decays to silence on the last frame.
+
+**Beat maps for the picture re-edit.** Each render writes `output/music-v7/beatmap-<X>.json`. D and E are also copied to the tracked `music/beatmap-<D|E>.json`. All times are seconds, rounded to whole samples at 48 kHz:
+
+- `tempoMap: [{ time, bpm }]`. An entry with `bpm: null` is a free-time stop or the title pre-roll.
+- `beats`, and `bars` (downbeats).
+- `sections: [{ name, start, end, energy }]`.
+- `hits: [{ time, kind, strength }]`. Kinds are `impact`, `drop` (the downbeat after a stop), `stop`, `stab`, `clap`, `kick-accent`, `riser-start`, `riser-end`, `lead-in` and `lead-out`. Strength runs 0–1.
+
+Chapter cuts stay on downbeats, so a re-edit keeps the cut points and moves intra-chapter events (caption slams, keycaps, zoom pushes, reveals) onto beats and strong hits.
+
+**Synthesis and mix** (`src/audio/score-v7.mjs`, no dependencies). Everything is synthesized:
+- **Oscillators:** polyBLEP band-limited, plus an additive piano (A–C).
+- **Filters and envelopes:** TPT state-variable (enveloped and LFO-modulated) and RBJ biquad filters, with ADSR envelopes.
+- **Effects:** chorus, a tempo-synced ping-pong delay, an 8-line FDN reverb, a short room reverb and a gated reverb.
+- **Kick:** a two-stage pitch drop with an asymmetric waveshaper, choked by the next kick.
+- **Bass:** pre- and post-drive around a resonant filter, with optional bit and sample-rate crush.
+- **Percussion:** metal hits from inharmonic ring-modulated partials; hats from saturated noise and square "metal".
+- **Transition effects:** reversed-reverb swells rendered through the reverb, noise risers and downlifters.
+
+Every stem is level-matched to a K-weighted target, EQ-carved and ducked from the kick. The drum bus is compressed. E's brass runs on a synth bus with parallel distortion.
+
+The D/E master chain:
+1. 30 Hz high-pass and tilt EQ.
+2. Tape-style saturation.
+3. Mono below 120 Hz.
+4. Glue compression.
+5. A BS.1770 loop to −14 LUFS, with an offline true-peak limiter at −1.6 dBTP so the AAC stays at or below −1.0 dBTP.
+
+A–C were mastered to −16 LUFS and −1.8 dBTP. Masters are 48 kHz / 24-bit with TPDF dither.
 
 **Outputs** in `output/music-v7/` (gitignored):
 
-- `explore-better-music-<A|B|C>.wav`: the masters.
-- `explore-better-demo-<A|B|C>.mp4`: preview cuts (AAC 192 kbps, 48 kHz stereo).
+- `explore-better-music-<X>.wav`: the masters.
+- `explore-better-demo-<X>.mp4`: preview cuts (AAC 192 kbps, 48 kHz stereo).
+- `beatmap-<X>.json`: see above.
 - `review-<X>.png`: log-frequency spectrogram over the waveform. Blue lines mark the cuts; grey lines mark 30 Hz and 10 kHz.
 - `review-<X>-low.png`: 0–500 Hz, for the sub and rumble check.
-- `manifest.json`: tempo map, key, progression per chapter, cue alignment table (chapter time vs nearest bar and beat in ms, plus what a constant tempo would have missed by), per-chapter loudness, and meters for WAV and MP4 (integrated loudness, LRA, true peak, DC offset, band RMS below 30 Hz and above 10 kHz, stereo phase). Everything is measured independently with ffmpeg.
+- `manifest.json`: status, tempo map (including stops), key, progression per chapter, cue alignment table (chapter time vs nearest bar and beat in ms, plus what a constant tempo would have missed by), per-chapter loudness, and meters for WAV and MP4 (integrated loudness, LRA, true peak, DC offset, band RMS below 30 Hz and above 10 kHz, stereo phase). Everything is measured independently with ffmpeg.
 
 ## v2 (original hype cut)
 
