@@ -12,6 +12,7 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { StringDecoder } from "node:string_decoder";
 import { powerShellLiteral as quotePowerShellLiteral, cmdQuote } from "./lib/shell-quote.mjs";
+import { writeFileAtomic as writeFileAtomicShared } from "./lib/atomic-write.mjs";
 import { pathSnapshot, validSnapshot, decodeEditableText, encodeEditableText, readEditableTextFile, assertSafeDestination, physicalPath, insidePath, durableWrite, replaceFileTransaction, sameFileIdentity } from "./filesystem-integrity.mjs";
 import * as shellRegistry from "./lib/shell-registry.mjs";
 
@@ -4223,6 +4224,9 @@ function resolveUserPath(value) {
   if (text.startsWith("~/") || text.startsWith("~\\")) {
     return path.resolve(path.join(os.homedir(), text.slice(2)));
   }
+  if (process.platform === "win32" && /^[A-Za-z]:$/.test(text)) {
+    return path.resolve(`${text}\\`);
+  }
   return path.resolve(text);
 }
 
@@ -4709,9 +4713,7 @@ async function flushFolderDimensionsCache(cache, entries = []) {
       updatedAt: new Date().toISOString(),
       entries: cache.entries
     };
-    const temp = `${cache.file}.${process.pid}.${Date.now()}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(payload, null, 2), "utf8");
-    await fs.rename(temp, cache.file);
+    await writeFileAtomicShared(cache.file, JSON.stringify(payload));
     cache.writeMs = elapsedMs(writeStart);
     cache.dirty = false;
   }
@@ -4793,9 +4795,83 @@ function parseAttribLine(line) {
   };
 }
 
+function runProcessBuffered(file, args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(file, args, { windowsHide: true, env: options.env || process.env });
+    const chunks = [];
+    let settled = false;
+    const finish = (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ code, stdout: Buffer.concat(chunks) });
+    };
+    const timeout = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {}
+      finish(-1);
+    }, Number(options.timeoutMs || 30000));
+    timeout.unref?.();
+    child.stdout.on("data", (chunk) => chunks.push(chunk));
+    child.stderr.resume();
+    child.on("error", () => finish(-1));
+    child.on("exit", (code) => finish(code));
+  });
+}
+
+const windowsAttributeLetters = [
+  [0x1, "R"],
+  [0x2, "H"],
+  [0x4, "S"],
+  [0x20, "A"],
+  [0x400, "L"],
+  [0x800, "C"],
+  [0x4000, "E"],
+  [0x2000, "I"]
+];
+
+// attrib.exe writes names in the OEM code page with best-fit substitution, so
+// directories containing non-ASCII names are read through PowerShell as UTF-8.
+async function powerShellAttributeMap(dir) {
+  const script =
+    "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; " +
+    "Get-ChildItem -LiteralPath $env:EXPLORE_BETTER_ATTRIBUTE_DIR -Force -ErrorAction SilentlyContinue | " +
+    'ForEach-Object { "{0}`t{1}" -f [int]$_.Attributes, $_.Name }';
+  const result = await runProcessBuffered(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    { env: { ...process.env, EXPLORE_BETTER_ATTRIBUTE_DIR: dir }, timeoutMs: 60000 }
+  );
+  if (result.code !== 0) {
+    return null;
+  }
+  const map = new Map();
+  for (const line of result.stdout.toString("utf8").split(/\r?\n/)) {
+    const tab = line.indexOf("\t");
+    const value = Number(line.slice(0, tab));
+    const name = line.slice(tab + 1);
+    if (tab <= 0 || !Number.isInteger(value) || !name) {
+      continue;
+    }
+    const flags = windowsAttributeLetters.filter(([bit]) => (value & bit) !== 0).map(([, letter]) => letter).join("");
+    map.set(pathIdentity(path.join(dir, name)), flags);
+  }
+  return map;
+}
+
 async function windowsAttributeMap(dir) {
   if (process.platform !== "win32") {
     return new Map();
+  }
+  const names = await fs.readdir(dir).catch(() => null);
+  if (names?.some((name) => /[^\x20-\x7e]/.test(name))) {
+    const unicodeMap = await powerShellAttributeMap(dir);
+    if (unicodeMap) {
+      return unicodeMap;
+    }
   }
   const result = await runProcess("attrib.exe", ["/d", path.join(dir, "*")]);
   if (result.code !== 0 && !result.stdout) {
@@ -4804,11 +4880,27 @@ async function windowsAttributeMap(dir) {
   const map = new Map();
   for (const line of result.stdout.split(/\r?\n/)) {
     const record = parseAttribLine(line);
-    if (record?.path) {
+    if (record?.path && !/[^\x20-\x7e]|\?/.test(record.path)) {
       map.set(pathIdentity(record.path), record.flags);
     }
   }
   return map;
+}
+
+// Querying the item itself avoids enumerating its parent, and the flags are read
+// without matching the echoed name, which attrib.exe may have transcoded lossily.
+async function windowsAttributeFlagsForPath(itemPath) {
+  if (process.platform !== "win32") {
+    return "";
+  }
+  const result = await runProcess("attrib.exe", [itemPath]);
+  for (const line of String(result.stdout || "").split(/\r?\n/)) {
+    const match = /^([A-Z ]*?)\s*([A-Za-z]:\\.*|\\\\.*)$/.exec(line.trimEnd());
+    if (match) {
+      return match[1].replace(/[^A-Z]/g, "");
+    }
+  }
+  return "";
 }
 
 async function nativeWindowsAttributeMap(dir, signal = null) {
@@ -5229,8 +5321,7 @@ async function statPathEntry(itemPath) {
   const name = path.basename(resolved) || resolved;
   const isDirectory = stats.isDirectory();
   const extension = isDirectory ? "" : path.extname(name).toLowerCase();
-  const attributeMap = await windowsAttributeMap(path.dirname(resolved));
-  const attributes = attributesForEntry(name, stats, attributeMap.get(pathIdentity(resolved)));
+  const attributes = attributesForEntry(name, stats, await windowsAttributeFlagsForPath(resolved));
   const linkMetadata = await linkMetadataForEntry(resolved, stats, lstat);
   const dimensions = await imageDimensionsForEntry(resolved, stats, extension);
   return {
@@ -5642,6 +5733,10 @@ function dropDirectoryListingCacheForWatchKey(watchKey) {
   }
 }
 
+// Mutation maps also carry each path's parent (for listing invalidation); this
+// records which keys are the mutated paths themselves.
+const directoryListingMutationTargets = new WeakMap();
+
 function addDirectoryListingMutationPath(dirs, itemPath) {
   if (typeof itemPath !== "string") {
     return;
@@ -5653,6 +5748,12 @@ function addDirectoryListingMutationPath(dirs, itemPath) {
   try {
     const resolved = resolveUserPath(text);
     dirs.set(pathIdentity(resolved), resolved);
+    let targets = directoryListingMutationTargets.get(dirs);
+    if (!targets) {
+      targets = new Set();
+      directoryListingMutationTargets.set(dirs, targets);
+    }
+    targets.add(pathIdentity(resolved));
     if (!isRoot(resolved)) {
       const parent = path.dirname(resolved);
       dirs.set(pathIdentity(parent), parent);
@@ -5722,21 +5823,23 @@ function invalidateDirectoryListingCachesForOperation(type, body, output, error 
   return invalidateDirectoryListingCachesForDirs(dirs, `operation:${type}`);
 }
 
-function backgroundIndexRootMatchesMutation(root, mutationPath) {
+function backgroundIndexRootMatchesMutation(root, mutationPath, includeAncestor = true) {
   if (!root?.path || root.enabled === false || typeof mutationPath !== "string") {
     return false;
   }
   try {
     const rootPath = resolveUserPath(root.path);
     const itemPath = resolveUserPath(mutationPath);
-    return isInsidePath(itemPath, rootPath) || isInsidePath(rootPath, itemPath);
+    return isInsidePath(itemPath, rootPath) || (includeAncestor && isInsidePath(rootPath, itemPath));
   } catch {
     return false;
   }
 }
 
 async function invalidateBackgroundIndexesForDirs(dirs, reason = "mutation", source = "operation") {
-  const affectedPaths = [...dirs.values()].filter(Boolean);
+  const targets = directoryListingMutationTargets.get(dirs);
+  const affectedEntries = [...dirs].filter(([, itemPath]) => Boolean(itemPath));
+  const affectedPaths = affectedEntries.map(([, itemPath]) => itemPath);
   if (!affectedPaths.length) {
     return { reason, affected: 0, roots: [] };
   }
@@ -5745,7 +5848,9 @@ async function invalidateBackgroundIndexesForDirs(dirs, reason = "mutation", sou
   const roots = Array.isArray(state.backgroundIndexes) ? state.backgroundIndexes : [];
   const affectedRoots = [];
   for (const root of roots) {
-    const matches = affectedPaths.filter((itemPath) => backgroundIndexRootMatchesMutation(root, itemPath));
+    const matches = affectedEntries
+      .filter(([key, itemPath]) => backgroundIndexRootMatchesMutation(root, itemPath, !targets || targets.has(key)))
+      .map(([, itemPath]) => itemPath);
     if (!matches.length) {
       continue;
     }
@@ -5821,14 +5926,7 @@ async function safelyInvalidateBackgroundIndexesForOperation(type, body, output,
 }
 
 function directoryListingCacheWatcherForDir(dir) {
-  const watchKey = pathIdentity(dir);
-  let record = folderWatchers.get(watchKey);
-  if (!record) {
-    record = createFolderWatcher(dir, watchKey);
-  }
-  record.lastAccess = Date.now();
-  pruneFolderWatchers();
-  return record;
+  return folderWatcherRecordForDir(dir);
 }
 
 function directoryListingCacheHitPayload(cached, context) {
@@ -5938,7 +6036,20 @@ async function coalescedDirectoryListing(context, loader) {
   if (existing) {
     existing.joined += 1;
     const joinedAt = monotonicMs();
-    const listing = await existing.promise;
+    let listing;
+    try {
+      listing = await existing.promise;
+    } catch (error) {
+      // The shared load ran under the first requester's signal; a joiner that is
+      // still wanted retries with its own loader instead of inheriting the abort.
+      if (!isAbortError(error) || context.signal?.aborted) {
+        throw error;
+      }
+      if (directoryListingInFlight.get(inFlightKey) === existing) {
+        directoryListingInFlight.delete(inFlightKey);
+      }
+      return coalescedDirectoryListing(context, loader);
+    }
     return directoryListingInFlightHitPayload(listing, context, existing, joinedAt);
   }
   const entry = {
@@ -6055,7 +6166,14 @@ async function buildDirectoryListingFromDisk(params) {
     ]);
   } catch (error) {
     if (isAccessError(error)) {
-      return accessDeniedListing(dir, error, timingStart, { ...options, redirectedFrom: redirected ? requestedOriginal : null });
+      return accessDeniedListing(dir, error, timingStart, {
+        showHidden,
+        includeDimensions,
+        includeLinks,
+        includeAttributes,
+        includeSignature,
+        redirectedFrom: redirected ? requestedOriginal : null
+      });
     }
     throw error;
   }
@@ -6114,7 +6232,13 @@ async function buildDirectoryListingFromDisk(params) {
   }
   const statMs = elapsedMs(statStart);
   const dimensionsCacheStart = monotonicMs();
-  const dimensionsCacheSummary = includeDimensions ? await flushFolderDimensionsCache(dimensionsCacheState, statResults) : null;
+  const dimensionsCacheSummary = includeDimensions
+    ? await flushFolderDimensionsCache(dimensionsCacheState, statResults).catch((error) => ({
+        root: metadataCacheRoot,
+        file: dimensionsCacheState?.file || null,
+        writeError: error?.message || String(error)
+      }))
+    : null;
   const dimensionsCacheMs = includeDimensions ? elapsedMs(dimensionsCacheStart) : 0;
 
   throwIfAborted(signal);
@@ -6269,7 +6393,8 @@ async function listDirectory(targetPath, options = {}) {
       dirStamp: directoryListingCacheStamp(targetStats),
       watcherAvailable,
       skipReason: watcherAvailable ? "miss" : watchRecord?.error || "watch-unavailable",
-      probeMs: 0
+      probeMs: 0,
+      signal
     };
     if (watcherAvailable) {
       labelState = await readLabelState();
@@ -6722,22 +6847,24 @@ function folderIndexCacheMatches(entry, stamp) {
   );
 }
 
+// Serializes once and appends a trailing "bytes" field holding the final file size.
+function serializeJsonWithBytes(payload) {
+  delete payload.bytes;
+  const body = JSON.stringify(payload);
+  const prefix = `${body.length > 2 ? "," : ""}"bytes":`;
+  const baseBytes = Buffer.byteLength(body) + prefix.length;
+  let bytes = baseBytes + 1;
+  while (String(bytes).length !== bytes - baseBytes) {
+    bytes += 1;
+  }
+  payload.bytes = bytes;
+  return `${body.slice(0, -1)}${prefix}${bytes}}`;
+}
+
 async function writeFolderIndex(index) {
   await fs.mkdir(indexRoot, { recursive: true });
   const target = folderIndexFileForPath(index.path);
-  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  let text = "";
-  let previousBytes = -1;
-  for (let pass = 0; pass < 4; pass += 1) {
-    text = JSON.stringify(index, null, 2);
-    const bytes = Buffer.byteLength(text);
-    if (bytes === previousBytes) break;
-    index.bytes = bytes;
-    previousBytes = bytes;
-  }
-  text = JSON.stringify(index, null, 2);
-  await fs.writeFile(temp, text, "utf8");
-  await fs.rename(temp, target);
+  await writeFileAtomicShared(target, serializeJsonWithBytes(index));
   try {
     const stat = await fs.stat(target);
     const stamp = folderIndexCacheStamp(stat);
@@ -6868,6 +6995,11 @@ async function readFolderIndexResult(targetPath) {
 }
 
 async function buildFolderIndex(targetPath, options = {}) {
+  return writeFolderIndex(await buildFolderIndexData(targetPath, options));
+}
+
+// Lists and compacts a folder without persisting a per-folder index file.
+async function buildFolderIndexData(targetPath, options = {}) {
   const buildStart = monotonicMs();
   const resolved = resolveUserPath(targetPath);
   const listing = await listDirectory(resolved, {
@@ -6898,16 +7030,18 @@ async function buildFolderIndex(targetPath, options = {}) {
     count: entries.length,
     listTiming: listing.timing,
     buildMs: elapsedMs(buildStart),
-    tokenIndex: buildBackgroundSearchTokenIndex(entries),
+    tokenIndex: options.tokenIndex === false ? null : buildBackgroundSearchTokenIndex(entries),
     entries
   };
-  return writeFolderIndex(index);
+  return index;
 }
 
 function pruneFolderIndexJobs() {
   const jobs = [...folderIndexJobs.values()].sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
   for (const job of jobs.slice(folderIndexJobLimit)) {
-    folderIndexJobs.delete(job.id);
+    if (job.status !== "running") {
+      folderIndexJobs.delete(job.id);
+    }
   }
 }
 
@@ -7045,8 +7179,17 @@ async function searchFolderIndex({ targetPath, query, limit = 120 } = {}) {
   };
 }
 
+// Root ids arrive in request bodies, so only plain ids are used verbatim as file
+// name parts; anything else is hashed to keep store files inside indexRoot.
 function backgroundIndexStoreId(rootId) {
-  return sanitizeReferenceId(rootId) || crypto.randomUUID();
+  const id = sanitizeReferenceId(rootId);
+  if (!id) {
+    return crypto.randomUUID();
+  }
+  if (/^[A-Za-z0-9_-]{1,120}$/.test(id)) {
+    return id;
+  }
+  return `h-${crypto.createHash("sha256").update(id).digest("hex").slice(0, 32)}`;
 }
 
 function backgroundIndexManifestFile(rootId) {
@@ -7057,11 +7200,9 @@ function backgroundIndexSearchFile(rootId) {
   return path.join(indexRoot, `background-${backgroundIndexStoreId(rootId)}-search.json`);
 }
 
-async function writeJsonAtomic(filePath, payload) {
+async function writeJsonAtomic(filePath, payload, text = null) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const temp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(temp, JSON.stringify(payload, null, 2), "utf8");
-  await fs.rename(temp, filePath);
+  await writeFileAtomicShared(filePath, text ?? JSON.stringify(payload));
   return payload;
 }
 
@@ -7088,9 +7229,41 @@ async function readJsonFile(filePath) {
   }
 }
 
+const transientJsonReadCodes = new Set(["EBUSY", "EMFILE", "ENFILE", "EAGAIN", "EPERM", "EACCES"]);
+
+async function readJsonTextWithRetry(filePath, attempts = 4) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fs.readFile(filePath, "utf8");
+    } catch (error) {
+      if (!transientJsonReadCodes.has(error?.code) || attempt >= attempts - 1) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+}
+
+// Only unparsable or schema-invalid files are quarantined; I/O failures (locks,
+// handle exhaustion, oversized files) leave a possibly valid cache in place.
 async function readRepairableJsonFile(filePath) {
+  let text;
   try {
-    const text = await fs.readFile(filePath, "utf8");
+    text = await readJsonTextWithRetry(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { data: null, missing: true, corrupt: false, error: null, quarantinedPath: null };
+    }
+    return {
+      data: null,
+      missing: false,
+      corrupt: false,
+      error: error.message || String(error),
+      readErrorCode: error.code || null,
+      quarantinedPath: null
+    };
+  }
+  try {
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return {
@@ -7103,9 +7276,6 @@ async function readRepairableJsonFile(filePath) {
     }
     return { data: parsed, missing: false, corrupt: false, error: null, quarantinedPath: null };
   } catch (error) {
-    if (error.code === "ENOENT") {
-      return { data: null, missing: true, corrupt: false, error: null, quarantinedPath: null };
-    }
     return {
       data: null,
       missing: false,
@@ -7133,17 +7303,22 @@ function clampDays(value, fallback) {
 }
 
 async function readJsonForCacheMaintenance(filePath) {
+  let text;
   try {
-    const text = await fs.readFile(filePath, "utf8");
+    text = await readJsonTextWithRetry(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { data: null, corrupt: false, missing: true, error: null };
+    }
+    return { data: null, corrupt: false, missing: false, error: error.message || String(error) };
+  }
+  try {
     const data = JSON.parse(text);
     if (!data || typeof data !== "object" || Array.isArray(data)) {
       return { data: null, corrupt: true, missing: false, error: "JSON root is not an object." };
     }
     return { data, corrupt: false, missing: false, error: null };
   } catch (error) {
-    if (error.code === "ENOENT") {
-      return { data: null, corrupt: false, missing: true, error: null };
-    }
     return { data: null, corrupt: true, missing: false, error: error.message || String(error) };
   }
 }
@@ -7156,12 +7331,11 @@ async function statOrNull(filePath) {
   }
 }
 
-async function readdirFilesOrEmpty(dirPath, limit) {
+async function readdirFilesOrEmpty(dirPath) {
   try {
     const dirents = await fs.readdir(dirPath, { withFileTypes: true });
     return dirents
       .filter((dirent) => dirent.isFile())
-      .slice(0, limit)
       .map((dirent) => path.join(dirPath, dirent.name));
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -7223,6 +7397,8 @@ async function deleteOwnedCacheFile(filePath, rootPath) {
   await fs.rm(filePath, { force: true });
 }
 
+const cacheMaintenanceTempMinAgeMs = 10 * 60 * 1000;
+
 async function cacheMaintenanceDecision(filePath, cacheKind, rootPath, context) {
   const stat = await statOrNull(filePath);
   if (!stat?.isFile?.()) {
@@ -7245,18 +7421,12 @@ async function cacheMaintenanceDecision(filePath, cacheKind, rootPath, context) 
     return { ...base, reason: "quarantined-cache", delete: true };
   }
   if (name.endsWith(".tmp")) {
-    return { ...base, reason: "stale-temp-file", delete: age.ageMs >= Math.min(context.maxAgeMs, 60 * 60 * 1000) };
+    // Temp files younger than ten minutes may belong to a write still in progress.
+    const tempAgeMs = Math.max(cacheMaintenanceTempMinAgeMs, Math.min(context.maxAgeMs, 60 * 60 * 1000));
+    return { ...base, reason: "stale-temp-file", delete: age.ageMs >= tempAgeMs };
   }
   if (!name.endsWith(".json")) {
     return null;
-  }
-
-  const read = await readJsonForCacheMaintenance(filePath);
-  if (read.corrupt) {
-    return { ...base, reason: "corrupt-json", readError: read.error, delete: true };
-  }
-  if (!read.data) {
-    return { ...base, reason: "missing-cache-file", delete: false };
   }
 
   if (cacheKind === "index" && isBackgroundCacheFile(filePath)) {
@@ -7269,6 +7439,14 @@ async function cacheMaintenanceDecision(filePath, cacheKind, rootPath, context) 
       return { ...base, reason: "active-background-root-preserved", delete: false, protected: true, rootId };
     }
     return { ...base, reason: "active-background-root", delete: false, protected: true, rootId };
+  }
+
+  const read = await readJsonForCacheMaintenance(filePath);
+  if (read.corrupt) {
+    return { ...base, reason: "corrupt-json", readError: read.error, delete: true };
+  }
+  if (!read.data) {
+    return { ...base, reason: read.error ? "cache-read-error" : "missing-cache-file", readError: read.error, delete: false };
   }
 
   if (cacheKind === "index") {
@@ -7311,15 +7489,17 @@ async function cacheMaintenanceDecision(filePath, cacheKind, rootPath, context) 
 async function cacheMaintenanceReport(options = {}) {
   const opts = cacheMaintenanceOptions(options, options.method || "GET");
   const state = await readState();
-  const activeBackgroundRootIds = new Set((state.backgroundIndexes || []).map((root) => root.id).filter(Boolean));
+  const activeBackgroundRootIds = new Set(
+    (state.backgroundIndexes || []).map((root) => root.id).filter(Boolean).map(backgroundIndexStoreId)
+  );
   const context = {
     nowMs: Date.now(),
     maxAgeMs: opts.maxAgeMs,
     activeBackgroundRootIds
   };
   const dimensionsRoot = path.join(metadataCacheRoot, "Dimensions");
-  const indexFiles = (await readdirFilesOrEmpty(indexRoot, opts.fileLimit)).filter(cacheFileLooksMaintenanceEligible);
-  const metadataFiles = (await readdirFilesOrEmpty(dimensionsRoot, opts.fileLimit)).filter(cacheFileLooksMaintenanceEligible);
+  const indexFiles = (await readdirFilesOrEmpty(indexRoot)).filter(cacheFileLooksMaintenanceEligible);
+  const metadataFiles = (await readdirFilesOrEmpty(dimensionsRoot)).filter(cacheFileLooksMaintenanceEligible);
   const decisions = [];
   for (const filePath of indexFiles) {
     const decision = await cacheMaintenanceDecision(filePath, "index", indexRoot, context);
@@ -7388,8 +7568,32 @@ async function cacheMaintenanceReport(options = {}) {
     byCache,
     byReason,
     items: opts.includeItems ? decisions.slice(0, opts.fileLimit) : undefined,
-    appliedItems: opts.includeItems ? appliedItems : undefined
+    appliedItems: opts.includeItems ? appliedItems.slice(0, opts.fileLimit) : undefined
   };
+}
+
+let cacheMaintenanceScheduled = false;
+
+// Applies the default maintenance policy shortly after startup and then daily.
+function scheduleCacheMaintenance() {
+  if (cacheMaintenanceScheduled || process.env.EXPLORE_BETTER_CACHE_MAINTENANCE === "0") {
+    return;
+  }
+  cacheMaintenanceScheduled = true;
+  let running = false;
+  const run = async () => {
+    if (running) return;
+    running = true;
+    try {
+      await cacheMaintenanceReport({ method: "POST", apply: true, includeItems: false });
+    } catch (error) {
+      console.warn(`Cache maintenance failed: ${error.message || error}`);
+    } finally {
+      running = false;
+    }
+  };
+  setTimeout(run, 2 * 60 * 1000).unref?.();
+  setInterval(run, 24 * 60 * 60 * 1000).unref?.();
 }
 
 function backgroundIndexJobSnapshot(job) {
@@ -7413,7 +7617,9 @@ function pruneBackgroundIndexJobs() {
     String(b.startedAt).localeCompare(String(a.startedAt))
   );
   for (const job of jobs.slice(backgroundIndexJobLimit)) {
-    backgroundIndexJobs.delete(job.id);
+    if (job.status !== "running") {
+      backgroundIndexJobs.delete(job.id);
+    }
   }
 }
 
@@ -7735,6 +7941,7 @@ async function backgroundIndexFreshness(root, store, manifest = null) {
   const entries = entryFreshnessStamps(store);
   const limitedFolders = folders.slice(0, folderLimit);
   const limitedEntries = entries.slice(0, entryLimit);
+  const entryTotal = Number.isFinite(store.freshnessEntryTotal) ? store.freshnessEntryTotal : entries.length;
   const base = {
     builtAt: store.builtAt || manifest?.builtAt || null,
     foldersChecked: 0,
@@ -7743,9 +7950,9 @@ async function backgroundIndexFreshness(root, store, manifest = null) {
     entrySamples: limitedEntries.length,
     folderSampleLimit: folderLimit,
     entrySampleLimit: entryLimit,
-    sampleLimited: folders.length > limitedFolders.length || entries.length > limitedEntries.length,
+    sampleLimited: folders.length > limitedFolders.length || entryTotal > limitedEntries.length,
     checkedFoldersTotal: folders.length,
-    checkedEntriesTotal: entries.length
+    checkedEntriesTotal: entryTotal
   };
 
   let result;
@@ -8045,23 +8252,35 @@ async function writeBackgroundIndexStore(root, manifest, entries) {
     tokenIndex,
     entries
   };
-  let text = "";
-  let previousBytes = -1;
-  for (let pass = 0; pass < 4; pass += 1) {
-    text = JSON.stringify(searchStore, null, 2);
-    const bytes = Buffer.byteLength(text);
-    if (bytes === previousBytes) break;
-    searchStore.bytes = bytes;
-    previousBytes = bytes;
-  }
+  const text = serializeJsonWithBytes(searchStore);
   const searchFile = backgroundIndexSearchFile(root.id);
-  await writeJsonAtomic(searchFile, searchStore);
+  await writeJsonAtomic(searchFile, searchStore, text);
   backgroundIndexSearchStoreCache.delete(searchFile);
+  try {
+    // Seed the store cache with the object just written so the first search
+    // after a build does not have to re-read and parse it.
+    const stamp = backgroundIndexSearchStoreCacheStamp(await fs.stat(searchFile));
+    if (stamp.size === searchStore.bytes) {
+      backgroundIndexSearchStoreCache.set(searchFile, {
+        result: { data: searchStore, missing: false, corrupt: false, error: null, quarantinedPath: null },
+        size: stamp.size,
+        mtimeMs: stamp.mtimeMs,
+        bytes: stamp.size,
+        lastUsedMs: Date.now()
+      });
+      pruneBackgroundIndexSearchStoreCache();
+    }
+  } catch {}
   backgroundIndexFreshnessCache.clear();
+  const freshnessEntries = entryFreshnessStamps(searchStore);
   return writeJsonAtomic(backgroundIndexManifestFile(root.id), {
     ...manifest,
     searchFile,
-    bytes: searchStore.bytes
+    bytes: searchStore.bytes,
+    // Lets the overview summarize and freshness-check without parsing the store.
+    searchSummary: { ...backgroundIndexStoreSummary(searchStore), version: searchStore.version },
+    freshnessEntries: freshnessEntries.slice(0, backgroundIndexFreshnessLimits().entryLimit),
+    freshnessEntryTotal: freshnessEntries.length
   });
 }
 
@@ -8167,8 +8386,11 @@ async function backgroundIndexContentForEntries(root, entries, remainingContentS
 }
 
 function backgroundIndexSearchEntry(root, folderPath, entry, content = null) {
-  const contentText = content?.indexed ? String(content.text || "") : "";
-  const searchText = [entry.searchText || "", contentText].filter(Boolean).join("\n").toLowerCase();
+  // Content is stored once, as the tail of searchText starting at contentOffset;
+  // stores from older versions carry a separate contentText field instead.
+  const metaText = String(entry.searchText || "").toLowerCase();
+  const contentText = content?.indexed ? String(content.text || "").toLowerCase() : "";
+  const searchText = metaText && contentText ? `${metaText}\n${contentText}` : metaText || contentText;
   return {
     rootId: root.id,
     rootName: root.name,
@@ -8201,9 +8423,16 @@ function backgroundIndexSearchEntry(root, folderPath, entry, content = null) {
     dimensionPixels: Number(entry.dimensionPixels || 0),
     contentIndexed: content?.indexed === true,
     contentBytes: Number(content?.bytes || 0),
-    contentText: contentText.toLowerCase(),
+    contentOffset: searchText.length - contentText.length,
     searchText
   };
+}
+
+function backgroundEntryContentText(entry) {
+  if (typeof entry?.contentText === "string") {
+    return entry.contentText;
+  }
+  return entry?.contentIndexed ? String(entry.searchText || "").slice(Number(entry.contentOffset) || 0) : "";
 }
 
 async function buildBackgroundIndexRoot(root, job, signal) {
@@ -8254,12 +8483,13 @@ async function buildBackgroundIndexRoot(root, job, signal) {
     let index;
     try {
       if (!(await guard(folderPath))) continue;
-      index = await buildFolderIndex(folderPath, {
+      index = await buildFolderIndexData(folderPath, {
         signal,
         showHidden: root.showHidden !== false,
         includeDimensions: root.includeDimensions === true,
         includeLinks: root.includeLinks === true,
-        priority: "background"
+        priority: "background",
+        tokenIndex: false
       });
     } catch (error) {
       if (isOperationCanceled(error) || isAbortError(error) || signal?.aborted) throw error;
@@ -8448,7 +8678,7 @@ async function deleteBackgroundIndexRoot(rootId) {
     state.backgroundIndexes = (state.backgroundIndexes || []).filter((root) => root.id !== id);
     return state.backgroundIndexes;
   });
-  closeBackgroundIndexWatcher(id);
+  closeBackgroundIndexWatcher(id, { forget: true });
   return { roots };
 }
 
@@ -8491,12 +8721,14 @@ async function startBackgroundIndexJob(rootId) {
       job.status = "complete";
       job.finishedAt = new Date().toISOString();
       job.stats = backgroundIndexStoreSummary(manifest);
-      await updateBackgroundIndexRoot(root.id, {
+      const updatedRoot = await updateBackgroundIndexRoot(root.id, {
         lastCompletedAt: job.finishedAt,
         lastError: null,
         lastStats: job.stats
       });
-      await syncBackgroundIndexWatcher(root, manifest).catch(() => null);
+      if (updatedRoot) {
+        await syncBackgroundIndexWatcher(updatedRoot, manifest).catch(() => null);
+      }
     })
     .catch(async (error) => {
       const canceled = isOperationCanceled(error);
@@ -8526,8 +8758,11 @@ function backgroundIndexWatcherEnabled(root) {
   return Boolean(root?.path && root.enabled !== false && root.watch !== false && root.autoRebuild !== false);
 }
 
-function closeBackgroundIndexWatcher(rootId) {
+function closeBackgroundIndexWatcher(rootId, { forget = false } = {}) {
   const id = sanitizeReferenceId(rootId);
+  if (id && forget) {
+    backgroundIndexAutoRebuilds.delete(id);
+  }
   const record = id ? backgroundIndexWatchers.get(id) : null;
   if (!record) {
     return;
@@ -8547,12 +8782,17 @@ function closeBackgroundIndexWatcher(rootId) {
 }
 
 function closeRemovedBackgroundIndexWatchers(roots = []) {
-  const active = new Set(
-    (Array.isArray(roots) ? roots : []).filter(backgroundIndexWatcherEnabled).map((root) => root.id)
-  );
+  const list = Array.isArray(roots) ? roots : [];
+  const active = new Set(list.filter(backgroundIndexWatcherEnabled).map((root) => root.id));
   for (const rootId of backgroundIndexWatchers.keys()) {
     if (!active.has(rootId)) {
-      closeBackgroundIndexWatcher(rootId);
+      closeBackgroundIndexWatcher(rootId, { forget: true });
+    }
+  }
+  const known = new Set(list.map((root) => root.id));
+  for (const rootId of backgroundIndexAutoRebuilds.keys()) {
+    if (!known.has(rootId)) {
+      backgroundIndexAutoRebuilds.delete(rootId);
     }
   }
 }
@@ -8565,7 +8805,8 @@ function backgroundIndexWatcherSnapshot(rootId) {
         available: record.watchers.length > 0,
         rootId: record.rootId,
         path: record.path,
-        watchedFolders: record.watchers.length,
+        watchedFolders: backgroundIndexWatchedFolderCount(record),
+        recursive: record.recursive === true,
         folderLimit: record.folderLimit,
         debounceMs: record.debounceMs,
         version: record.version,
@@ -8580,8 +8821,13 @@ function backgroundIndexWatcherSnapshot(rootId) {
     : null;
 }
 
-function backgroundIndexWatchFolders(root, manifest = null) {
+function backgroundIndexWatchedFolderCount(record) {
+  return record.recursive ? record.folderKeys.size : record.watchers.length;
+}
+
+function backgroundIndexWatchFolders(root, manifest = null, recursive = false) {
   const folderLimit = backgroundIndexWatchFolderLimit();
+  const cap = recursive ? Infinity : folderLimit;
   const seen = new Set();
   const folders = [];
   const sourceFolders = manifest?.version === 2 && Array.isArray(manifest.folders) && manifest.folders.length ? manifest.folders : [{ path: root.path }];
@@ -8597,7 +8843,7 @@ function backgroundIndexWatchFolders(root, manifest = null) {
     }
     seen.add(key);
     folders.push(resolved);
-    if (folders.length >= folderLimit) {
+    if (folders.length >= cap) {
       break;
     }
   }
@@ -8611,7 +8857,7 @@ function backgroundIndexWatcherSignature(root, folders) {
     root.enabled !== false ? "1" : "0",
     root.watch !== false ? "1" : "0",
     root.autoRebuild !== false ? "1" : "0",
-    folders.map(pathIdentity).join("|")
+    crypto.createHash("sha256").update(folders.map(pathIdentity).join("|")).digest("hex")
   ].join("::");
 }
 
@@ -8639,7 +8885,7 @@ async function runBackgroundIndexWatchRebuild(record) {
     reason: "watch-event",
     path: record.lastEventPath || root.path,
     watchVersion: record.version,
-    watchedFolders: record.watchers.length
+    watchedFolders: backgroundIndexWatchedFolderCount(record)
   });
   record.lastQueuedAt = new Date().toISOString();
   const result = await maybeAutoRebuildBackgroundIndex(root, freshness, "watch");
@@ -8651,6 +8897,10 @@ async function runBackgroundIndexWatchRebuild(record) {
   }
   record.error = result?.error || null;
 }
+
+const backgroundIndexRecursiveWatchSupported =
+  (process.platform === "win32" || process.platform === "darwin") &&
+  process.env.EXPLORE_BETTER_BACKGROUND_WATCH_RECURSIVE !== "0";
 
 function createBackgroundIndexWatcher(root, folders, folderLimit) {
   const debounceMs = backgroundIndexWatchDebounceMs();
@@ -8670,25 +8920,63 @@ function createBackgroundIndexWatcher(root, folders, folderLimit) {
     error: null,
     timer: null,
     cooldownTimer: null,
+    recursive: false,
+    folderKeys: null,
     watchers: []
   };
-  for (const folderPath of folders) {
+  const noteEvent = (eventPath) => {
+    record.version += 1;
+    record.eventCount += 1;
+    record.changedAtMs = Date.now();
+    record.lastEventPath = eventPath;
+    backgroundIndexFreshnessCache.clear();
+    scheduleBackgroundIndexWatchRebuild(record);
+  };
+  // One recursive handle on the root instead of a handle per indexed folder, so
+  // folders inside the root stay renameable. Events are filtered to the indexed
+  // folders (and their direct children) to keep the per-folder semantics.
+  if (backgroundIndexRecursiveWatchSupported) {
     try {
-      const watcher = watch(folderPath, { persistent: false }, (_eventType, filename) => {
-        record.version += 1;
-        record.eventCount += 1;
-        record.changedAtMs = Date.now();
-        record.lastEventPath = filename ? path.join(folderPath, String(filename)) : folderPath;
-        backgroundIndexFreshnessCache.clear();
-        scheduleBackgroundIndexWatchRebuild(record);
+      const folderKeys = new Set(folders.map(pathIdentity));
+      const ignoreAppData = !isInsidePath(root.path, appDataRoot);
+      const watcher = watch(root.path, { persistent: false, recursive: true }, (_eventType, filename) => {
+        if (!filename) {
+          noteEvent(root.path);
+          return;
+        }
+        const eventPath = path.join(root.path, String(filename));
+        if (ignoreAppData && isInsidePath(eventPath, appDataRoot)) {
+          return;
+        }
+        if (folderKeys.has(pathIdentity(path.dirname(eventPath))) || folderKeys.has(pathIdentity(eventPath))) {
+          noteEvent(eventPath);
+        }
       });
       watcher.on("error", (error) => {
         record.error = error.message || String(error);
       });
       watcher.unref?.();
-      record.watchers.push({ path: folderPath, watcher });
+      record.watchers.push({ path: root.path, watcher });
+      record.recursive = true;
+      record.folderKeys = folderKeys;
     } catch (error) {
       record.error = error.message || String(error);
+    }
+  }
+  if (!record.recursive) {
+    for (const folderPath of folders.slice(0, backgroundIndexWatchFolderLimit())) {
+      try {
+        const watcher = watch(folderPath, { persistent: false }, (_eventType, filename) => {
+          noteEvent(filename ? path.join(folderPath, String(filename)) : folderPath);
+        });
+        watcher.on("error", (error) => {
+          record.error = error.message || String(error);
+        });
+        watcher.unref?.();
+        record.watchers.push({ path: folderPath, watcher });
+      } catch (error) {
+        record.error = error.message || String(error);
+      }
     }
   }
   backgroundIndexWatchers.set(root.id, record);
@@ -8712,7 +9000,7 @@ async function syncBackgroundIndexWatcher(root, manifest = null) {
     };
   }
   const resolvedManifest = manifest || (await readBackgroundIndexManifest(root.id).catch(() => null));
-  const { folders, folderLimit } = backgroundIndexWatchFolders(root, resolvedManifest);
+  const { folders, folderLimit } = backgroundIndexWatchFolders(root, resolvedManifest, backgroundIndexRecursiveWatchSupported);
   const signature = backgroundIndexWatcherSignature(root, folders);
   const existing = backgroundIndexWatchers.get(root.id);
   if (existing?.signature === signature) {
@@ -8795,14 +9083,61 @@ async function maybeAutoRebuildBackgroundIndex(root, freshness, source) {
   }
 }
 
+// A store-shaped read built from the manifest's embedded summary and freshness
+// samples. Returns null (full store read) for manifests written by older
+// versions or when the search file on disk no longer matches the manifest.
+async function backgroundIndexManifestSearchRead(root, manifest) {
+  const summary = manifest?.searchSummary;
+  const samples = manifest?.freshnessEntries;
+  if (!summary || typeof summary !== "object" || !Array.isArray(samples)) {
+    return null;
+  }
+  const sampleTotal = Number(manifest.freshnessEntryTotal || 0);
+  if (samples.length < Math.min(sampleTotal, backgroundIndexFreshnessLimits().entryLimit)) {
+    return null;
+  }
+  const filePath = backgroundIndexSearchFile(root.id);
+  const stat = await statOrNull(filePath);
+  if (!stat?.isFile() || Number(stat.size) !== Number(summary.bytes)) {
+    return null;
+  }
+  const { version, ...searchSummary } = summary;
+  return {
+    data: {
+      version,
+      rootId: summary.rootId,
+      path: summary.path,
+      builtAt: summary.builtAt,
+      count: summary.count,
+      bytes: summary.bytes,
+      contentBytes: summary.contentBytes,
+      freshnessEntryTotal: sampleTotal,
+      entries: samples
+    },
+    summary: searchSummary,
+    missing: false,
+    corrupt: false,
+    error: null,
+    quarantinedPath: null,
+    cache: {
+      hit: true,
+      source: "background-manifest-summary",
+      file: filePath,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs
+    }
+  };
+}
+
 async function backgroundIndexOverview() {
   const state = await readState();
   closeRemovedBackgroundIndexWatchers(state.backgroundIndexes || []);
   const roots = await Promise.all(
     (state.backgroundIndexes || []).map(async (root) => {
       const manifestRead = await readBackgroundIndexManifestResult(root.id);
-      const searchRead = await readBackgroundIndexSearchStoreResult(root.id);
       const manifest = manifestRead.data;
+      const searchRead =
+        (await backgroundIndexManifestSearchRead(root, manifest)) || (await readBackgroundIndexSearchStoreResult(root.id));
       const store = searchRead.data;
       const watcher = await syncBackgroundIndexWatcher(root, manifest).catch((error) => ({
         enabled: backgroundIndexWatcherEnabled(root),
@@ -8815,7 +9150,7 @@ async function backgroundIndexOverview() {
       return {
         ...root,
         manifest: manifest ? backgroundIndexStoreSummary(manifest) : null,
-        search: store ? backgroundIndexStoreSummary(store) : null,
+        search: searchRead.summary || (store ? backgroundIndexStoreSummary(store) : null),
         indexRead: backgroundIndexReadSummary(manifestRead, searchRead),
         watcher,
         freshness: freshness
@@ -8931,7 +9266,8 @@ async function searchBackgroundIndexes({ query, limit = 200, rootId = "", rootPa
       }
       const searchable = String(entry.searchText || entry.name || "");
       if (!q || searchable.includes(q)) {
-        const contentHit = Boolean(q && entry.contentIndexed && String(entry.contentText || "").includes(q));
+        const contentText = q && entry.contentIndexed ? backgroundEntryContentText(entry) : "";
+        const contentHit = Boolean(contentText && contentText.includes(q));
         results.push({
           rootId: root.id,
           rootName: root.name,
@@ -8959,7 +9295,7 @@ async function searchBackgroundIndexes({ query, limit = 200, rootId = "", rootPa
           dimensionPixels: entry.dimensionPixels || 0,
           contentIndexed: entry.contentIndexed === true,
           matchSource: contentHit ? "content" : "metadata",
-          matchSnippet: contentHit ? backgroundContentSnippet(entry.contentText, q) : "",
+          matchSnippet: contentHit ? backgroundContentSnippet(contentText, q) : "",
           labelName: entry.labelName,
           labelNotes: entry.labelNotes
         });
@@ -9090,14 +9426,20 @@ function pruneFolderWatchers() {
   }
 }
 
-function createFolderWatcher(dir, key) {
+const folderWatcherRetryMs = 2000;
+
+// TTL pruning must also run while the renderer is idle and nothing accesses watchers.
+setInterval(() => pruneFolderWatchers(), 30000).unref?.();
+
+function createFolderWatcher(dir, key, version = 0) {
   const record = {
     key,
     path: dir,
-    version: 0,
+    version,
     changedAt: null,
     lastAccess: Date.now(),
     error: null,
+    errorAt: 0,
     watcher: null
   };
   try {
@@ -9107,17 +9449,37 @@ function createFolderWatcher(dir, key) {
       dropDirectoryListingInFlightForWatchKey(key);
     });
     watcher.on("error", (error) => {
+      // A failed watcher never recovers; release its handle and let the next
+      // access re-create it, keeping the version sequence for pollers.
       record.error = error.message;
+      record.errorAt = Date.now();
       record.version += 1;
       record.changedAt = Date.now();
-      dropDirectoryListingInFlightForWatchKey(key);
+      try {
+        watcher.close();
+      } catch {}
+      record.watcher = null;
+      if (folderWatchers.get(key) === record) {
+        dropDirectoryListingCacheForWatchKey(key);
+      }
     });
     watcher.unref?.();
     record.watcher = watcher;
   } catch (error) {
     record.error = error.message;
+    record.errorAt = Date.now();
   }
   folderWatchers.set(key, record);
+  pruneFolderWatchers();
+  return record;
+}
+
+function folderWatcherRecordForDir(dir, key = pathIdentity(dir)) {
+  let record = folderWatchers.get(key);
+  if (!record || (!record.watcher && Date.now() - Number(record.errorAt || 0) >= folderWatcherRetryMs)) {
+    record = createFolderWatcher(dir, key, Number(record?.version || 0));
+  }
+  record.lastAccess = Date.now();
   pruneFolderWatchers();
   return record;
 }
@@ -9126,13 +9488,7 @@ async function folderWatchStatus(targetPath, options = {}) {
   const requested = resolveUserPath(targetPath);
   const stats = await fs.stat(requested);
   const dir = stats.isDirectory() ? requested : path.dirname(requested);
-  const key = pathIdentity(dir);
-  let record = folderWatchers.get(key);
-  if (!record) {
-    record = createFolderWatcher(dir, key);
-  }
-  record.lastAccess = Date.now();
-  pruneFolderWatchers();
+  const record = folderWatcherRecordForDir(dir);
   const since = Number(options.since);
   const hasSince = Number.isFinite(since) && since >= 0;
   return {
@@ -11051,6 +11407,13 @@ function walkZipEntries(archive, options, onEntry) {
     signal?.addEventListener?.("abort", onAbort, { once: true });
 
     yauzl.open(archive, { lazyEntries: true, autoClose: true, decodeStrings: true }, (error, openedZip) => {
+      if (settled) {
+        // Aborted while opening: nothing else will close this handle.
+        try {
+          openedZip?.close();
+        } catch {}
+        return;
+      }
       if (error) {
         fail(error);
         return;
@@ -16130,6 +16493,12 @@ function sizeAnalysisCacheKey(rootPath, options = {}) {
 }
 
 function pruneSizeAnalysisCache() {
+  const now = Date.now();
+  for (const [key, cached] of sizeAnalysisCache) {
+    if (now - Number(cached.cachedAt || 0) > sizeAnalysisCacheTtlMs) {
+      sizeAnalysisCache.delete(key);
+    }
+  }
   while (sizeAnalysisCache.size > sizeAnalysisCacheLimit) {
     const oldest = [...sizeAnalysisCache.entries()].sort(
       (left, right) => Number(left[1].lastAccess || 0) - Number(right[1].lastAccess || 0)
@@ -18499,7 +18868,11 @@ async function advancedSearch(options = {}) {
   const record = { rootPath, invalidated: false, promise: null, controller: new AbortController(), waiters: new Set() };
   record.promise = advancedSearchUncached({ ...options, signal: record.controller.signal }).then((report) => {
     if (!record.invalidated) {
-      advancedSearchCache.set(cacheKey, { rootPath, report, createdAt: Date.now(), lastAccess: Date.now() });
+      const storedAt = Date.now();
+      for (const [key, item] of advancedSearchCache) {
+        if (storedAt - item.createdAt > advancedSearchCacheTtlMs) advancedSearchCache.delete(key);
+      }
+      advancedSearchCache.set(cacheKey, { rootPath, report, createdAt: storedAt, lastAccess: storedAt });
       while (advancedSearchCache.size > 24) {
         const oldest = [...advancedSearchCache.entries()].sort((left, right) => left[1].lastAccess - right[1].lastAccess)[0];
         if (!oldest) break;
@@ -22151,6 +22524,7 @@ export async function startServer() {
         syncBackgroundIndexWatchersFromState().catch((error) => {
           console.warn(`Could not start background index watchers: ${error.message}`);
         });
+        scheduleCacheMaintenance();
         resolve(server);
       };
       server.once("error", onError);
