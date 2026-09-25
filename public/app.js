@@ -18088,12 +18088,18 @@ function renderOpenWithDialog(message = null) {
   renderOpenWithPresets();
 }
 
+function containingFolderForItemPath(itemPath) {
+  const parent = String(itemPath || "").replace(/[\\/][^\\/]*$/, "");
+  // "C:\file.txt" -> "C:\" rather than the drive-relative "C:".
+  return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
+}
+
 function defaultOpenWithCwd() {
   const first = app.openWith?.targets?.[0];
   if (!first) {
     return tabOf(app.activePane).path;
   }
-  return first.isDirectory ? first.path : first.path.replace(/[\\/][^\\/]*$/, "") || tabOf(app.activePane).path;
+  return first.isDirectory ? first.path : containingFolderForItemPath(first.path) || tabOf(app.activePane).path;
 }
 
 function fillOpenWithForm({ appPath = "", args = "{path}", cwd = null } = {}) {
@@ -18972,6 +18978,96 @@ function paneEntryInteractionRecent(paneName, thresholdMs = 750) {
   return Boolean(interaction?.paneName === paneName && Date.now() - interaction.at < thresholdMs);
 }
 
+function folderWatchBaseline(tab) {
+  const stored = tab.folderWatchVersion;
+  if (stored !== null && stored !== undefined && Number.isFinite(Number(stored))) {
+    return Number(stored);
+  }
+  // Seed from the watcher version the listing was built against so changes
+  // between the listing and the first poll (or a cached Back navigation) are
+  // still detected instead of silently becoming the new baseline.
+  const cache = tab.lastLoadTiming?.cache;
+  if (cache?.watcherAvailable === true && Number.isFinite(Number(cache.watcherVersion))) {
+    return Number(cache.watcherVersion);
+  }
+  return null;
+}
+
+function autoRefreshTabCurrent(paneName, tab, watchedPath) {
+  return tabOf(paneName) === tab && tab.path === watchedPath;
+}
+
+function autoRefreshPane(paneName) {
+  return refreshPane(paneName, {
+    preserveSelection: true,
+    save: false,
+    silent: true,
+    autoRefresh: true
+  });
+}
+
+async function pollAutoRefreshPane(paneName) {
+  const tab = tabOf(paneName);
+  const watchedPath = tab.path;
+  const baseline = folderWatchBaseline(tab);
+  const watch = await folderWatchForPath(watchedPath, baseline);
+  if (!autoRefreshTabCurrent(paneName, tab, watchedPath) || paneLoadInFlight(paneName)) {
+    return false;
+  }
+  if (watch.available) {
+    const version = Number(watch.version || 0);
+    if (baseline === null) {
+      tab.folderWatchVersion = version;
+      return false;
+    }
+    // A lower version means the watcher was recreated; changes may have been missed.
+    if (!watch.changed && version >= baseline) {
+      tab.folderWatchVersion = version;
+      return false;
+    }
+    if (paneEntryInteractionRecent(paneName)) {
+      return false;
+    }
+    if (!(await autoRefreshPane(paneName))) {
+      return false;
+    }
+    if (tabOf(paneName) === tab) {
+      tab.folderWatchVersion = version;
+    }
+    return true;
+  }
+  // Listings are fetched without signatures, so the fallback keeps its own
+  // baseline and ties it to the path it was computed for.
+  const previous = tab.folderSignaturePath === watchedPath ? tab.folderSignature : null;
+  const next = await folderSignatureForPath(watchedPath, {
+    includeDimensions: tab.listingIncludesDimensions === true || tabNeedsDimensions(tab),
+    includeLinks: tab.listingIncludesLinks === true || tabNeedsLinks(tab),
+    includeAttributes:
+      tab.listingIncludesAttributes === true ||
+      tabNeedsAttributes(tab) ||
+      !showHiddenEntriesEnabled()
+  });
+  if (!autoRefreshTabCurrent(paneName, tab, watchedPath) || paneLoadInFlight(paneName)) {
+    return false;
+  }
+  if (!previous?.signature || !signatureChanged(previous, next)) {
+    tab.folderSignature = next;
+    tab.folderSignaturePath = watchedPath;
+    return false;
+  }
+  if (paneEntryInteractionRecent(paneName)) {
+    return false;
+  }
+  if (!(await autoRefreshPane(paneName))) {
+    return false;
+  }
+  if (autoRefreshTabCurrent(paneName, tab, watchedPath)) {
+    tab.folderSignature = next;
+    tab.folderSignaturePath = watchedPath;
+  }
+  return true;
+}
+
 async function pollAutoRefresh({ force = false } = {}) {
   if (app.autoRefreshBusy || !app.state || (!force && (!autoRefreshEnabled() || document.hidden))) {
     return;
@@ -18983,70 +19079,18 @@ async function pollAutoRefresh({ force = false } = {}) {
       if (paneLoadInFlight(paneName)) {
         continue;
       }
-      const tab = tabOf(paneName);
-      const previous = tab.folderSignature;
-      const watch = await folderWatchForPath(tab.path, tab.folderWatchVersion);
-      if (watch.available) {
-        if (
-          tab.folderWatchVersion === null ||
-          tab.folderWatchVersion === undefined ||
-          !Number.isFinite(Number(tab.folderWatchVersion))
-        ) {
-          tab.folderWatchVersion = Number(watch.version || 0);
-          continue;
-        }
-        if (watch.changed) {
-          if (paneEntryInteractionRecent(paneName)) {
-            continue;
-          }
-          const didRefresh = await refreshPane(paneName, {
-            preserveSelection: true,
-            save: false,
-            silent: true,
-            autoRefresh: true
-          });
-          if (!didRefresh) continue;
-          tab.folderWatchVersion = Number(watch.version || 0);
+      try {
+        if (await pollAutoRefreshPane(paneName)) {
           refreshed.push(paneName);
-        } else {
-          tab.folderWatchVersion = Number(watch.version || 0);
         }
-        continue;
-      }
-      const next = await folderSignatureForPath(tab.path, {
-        includeDimensions: tab.listingIncludesDimensions === true || tabNeedsDimensions(tab),
-        includeLinks: tab.listingIncludesLinks === true || tabNeedsLinks(tab),
-        includeAttributes:
-          tab.listingIncludesAttributes === true ||
-          tabNeedsAttributes(tab) ||
-          !showHiddenEntriesEnabled()
-      });
-      if (!previous?.signature) {
-        tab.folderSignature = next;
-        continue;
-      }
-      if (signatureChanged(previous, next)) {
-        if (paneEntryInteractionRecent(paneName)) {
-          continue;
+      } catch (error) {
+        if (force) {
+          setStatus(error.message);
         }
-        const didRefresh = await refreshPane(paneName, {
-          preserveSelection: true,
-          save: false,
-          silent: true,
-          autoRefresh: true
-        });
-        if (!didRefresh) continue;
-        refreshed.push(paneName);
-      } else {
-        tab.folderSignature = next;
       }
     }
     if (refreshed.length) {
       setStatus(`Auto refreshed ${refreshed.map((paneName) => paneName.toUpperCase()).join(" / ")}`);
-    }
-  } catch (error) {
-    if (force) {
-      setStatus(error.message);
     }
   } finally {
     app.autoRefreshBusy = false;
@@ -19058,7 +19102,7 @@ function startAutoRefresh() {
   renderShowHiddenToggle();
   scheduleAutoRefresh(1600);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
+    if (!document.hidden && autoRefreshEnabled()) {
       pollAutoRefresh({ force: true });
     }
     scheduleAutoRefresh(250);
@@ -19952,9 +19996,19 @@ function applyConfigurationToState(configuration, replaceExisting) {
     nextState.layout = jsonClone(configuration.layout);
   }
   if (configuration.settings) {
+    const existingSettings = nextState.settings || {};
     nextState.settings = replaceExisting
       ? jsonClone(configuration.settings)
-      : { ...(nextState.settings || {}), ...jsonClone(configuration.settings) };
+      : { ...existingSettings, ...jsonClone(configuration.settings) };
+    if (!replaceExisting && Array.isArray(existingSettings.hotkeys) && Array.isArray(configuration.settings.hotkeys)) {
+      // Imported bindings win per id and per combo; unrelated local hotkeys are kept.
+      const importedCombos = new Set(configuration.settings.hotkeys.map((hotkey) => comboKey(hotkey?.combo)));
+      nextState.settings.hotkeys = mergeConfigArray(
+        "hotkeys",
+        existingSettings.hotkeys.filter((hotkey) => !importedCombos.has(comboKey(hotkey?.combo))),
+        configuration.settings.hotkeys
+      );
+    }
   }
   for (const key of configPackageArrayKeys) {
     if (!Array.isArray(configuration[key])) {
@@ -20216,23 +20270,14 @@ async function openCollectionInPane(collectionId = app.activeCollectionId, paneN
   if (!collection) {
     return showToast("Create a collection first");
   }
-  const result = await request("/api/collections/resolve", {
-    method: "POST",
-    body: JSON.stringify({ collectionId: collection.id })
-  });
-  const tab = tabOf(paneName);
-  tab.entries = result.entries;
-  tab.selected = new Set();
-  tab.focusedPath = null;
-  tab.anchorPath = null;
-  tab.searchMode = true;
-  tab.virtualMode = "";
-  tab.virtual = null;
-  tab.title = `Collection: ${result.collection?.name || collection.name}`;
-  tab.parent = null;
-  renderPane(paneName);
-  renderRoots();
-  renderInspector();
+  const result = await openResolvedItemsInPane(
+    paneName,
+    { collectionId: collection.id },
+    (data) => `Collection: ${data.collection?.name || collection.name}`
+  );
+  if (!result) {
+    return;
+  }
   setStatus(
     result.available === result.total
       ? itemWord(result.total, "collection item")
@@ -20373,36 +20418,72 @@ async function openBasketDialog() {
   document.getElementById("basket-dialog").showModal();
 }
 
-async function resolveBasketPaths(paths = basketActionPaths()) {
-  if (!paths.length) {
-    showToast("Basket is empty");
-    return null;
-  }
-  return request("/api/collections/resolve", {
-    method: "POST",
-    body: JSON.stringify({ paths })
+async function openResolvedItemsInPane(paneName, body, titleFor) {
+  // Owns the pane load while resolving so a newer navigation aborts this view
+  // (and this view cancels any older in-flight listing) instead of racing it.
+  const load = beginPaneLoad(paneName, {
+    detail: `${paneName === "left" ? "Left" : "Right"} pane resolving items`
   });
+  const tab = load.tab;
+  try {
+    const result = await request("/api/collections/resolve", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: load.controller.signal
+    });
+    if (!isCurrentPaneLoad(paneName, load)) {
+      return null;
+    }
+    tab.entries = result.entries;
+    tab.selected = new Set();
+    tab.focusedPath = null;
+    tab.anchorPath = null;
+    tab.searchMode = true;
+    tab.virtualMode = "";
+    tab.virtual = null;
+    tab.title = titleFor(result);
+    tab.parent = null;
+    setPaneActivity(paneName, load, "ready", {
+      count: result.entries.length,
+      wallMs: performance.now() - load.startedAt
+    });
+    renderPane(paneName);
+    renderRoots();
+    renderInspector();
+    return result;
+  } catch (error) {
+    if (isAbortError(error)) {
+      return null;
+    }
+    setPaneActivity(paneName, load, "error", {
+      detail: `${paneName === "left" ? "Left" : "Right"} pane could not resolve items: ${error.message}`
+    });
+    throw error;
+  } finally {
+    finishPaneLoad(paneName, load);
+  }
 }
 
 async function openBasketInPane(paneName = app.activePane) {
-  const result = await resolveBasketPaths();
+  const paths = basketActionPaths();
+  if (!paths.length) {
+    return showToast("Basket is empty");
+  }
+  const result = await openResolvedItemsInPane(paneName, { paths }, () => "Basket");
   if (!result) {
     return;
   }
-  const tab = tabOf(paneName);
-  tab.entries = result.entries;
-  tab.selected = new Set();
-  tab.focusedPath = null;
-  tab.anchorPath = null;
-  tab.searchMode = true;
-  tab.virtualMode = "";
-  tab.virtual = null;
-  tab.title = "Basket";
-  tab.parent = null;
-  renderPane(paneName);
-  renderRoots();
-  renderInspector();
   setStatus(`${result.available}/${result.total} basket items`);
+}
+
+function basketTargetDirectory(verb) {
+  const tab = tabOf(app.activePane);
+  // Virtual views keep the last real folder in tab.path, which is not what the user sees.
+  if (tab.searchMode || tab.virtualMode) {
+    showToast(`Open a folder to ${verb} basket items into`);
+    return null;
+  }
+  return tab.path;
 }
 
 async function copyBasketHere() {
@@ -20410,9 +20491,13 @@ async function copyBasketHere() {
   if (!paths.length) {
     return showToast("Basket is empty");
   }
+  const targetDir = basketTargetDirectory("copy");
+  if (!targetDir) {
+    return;
+  }
   await request("/api/copy", {
     method: "POST",
-    body: JSON.stringify({ paths, targetDir: tabOf(app.activePane).path })
+    body: JSON.stringify({ paths, targetDir })
   });
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
@@ -20424,9 +20509,13 @@ async function moveBasketHere() {
   if (!paths.length) {
     return showToast("Basket is empty");
   }
+  const targetDir = basketTargetDirectory("move");
+  if (!targetDir) {
+    return;
+  }
   await request("/api/move", {
     method: "POST",
-    body: JSON.stringify({ paths, targetDir: tabOf(app.activePane).path })
+    body: JSON.stringify({ paths, targetDir })
   });
   const moving = new Set(paths.map(normalizedPathKey));
   await saveBasketItems(fileBasketItems().filter((item) => !moving.has(normalizedPathKey(item.path))));
@@ -21192,7 +21281,7 @@ async function clearLabelsFromSelection() {
 }
 
 async function showLabeledPath(itemPath) {
-  const targetDir = itemPath ? itemPath.replace(/[\\/][^\\/]*$/, "") : null;
+  const targetDir = itemPath ? containingFolderForItemPath(itemPath) : null;
   if (!targetDir) {
     return;
   }
@@ -21355,18 +21444,54 @@ async function restoreSavedLayout(layoutId) {
   if (!layout) {
     return showToast("Layout not found");
   }
+  if (!(await disposeTerminalsForTabs([...panes.left.tabs, ...panes.right.tabs]))) {
+    return;
+  }
   app.state.layout = layout.layout;
   hydratePanesFromLayout(layout.layout);
-  await Promise.all([
-    loadPane("left", tabOf("left").path || app.roots.cwd, false),
-    loadPane("right", tabOf("right").path || app.roots.home, false)
-  ]);
+  const fallbacks = { left: app.roots.cwd, right: app.roots.home };
+  const results = await Promise.allSettled(
+    ["left", "right"].map((paneName) =>
+      loadStartupPane(paneName, tabOf(paneName).path || fallbacks[paneName], fallbacks[paneName])
+    )
+  );
+  const failed = [];
+  for (const [index, paneName] of ["left", "right"].entries()) {
+    if (results[index].status === "fulfilled") {
+      continue;
+    }
+    failed.push(`${paneName === "left" ? "Left" : "Right"}: ${results[index].reason?.message || results[index].reason}`);
+    try {
+      await loadPane(paneName, app.roots.home, false, { linkedFollow: true, silent: true, save: false });
+    } catch (error) {
+      setStatus(error.message);
+    }
+  }
+  await ensureVisiblePaneTerminals(["left", "right"]);
   renderRoots();
   renderAll();
   renderInspector();
   await saveStateNow();
   document.getElementById("layouts-dialog").close();
-  showToast(`Restored ${layout.name}`);
+  showToast(failed.length ? `Restored ${layout.name}; recovered ${failed.join("; ")}` : `Restored ${layout.name}`);
+}
+
+async function disposeTerminalsForTabs(tabs) {
+  // Tabs being replaced wholesale must release their shells, like closeTab does.
+  const busy = tabs.some((tab) => app.terminals.sessions.get(tab?.id)?.busy);
+  if (busy && !window.confirm("A terminal in the tabs being replaced is running a command. Close it and its child processes?")) {
+    return false;
+  }
+  await Promise.all(tabs.map((tab) => disposeTerminalForTab(tab, { confirmBusy: false })));
+  return true;
+}
+
+async function ensureVisiblePaneTerminals(paneNames) {
+  for (const paneName of paneNames) {
+    if (app.terminals.visible[paneName]) {
+      await ensureTerminalForPane(paneName).catch((error) => setStatus(error.message));
+    }
+  }
 }
 
 function tabGroupTabCount(group) {
@@ -21501,6 +21626,9 @@ async function restoreSavedTabGroup(groupId) {
     return showToast("Tab group not found");
   }
   const paneName = app.activePane;
+  if (!(await disposeTerminalsForTabs([...panes[paneName].tabs]))) {
+    return;
+  }
   panes[paneName].tabs = group.tabs.map((savedTab) => normalizeSavedTab(savedTab, savedTab.path || app.roots.cwd));
   panes[paneName].activeTab = Math.max(0, Math.min(Number(group.activeTab || 0), panes[paneName].tabs.length - 1));
   const active = tabOf(paneName);
@@ -21509,6 +21637,7 @@ async function restoreSavedTabGroup(groupId) {
     linkedFollow: true,
     save: false
   });
+  await ensureVisiblePaneTerminals([paneName]);
   renderRoots();
   renderAll();
   renderInspector();
@@ -22148,9 +22277,18 @@ function operationSupportsRetryRemaining(operation) {
 
 const elevatedRetryOperationTypes = new Set(["copy", "move", "delete"]);
 
+function operationElevatedRetryLaunched(operation) {
+  const elevation = operationRecovery(operation)?.elevation;
+  return Boolean(elevation?.launchedAt || elevation?.status === "launched");
+}
+
 function operationSupportsElevatedRetry(operation) {
   const recovery = operationRecovery(operation);
+  // Once a helper has been launched, relaunching would replay copy/move/delete
+  // behind a second admin prompt.
   return (
+    !operationElevatedRetryLaunched(operation) &&
+    !app.elevatedRetryPending?.has(operation?.id) &&
     operationSupportsRetryRemaining(operation) &&
     elevatedRetryOperationTypes.has(recovery?.retry?.type) &&
     Array.isArray(recovery?.remaining) &&
@@ -22797,16 +22935,7 @@ async function cancelOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   renderOperations();
   scheduleOperationPoll(200);
   showToast("Cancel requested");
@@ -22817,16 +22946,7 @@ async function pauseOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   renderOperations();
   scheduleOperationPoll(200);
   showToast("Operation paused");
@@ -22837,16 +22957,7 @@ async function resumeOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   renderOperations();
   scheduleOperationPoll(200);
   showToast("Operation resumed");
@@ -22870,16 +22981,7 @@ async function retryOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   showToast("Retry complete");
@@ -22890,16 +22992,7 @@ async function retryRemainingOperation(operationId) {
     method: "POST",
     body: JSON.stringify({ operationId })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   showToast("Remaining work retried");
@@ -22910,16 +23003,7 @@ async function retrySelectedRemainingOperation(operationId, indexes) {
     method: "POST",
     body: JSON.stringify({ operationId, indexes })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   renderOperationDetails();
@@ -22942,13 +23026,32 @@ function upsertOperationInState(operation) {
 
 async function elevatedRetryOperation(operationId, indexes = []) {
   const selectedIndexes = Array.isArray(indexes) ? indexes : [];
-  const result = await request("/api/operation/elevated-retry", {
-    method: "POST",
-    body: JSON.stringify({ operationId, indexes: selectedIndexes, launch: true })
-  });
-  if (result.operation) {
-    upsertOperationInState(result.operation);
+  const operation = operationById(operationId);
+  if (operation && !operationSupportsElevatedRetry(operation)) {
+    return showToast(
+      operationElevatedRetryLaunched(operation)
+        ? "An elevated helper was already launched for this operation"
+        : "Elevated retry is not available for this operation"
+    );
   }
+  app.elevatedRetryPending = app.elevatedRetryPending || new Set();
+  app.elevatedRetryPending.add(operationId);
+  renderOperations();
+  renderOperationDetails();
+  let result;
+  try {
+    result = await request("/api/operation/elevated-retry", {
+      method: "POST",
+      body: JSON.stringify({ operationId, indexes: selectedIndexes, launch: true })
+    });
+  } catch (error) {
+    app.elevatedRetryPending.delete(operationId);
+    renderOperations();
+    renderOperationDetails();
+    throw error;
+  }
+  app.elevatedRetryPending.delete(operationId);
+  upsertOperationInState(result.operation);
   renderOperations();
   renderOperationDetails();
   if (result.launched) {
@@ -22975,16 +23078,7 @@ async function recoverSelectedOperationBackups(operationId, action, indexes) {
     method: "POST",
     body: JSON.stringify({ operationId, action, indexes })
   });
-  if (result.operation) {
-    const operations = app.state.operations || [];
-    const index = operations.findIndex((operation) => operation.id === result.operation.id);
-    if (index === -1) {
-      operations.unshift(result.operation);
-    } else {
-      operations[index] = result.operation;
-    }
-    app.state.operations = operations;
-  }
+  upsertOperationInState(result.operation);
   await Promise.all([refreshPane("left"), refreshPane("right")]);
   await syncStateAndChrome();
   const operation = operationById(operationId);
