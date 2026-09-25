@@ -70,6 +70,12 @@ jobs:
         run: go test ./...
       - run: npm run verify:security-boundary
       - run: npm run verify:transactional-operations
+      - run: npm run verify:shell-quoting
+      - run: npm run verify:shell-registry
+      - run: npm run verify:rename-retry-safety
+      - run: npm run verify:listing-index-regression
+      - run: npm run verify:trusted-script-timeout
+      - run: npm run verify:auto-refresh-fallback
       - run: npm run verify:operations
       - run: npm run verify:operation-journal
       - run: npm run verify:crash-kill

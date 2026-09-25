@@ -93,7 +93,7 @@ add(
 const server = await fs.readFile(path.join(root, "server.mjs"), "utf8");
 add(
   "shortcut-wiring",
-  server.includes('$BrandIcon = "${path.join(repoPath, "build", "icon.ico")') &&
+  server.includes('$BrandIcon = ${psLiteral(path.join(repoPath, "build", "icon.ico"))}') &&
     server.match(/Test-Path -LiteralPath \$BrandIcon/g)?.length >= 2,
   "Development, Start Menu, Desktop, and Win+E shortcut generators prefer the canonical ICO"
 );

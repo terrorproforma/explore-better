@@ -33,8 +33,8 @@ func TestCompactTreeEntriesStripsDriveRootPrefix(t *testing.T) {
 	if columns.Paths[0] != "Windows" || columns.Paths[1] != "pagefile.sys" {
 		t.Fatalf("drive-root entries were not made relative: %q", columns.Paths)
 	}
-	columns = compactTreeEntries(`C:\Users\`, []fileEntry{{Path: `C:\Users\Public`}})
-	if columns.Root != `C:\Users` || columns.Paths[0] != "Public" {
+	columns = compactTreeEntries(`D:\Data\`, []fileEntry{{Path: `D:\Data\Public`}})
+	if columns.Root != `D:\Data` || columns.Paths[0] != "Public" {
 		t.Fatalf("folder entries were not made relative: root %q paths %q", columns.Root, columns.Paths)
 	}
 }
