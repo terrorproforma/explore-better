@@ -1,7 +1,7 @@
 // Renders the three v7 music candidates and muxes each onto the published picture.
 //
-//   npm run render:music            the current candidates (D, E)
-//   npm run render:music -- A B C   any subset; A-C are the rejected first round, kept for reference
+//   npm run render:music            the current candidates (D2, D3)
+//   npm run render:music -- D E     any subset of A B C D E D2 D3 (earlier rounds kept for reference)
 //
 // Outputs (gitignored) go to output/music-v7/:
 //   explore-better-music-<X>.wav          48 kHz / 24-bit stereo master
@@ -10,7 +10,7 @@
 //   review-<X>-low.png                    0-500 Hz linear spectrogram (sub / rumble check)
 //   beatmap-<X>.json                      beats, bars, tempo map, sections and hit points for re-editing
 //   manifest.json                         tempo map, keys, progressions, cue alignment, meters
-// D and E beat maps are also copied to music/beatmap-<X>.json (tracked) for the picture re-edit.
+// Beat maps of the current candidates are also copied to music/beatmap-<X>.json (tracked).
 //
 // The picture is never re-encoded and site/assets is never written.
 import path from "node:path";
@@ -182,7 +182,7 @@ for (const id of ids) {
   const master = PRESETS[id].master;
   manifest.candidates[id] = {
     ...info,
-    target: { integratedLufs: master?.targetLufs ?? -16, truePeakDbtpMax: master ? -1.0 : -1.5 },
+    target: { integratedLufs: master?.targetLufs ?? -16, mp4TruePeakDbtpMax: master?.mp4TruePeakMax ?? (master ? -1.0 : -1.5), ...(master?.plr ? { plrDb: master.plr } : {}) },
     meters: {
       wav: wavMeters,
       mp4: mp4Meters,

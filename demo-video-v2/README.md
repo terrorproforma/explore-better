@@ -57,13 +57,29 @@ Generated media (`capture/`, `output/`, `public/live.mp4`) is gitignored. Older 
 
 ```powershell
 cd demo-video-v2
-npm run render:music            # current candidates D and E, about 25 seconds
-npm run render:music -- A C     # any subset; A-C are the rejected first round
+npm run render:music            # current candidates D2 and D3, about 40 seconds
+npm run render:music -- D E     # any subset of A B C D E D2 D3; earlier rounds kept for reference
 ```
 
 This replaces only the soundtrack. It reads `chapters-v6.json` and the published picture `site/assets/explore-better-demo.mp4`, then writes fully arranged and mastered scores. Each one is muxed onto that picture with `-c:v copy`, so the video stream stays bit-identical. Nothing in `site/assets` is changed. The owner picks a candidate before the site MP4 is replaced and the picture is re-cut to its beat map.
 
-**Current candidates: original dark techno.** The genre and production style follow Gesaffelstein-type dark techno / EBM. No riff, chord sequence, rhythm or sound is taken from any existing track.
+**Current candidates: D2 and D3 (overhauled club techno).** The owner preferred D, so D2 rebuilds it with real production techniques. D3 adds E's cinematic drama to D2's club groove. Both keep D's form and tempo map (128 BPM, free-time stops before the disk and transfer cuts, every cut on a downbeat) and master to −14 LUFS. The master uses a peak-to-loudness ratio (PLR) of about 8.5 dB, a density typical of techno, which puts peaks near −5 dBTP. They are mono below 120 Hz.
+
+What changed compared with D:
+
+- **Kick.** Rendered once, so every hit is sample-identical. It has a noise click plus a 1.9 kHz blip transient. A single oscillator falls from 180 Hz onto the F1 root, carrying both a saturated body (asymmetric shaper) and a clean sub tail on the same phase, so the layers cannot cancel. A soft clip glues it. The kick is the loudest low-end element: 8 dB above the bass in 40–120 Hz.
+- **Bass.** Six detuned band-limited saws with random phase and slow drift, through a 24 dB/oct resonant low-pass. The filter has a velocity-scaled per-note envelope, a per-chapter automation curve and a slow LFO. Multiband drive splits it into a clean mono sine sub below 100 Hz, heavily driven mids (100 Hz–2 kHz, with a dip at 3 kHz) and gently driven highs. The pattern changes per bar: rolling 16ths with accents, octave jumps, key-aware flat-2 flicks and slides, sparse "call" bars and busier "response" bars. It ducks to −35 dB in the 70 ms after each kick (2 ms attack, 150 ms release).
+- **Space.** FFT convolution reverb with generated impulse responses: pre-delay, early reflections, and decorrelated noise that decays exponentially and gets darker over time. A 0.55 s dark room serves the drums; a 2.4 s hall (3.0 s in D3) serves claps, stabs and the lead. The riff has a tempo-synced ping-pong delay.
+- **Arrangement.** Something changes every one or two bars:
+  - The hats evolve from offbeat 8ths to shuffled 16ths, then open hats, then ride in the peaks. Percussion, rim and metal layers enter and leave.
+  - Every cut gets a fill: a snare roll (accelerating to 32nds), a tom fill, or a stop with a reversed-reverb swell. Noise and pitch risers run into the cuts, with sub drops, crashes and downlifters landing on them.
+  - The safety chapter is a breakdown followed by an 8-beat build (8ths, then 16ths, then 32nds, with the kick dropping for the last two beats). It leads into the biggest drop at the terminal cut.
+  - The riff develops over six different bars and trades bars with the bass.
+- **Feel.** Hats and percussion get ±3–4 ms of jitter and velocity variation. The bass, lead and brass drift slowly in pitch. The synth bus runs through tape wow, flutter and saturation. A −58 dB noise floor adds glue.
+- **Mix and master.** Everything except the kick and bass is high-passed at 120–150 Hz, pads are cut at 400 Hz, and distorted parts are cut at 3 kHz. The drums get parallel compression. The master chain is tape saturation, mono below 120 Hz, glue compression, a soft clipper, then a true-peak limiter.
+- **D3 only.** Cold, saturated, dissonant brass stabs in F phrygian (b9, #11, a tritone stack, F minor against G-flat minor), with pitch dives into the find, transfer, terminal and scope cuts. Huge hall claps with a metallic layer. Sustained brass chords that open on builds. A parallel-distortion synth bus. One eerie held line runs from the breakdown through the biggest drop.
+
+**Second round: D and E (superseded).** Original dark techno whose genre and production style follow Gesaffelstein-type dark techno / EBM. No riff, chord sequence, rhythm or sound is taken from any existing track.
 
 | | Style | Tempo | Key and harmony |
 | --- | --- | --- | --- |
@@ -74,7 +90,7 @@ The first round (A warm electronic, B minimal piano, C synth-pop; −16 LUFS mas
 
 **Timing.** Every chapter is a whole number of beats, so every chapter cut and the end card land exactly on a bar line (0 ms offset, sample-quantised). A chapter either nudges its tempo slightly, or keeps the preset tempo and ends in a short free-time stop (0.2–0.45 s of silence plus tails and a reversed-reverb swell) that absorbs the remainder. With the stop, the next downbeat hits on the cut as a drop. When a chapter is not a multiple of four beats, the remainder becomes a 1–3 beat pickup bar carrying the fill, stop or riser. The music follows the exact picture-cut frames, which scene detection finds within 3 ms of the rounded JSON times. The title card has no hard cut, so the first chapter uses its JSON time. The end card cut (52.900 s) is detected the same way. The title plays a drone, a riser and a reversed swell, and the groove slams in at 2.5 s. The last impact lands on the end card, followed by a dark tail that decays to silence on the last frame.
 
-**Beat maps for the picture re-edit.** Each render writes `output/music-v7/beatmap-<X>.json`. D and E are also copied to the tracked `music/beatmap-<D|E>.json`. All times are seconds, rounded to whole samples at 48 kHz:
+**Beat maps for the picture re-edit.** Each render writes `output/music-v7/beatmap-<X>.json`. The current candidates are also copied to the tracked `music/beatmap-<X>.json` (D2 and D3 now; D and E from the previous round remain). All times are seconds, rounded to whole samples at 48 kHz:
 
 - `tempoMap: [{ time, bpm }]`. An entry with `bpm: null` is a free-time stop or the title pre-roll.
 - `beats`, and `bars` (downbeats).

@@ -828,6 +828,7 @@ function synthLead(track, notes, p, ctx) {
     const env = adsr(len, p.attack ?? 0.01, p.decay ?? 0.3, p.sustain ?? 0.7, release, nt.dur);
     const f0 = midiHz(nt.m);
     let ph1 = rng();
+    const drift = p.drift ? drifter(rng, p.drift, 0.25) : null;
     let ph2 = rng();
     const filter = new Svf();
     const fdm = Math.exp(-16 / ((p.fdecay ?? 0.2) * SR));
@@ -843,7 +844,7 @@ function synthLead(track, notes, p, ctx) {
         const vib = (p.vibCents ?? 10) * smoothstep((t - (p.vibDelay ?? 0.25)) / 0.3) * Math.sin(TAU * (p.vibRate ?? 5.3) * t);
         // Optional portamento: the note starts at `from` and glides exponentially onto its pitch.
         const glide = nt.from != null ? (nt.from - nt.m) * 100 * Math.exp(-t / ((p.glide ?? 0.06) / 3)) : 0;
-        const m = 2 ** ((vib + glide) / 1200);
+        const m = 2 ** ((vib + glide + (drift ? drift(t) : 0)) / 1200);
         dt1 = (f0 * m) / SR;
         dt2 = (f0 * m * 2 ** ((p.detune ?? 6) / 1200)) / SR;
         filter.set((p.cutoff ?? 2500) * keyTrack * (1 + (p.envAmt ?? 0.8) * fenv), p.q ?? 0.8);
@@ -1305,6 +1306,7 @@ function synthBrass(track, notes, p, ctx) {
       osc.push({ f: f0 * 2 ** ((spread * (p.detune ?? 16) + (rng() - 0.5) * 3) / 1200), ph: rng(), gl, gr, dt: 0 });
     }
     const sub = { f: f0 / 2, ph: rng(), dt: 0 };
+    const drift = p.drift ? drifter(rng, p.drift, 0.2) : null;
     const fl = new Svf();
     const fr = new Svf();
     const drive = p.drive ?? 3;
@@ -1318,7 +1320,7 @@ function synthBrass(track, notes, p, ctx) {
       if ((i & 15) === 0) {
         const t = i / SR;
         const dive = nt.dive ? -nt.dive * smoothstep((t - (nt.diveAt ?? 0.05)) / (nt.diveTime ?? 0.35)) : 0;
-        const mul = 2 ** (dive / 12);
+        const mul = 2 ** (dive / 12 + (drift ? drift(t) / 1200 : 0));
         for (const o of osc) o.dt = (o.f * mul) / SR;
         sub.dt = (sub.f * mul) / SR;
         const base = p.cutoffAt ? p.cutoffAt(idx / SR) : p.cutoff ?? 900;
@@ -1566,7 +1568,8 @@ const SYNTHS = {
   kick: synthKick, clap: synthClap, snare: synthSnare, hat: synthHat, shaker: synthShaker, rim: synthRim, snap: synthSnap,
   crash: synthCrash, riser: synthRiser, swell: synthSwell, boom: synthBoom,
   technoKick: synthTechnoKick, driveBass: synthDriveBass, brass: synthBrass, eerie: synthEerie, grittyHat: synthGrittyHat,
-  metal: synthMetal, downlifter: synthDownlifter, hiss: synthHiss, revverb: synthRevReverb
+  metal: synthMetal, downlifter: synthDownlifter, hiss: synthHiss, revverb: synthRevReverb,
+  kick2: synthKick2, bass2: synthBass2, tom: synthTom, pitchRiser: synthPitchRiser
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -2039,6 +2042,585 @@ export function buildBeatMap(preset, tl, events, cues) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Club overhaul (D2, D3): convolution reverb, layered kick, multiband unison bass, feel
+
+// Slow random pitch drift in cents: two incommensurate sines with random phase.
+function drifter(rng, cents, rate = 0.2) {
+  const pa = rng() * TAU;
+  const pb = rng() * TAU;
+  const fa = rate * (0.6 + 0.8 * rng());
+  const fb = rate * (1.3 + rng());
+  return (t) => cents * (0.6 * Math.sin(TAU * fa * t + pa) + 0.4 * Math.sin(TAU * fb * t + pb));
+}
+
+// In-place iterative radix-2 FFT.
+function fft(re, im, inverse) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i += 1) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = ((inverse ? 2 : -2) * Math.PI) / len;
+    const half = len >> 1;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1;
+      let ci = 0;
+      for (let k = 0; k < half; k += 1) {
+        const a = i + k;
+        const b = a + half;
+        const tr = re[b] * cr - im[b] * ci;
+        const ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr;
+        im[b] = im[a] - ti;
+        re[a] += tr;
+        im[a] += ti;
+        const ncr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = ncr;
+      }
+    }
+  }
+  if (inverse) for (let i = 0; i < n; i += 1) {
+    re[i] /= n;
+    im[i] /= n;
+  }
+}
+
+// Generated stereo impulse response: pre-delay, discrete early reflections, then decorrelated
+// noise with an exponential decay whose brightness falls over time (air/wall absorption).
+function makeImpulse({ seconds, rt60, predelay = 0.01, dampStart = 8000, dampEnd = 1500, early = 10, earlyMs = [4, 70], width = 1, seed = 1 }) {
+  const rng = makeRng(seed);
+  const len = Math.round(seconds * SR);
+  const pre = Math.round(predelay * SR);
+  const L = new Float32Array(len);
+  const R = new Float32Array(len);
+  let lpL = 0;
+  let lpR = 0;
+  const fadeIn = 0.006 * SR;
+  for (let i = 0; i + pre < len; i += 1) {
+    const t = i / SR;
+    const env = Math.exp((-6.9 * t) / rt60) * Math.min(1, i / fadeIn) * (1 - (i / (len - pre)) ** 8);
+    const fc = dampStart * (dampEnd / dampStart) ** Math.min(1, t / rt60);
+    const c = 1 - Math.exp((-TAU * fc) / SR);
+    const nl = rng() * 2 - 1;
+    const nr = width * (rng() * 2 - 1) + (1 - width) * nl;
+    lpL += (nl - lpL) * c;
+    lpR += (nr - lpR) * c;
+    L[pre + i] = lpL * env;
+    R[pre + i] = lpR * env;
+  }
+  let energy = 0;
+  for (let i = 0; i < len; i += 1) energy += L[i] * L[i] + R[i] * R[i];
+  const tailGain = 1 / Math.sqrt(energy / 2 + 1e-12);
+  for (let i = 0; i < len; i += 1) {
+    L[i] *= tailGain;
+    R[i] *= tailGain;
+  }
+  for (let k = 0; k < early; k += 1) {
+    const d = pre + Math.round((earlyMs[0] + (earlyMs[1] - earlyMs[0]) * rng()) * (SR / 1000));
+    const g = (0.55 - k * 0.03) * (0.5 + 0.5 * rng());
+    const [gl, gr] = panGains((rng() * 2 - 1) * 0.8);
+    if (d < len) {
+      L[d] += g * gl;
+      R[d] += g * gr;
+    }
+  }
+  return { L, R };
+}
+
+// Overlap-add FFT convolution of the (mono-summed) send with a stereo impulse response.
+function convolveReverb(send, ir) {
+  const n = send.n;
+  const m = ir.L.length;
+  let size = 1;
+  while (size < m * 2) size <<= 1;
+  const block = size - m + 1;
+  const spectrum = (h) => {
+    const re = new Float64Array(size);
+    const im = new Float64Array(size);
+    re.set(h);
+    fft(re, im, false);
+    return { re, im };
+  };
+  const HL = spectrum(ir.L);
+  const HR = spectrum(ir.R);
+  const out = new Track(n);
+  const xr = new Float64Array(size);
+  const xi = new Float64Array(size);
+  const yr = new Float64Array(size);
+  const yi = new Float64Array(size);
+  for (let s = 0; s < n; s += block) {
+    xr.fill(0);
+    xi.fill(0);
+    let any = false;
+    for (let i = 0; i < block && s + i < n; i += 1) {
+      xr[i] = (send.L[s + i] + send.R[s + i]) * 0.5;
+      if (xr[i] !== 0) any = true;
+    }
+    if (!any) continue;
+    fft(xr, xi, false);
+    for (const [H, dst] of [[HL, out.L], [HR, out.R]]) {
+      for (let k = 0; k < size; k += 1) {
+        yr[k] = xr[k] * H.re[k] - xi[k] * H.im[k];
+        yi[k] = xr[k] * H.im[k] + xi[k] * H.re[k];
+      }
+      fft(yr, yi, true);
+      for (let i = 0; i < size && s + i < n; i += 1) dst[s + i] += yr[i];
+    }
+  }
+  return out;
+}
+
+// Layered kick, rendered once so every hit is sample-identical (only deliberate level
+// variations). One oscillator carries both layers: its pitch falls exponentially from `f0`
+// onto the key root, the short body envelope is saturated through an asymmetric shaper, and
+// the long sub tail on the same phase stays clean, so body and tail can never cancel.
+// A filtered-noise click and a high sine blip form the transient; a soft clip glues it.
+function synthKick2(track, evs, p) {
+  const len = Math.round((p.length ?? 0.42) * SR);
+  const buf = new Float32Array(len);
+  const rng = makeRng(0x6b1c);
+  const root = midiHz(p.rootMidi ?? 29);
+  const click = new Svf(p.clickHz ?? 5200, 0.7);
+  const drive = p.bodyDrive ?? 2.6;
+  const asym = p.asym ?? 0.1;
+  const off = Math.tanh(drive * asym);
+  const norm = 1 / (Math.tanh(drive * (1 + asym)) - off);
+  const glue = p.glue ?? 1.4;
+  const glueNorm = Math.tanh(glue);
+  let ph = 0;
+  for (let i = 0; i < len; i += 1) {
+    const t = i / SR;
+    ph += (root + ((p.f0 ?? 180) - root) * Math.exp(-t / (p.pitchTau ?? 0.028))) / SR;
+    const s = Math.sin(TAU * ph);
+    const bodyEnv = Math.min(1, t / 0.0005) * Math.exp(-t / (p.bodyTau ?? 0.075));
+    const tailEnv = smoothstep(t / 0.025) * Math.exp(-t / (p.tailTau ?? 0.2)) * (1 - (i / len) ** 3);
+    const body = (Math.tanh(drive * (s * bodyEnv + asym)) - off) * norm;
+    click.lp(rng() * 2 - 1);
+    const transient = click.hp * (p.click ?? 0.35) * Math.exp(-t / 0.0012) + Math.sin(TAU * (p.blipHz ?? 1900) * t) * (p.blip ?? 0.2) * Math.exp(-t / 0.004);
+    buf[i] = Math.tanh(glue * (body + s * tailEnv * (p.tailGain ?? 0.7) + transient)) / glueNorm;
+  }
+  const sorted = [...evs].sort((a, b) => a.t - b.t);
+  sorted.forEach((ev, k) => {
+    const start = Math.round(ev.t * SR);
+    const next = sorted[k + 1];
+    const avail = next ? Math.round(next.t * SR) - start : len;
+    const n = Math.min(len, avail);
+    const fade = n < len ? Math.min(n, 96) : 0;
+    for (let i = 0; i < n; i += 1) {
+      const idx = start + i;
+      if (idx >= track.n) break;
+      const y = buf[i] * ev.v * (fade && i > n - fade ? (n - i) / fade : 1);
+      track.L[idx] += y;
+      track.R[idx] += y;
+    }
+  });
+}
+
+// Unison bass: 5-7 detuned band-limited saws with random phase, spread and slow drift, into a
+// 24 dB/oct resonant low-pass (two cascaded SVFs) with a per-note, velocity-scaled envelope,
+// chapter automation and a slow LFO. Slides glide from `from`. A clean sine sub on the same
+// pitch goes to `track.sub`; multibandDrive() recombines the bands.
+function synthBass2(track, notes, p, ctx) {
+  const rng = makeRng(ctx.seed ^ 0xb255);
+  track.sub ||= new Float32Array(track.n);
+  const voices = p.voices ?? 6;
+  for (const nt of notes) {
+    const release = p.release ?? 0.02;
+    const start = Math.round(nt.t * SR);
+    const len = Math.round((nt.dur + release) * SR);
+    const env = adsr(len, p.attack ?? 0.002, p.decay ?? 0.1, p.sustain ?? 0.55, release, nt.dur);
+    const f0 = midiHz(nt.m);
+    const osc = [];
+    for (let v = 0; v < voices; v += 1) {
+      const spread = voices === 1 ? 0 : (v / (voices - 1)) * 2 - 1;
+      const [gl, gr] = panGains(spread * (p.width ?? 0.35));
+      osc.push({ c: spread * (p.detune ?? 14) + (rng() - 0.5) * 4, ph: rng(), gl, gr, dt: 0, drift: drifter(rng, p.drift ?? 3, 0.3) });
+    }
+    const fl1 = new Svf();
+    const fl2 = new Svf();
+    const fr1 = new Svf();
+    const fr2 = new Svf();
+    const fdm = Math.exp(-16 / ((p.fdecay ?? 0.08) * SR));
+    let fenv = 1;
+    let sph = 0;
+    let sdt = 0;
+    const amp = nt.v / Math.sqrt(voices);
+    for (let i = 0; i < len; i += 1) {
+      const idx = start + i;
+      if (idx >= track.n) break;
+      if ((i & 15) === 0) {
+        const t = i / SR;
+        const abs = idx / SR;
+        const glide = nt.from != null ? (nt.from - nt.m) * Math.exp(-t / ((p.glide ?? 0.05) / 3)) : 0;
+        for (const o of osc) o.dt = (f0 * 2 ** ((glide * 100 + o.c + o.drift(abs)) / 1200)) / SR;
+        sdt = (f0 * 2 ** (glide / 12)) / SR;
+        const base = p.cutoffAt ? p.cutoffAt(abs) : p.cutoff ?? 800;
+        const lfo = 1 + (p.lfoDepth ?? 0.15) * Math.sin(TAU * (p.lfoRate ?? 0.12) * abs);
+        const fc = base * lfo * (1 + (p.envAmt ?? 3) * nt.v ** 1.3 * fenv);
+        fl1.set(fc, 0.54);
+        fr1.set(fc, 0.54);
+        fl2.set(fc, p.q ?? 1.6);
+        fr2.set(fc, p.q ?? 1.6);
+        fenv *= fdm;
+      }
+      let l = 0;
+      let r = 0;
+      for (const o of osc) {
+        o.ph += o.dt;
+        if (o.ph >= 1) o.ph -= 1;
+        const s = 2 * o.ph - 1 - polyBlep(o.ph, o.dt);
+        l += s * o.gl;
+        r += s * o.gr;
+      }
+      sph += sdt;
+      if (sph >= 1) sph -= 1;
+      const e = env[i] * amp;
+      track.L[idx] += fl2.lp(fl1.lp(l)) * e;
+      track.R[idx] += fr2.lp(fr1.lp(r)) * e;
+      track.sub[idx] += Math.sin(TAU * sph) * env[i] * Math.sqrt(nt.v) * (p.sub ?? 0.5);
+    }
+  }
+}
+
+// Linkwitz-Riley 4th-order crossover sections.
+const lr4 = (type, f) => [[type, f, Math.SQRT1_2], [type, f, Math.SQRT1_2]];
+
+// Multiband distortion for the bass: clean mono sine sub below `subHz`, heavily driven mids
+// (up to `split`), gently driven highs, with a 2-4 kHz dip to keep the grit from getting harsh.
+function multibandDrive(track, mb) {
+  const n = track.n;
+  const sub = track.sub ?? new Float32Array(n);
+  for (const [type, f, q] of lr4("lp", mb.subHz ?? 100)) runBiquad(sub, biquad(type, f, q));
+  const md = mb.midDrive ?? 4;
+  const hd = mb.highDrive ?? 1.5;
+  for (const ch of [track.L, track.R]) {
+    const mid = Float32Array.from(ch);
+    for (const [type, f, q] of [...lr4("hp", mb.subHz ?? 100), ...lr4("lp", mb.split ?? 2000)]) runBiquad(mid, biquad(type, f, q));
+    const high = Float32Array.from(ch);
+    for (const [type, f, q] of [...lr4("hp", mb.split ?? 2000)]) runBiquad(high, biquad(type, f, q));
+    for (let i = 0; i < n; i += 1) {
+      mid[i] = Math.tanh(md * mid[i] * 2) / Math.tanh(md);
+      high[i] = Math.tanh(hd * high[i] * 2) / Math.tanh(hd);
+    }
+    for (const [type, f, q, db] of [["hp", mb.midLow ?? 150, 0.7, 0], ["peak", 3000, 1, -3]]) runBiquad(mid, biquad(type, f, q, db));
+    const gm = dbGain(mb.midGain ?? 0);
+    const gh = dbGain(mb.highGain ?? -4);
+    const gs = dbGain(mb.subGain ?? 0);
+    for (let i = 0; i < n; i += 1) ch[i] = mid[i] * gm + high[i] * gh + sub[i] * gs;
+  }
+  delete track.sub;
+}
+
+// Tom for fills: pitched sine with a fast drop, noise stick and light drive.
+function synthTom(track, evs, p, ctx) {
+  const rng = makeRng(ctx.seed ^ 0x70e);
+  const len = Math.round((p.length ?? 0.35) * SR);
+  for (const ev of evs) {
+    const start = Math.round(ev.t * SR);
+    const f = ev.f ?? p.freq ?? 140;
+    const [gl, gr] = panGains(ev.pan ?? 0);
+    let ph = 0;
+    for (let i = 0; i < len; i += 1) {
+      const idx = start + i;
+      if (idx >= track.n) break;
+      const t = i / SR;
+      ph += (f * (1 + 0.6 * Math.exp(-t / 0.03))) / SR;
+      const s = Math.tanh(1.6 * (Math.sin(TAU * ph) * Math.exp(-t / (p.decay ?? 0.13)) + (rng() * 2 - 1) * 0.25 * Math.exp(-t / 0.003))) * Math.min(1, t / 0.0005) * (1 - i / len) * ev.v * Math.SQRT2;
+      track.L[idx] += s * gl;
+      track.R[idx] += s * gr;
+    }
+  }
+}
+
+// Pitch riser: detuned saws sweeping up exponentially through a tracking low-pass.
+function synthPitchRiser(track, evs, p, ctx) {
+  const rng = makeRng(ctx.seed ^ 0x9175);
+  for (const ev of evs) {
+    const start = Math.round(ev.t * SR);
+    const len = Math.round(ev.dur * SR);
+    const oscs = [-9, 9].map((c) => ({ c, ph: rng(), g: panGains(c > 0 ? 0.4 : -0.4) }));
+    const fl = new Svf();
+    const fr = new Svf();
+    const fade = Math.round(0.005 * SR);
+    for (let i = 0; i < len; i += 1) {
+      const idx = start + i;
+      if (idx >= track.n) break;
+      const x = i / len;
+      const f = (p.f0 ?? 110) * ((p.f1 ?? 880) / (p.f0 ?? 110)) ** x;
+      if ((i & 15) === 0) {
+        fl.set(f * 4, 1.2);
+        fr.set(f * 4, 1.2);
+      }
+      let l = 0;
+      let r = 0;
+      for (const o of oscs) {
+        const dt = (f * 2 ** (o.c / 1200)) / SR;
+        o.ph += dt;
+        if (o.ph >= 1) o.ph -= 1;
+        const s = 2 * o.ph - 1 - polyBlep(o.ph, dt);
+        l += s * o.g[0];
+        r += s * o.g[1];
+      }
+      const e = x * x * (i > len - fade ? (len - i) / fade : 1) * ev.v;
+      track.L[idx] += fl.lp(l) * e;
+      track.R[idx] += fr.lp(r) * e;
+    }
+  }
+}
+
+// Tape character for a bus: slow wow plus faster flutter on a short modulated delay, then
+// gentle saturation with unity small-signal gain.
+function tapeWow(track, { rate = 0.45, depthMs = 0.25, flutterRate = 6.3, flutterMs = 0.03, drive = 1.4 } = {}) {
+  const base = 0.003 * SR;
+  const size = Math.ceil(base + (depthMs + flutterMs) * 0.001 * SR) + 8;
+  for (const [ch, phase] of [[track.L, 0], [track.R, 0.3]]) {
+    const buf = new Float32Array(size);
+    let w = 0;
+    for (let i = 0; i < ch.length; i += 1) {
+      buf[w] = ch[i];
+      const t = i / SR;
+      const d = base + (depthMs * Math.sin(TAU * rate * t + phase) + flutterMs * Math.sin(TAU * flutterRate * t)) * 0.001 * SR;
+      let pos = w - d;
+      while (pos < 0) pos += size;
+      const i0 = Math.floor(pos);
+      const fr = pos - i0;
+      const y = buf[i0] * (1 - fr) + buf[(i0 + 1) % size] * fr;
+      ch[i] = Math.tanh(drive * y) / drive;
+      w = (w + 1) % size;
+    }
+  }
+}
+
+// Soft clipper: linear up to 70 % of the threshold, then a tanh knee into the threshold.
+function softClip(track, thresholdDb) {
+  const c = dbGain(thresholdDb);
+  const k = 0.7 * c;
+  const room = c - k;
+  for (const ch of [track.L, track.R]) {
+    for (let i = 0; i < ch.length; i += 1) {
+      const a = Math.abs(ch[i]);
+      if (a > k) ch[i] = Math.sign(ch[i]) * (k + room * Math.tanh((a - k) / room));
+    }
+  }
+}
+
+// Club bass patterns: per beat, [offset, length, semitones, velocity, slideFromSemitones?].
+const CLUB_BASS = {
+  roll: () => [[0.25, 0.2, 0, 0.72], [0.5, 0.22, 0, 1], [0.75, 0.2, 0, 0.82]],
+  rollJump: (b) => (b === 3 ? [[0.25, 0.2, 0, 0.75], [0.5, 0.22, 12, 1], [0.75, 0.2, 10, 0.85, 12]] : CLUB_BASS.roll(b)),
+  rollSlide: (b) => (b === 3 ? [[0.25, 0.2, 0, 0.75], [0.5, 0.22, 1, 0.95], [0.75, 0.2, 0, 0.85, 1]] : CLUB_BASS.roll(b)),
+  rollDrive: (b) => (b % 2 === 1 ? [[0.25, 0.2, 0, 0.75], [0.5, 0.22, 12, 1], [0.75, 0.2, 0, 0.85, 12]] : CLUB_BASS.roll(b)),
+  callSimple: () => [[0.5, 0.3, 0, 0.9]],
+  responseFill: (b) => (b < 2 ? CLUB_BASS.roll(b) : b === 2 ? [[0.25, 0.2, 0, 0.8], [0.5, 0.2, 12, 1], [0.75, 0.2, 10, 0.85, 12]] : [[0.25, 0.2, 7, 0.85], [0.5, 0.2, 12, 1, 7], [0.75, 0.2, 0, 0.9, 12]]),
+  pulse8: () => [[0.5, 0.35, 0, 0.9]],
+  none: () => []
+};
+
+// Arranger for the overhauled club tracks. Something changes every bar or two: bass pattern
+// variations, hat layers (8ths, shuffled 16ths, open hats, ride), percussion layers, filter
+// automation; every cut gets a fill (snare roll, tom fill, stop) with swells and impacts; the
+// middle chapter is a breakdown with an accelerating 8th/16th/32nd build into the biggest drop;
+// the riff develops over its repeats and trades bars with the bass.
+function arrangeClub(tl, ctx, style) {
+  const { bag, list } = eventBag();
+  const rng = makeRng(ctx.seed ^ 0xc1b);
+  const jitter = (ms) => ((rng() * 2 - 1) * ms) / 1000;
+  const vary = (v, amt = 0.12) => v * (1 - amt / 2 + rng() * amt);
+  const drone = new Legato(list("drone"));
+  const brassPad = new Legato(list("brassPad"));
+  const mark = (t, kind, v) => list("marks").push({ t, kind, v });
+  const voicing = (chord) => style.voicings?.[chord.symbol] ?? voice(chord, null, style.stabRange[0], style.stabRange[1], 4);
+  const firstChordAfter = (bar) => tl.bars.find((b) => b.i > bar.i && !b.gap && b.sec !== bar.sec)?.chords[0].chord ?? bar.chords[0].chord;
+  let endedWithStop = false;
+  let hatSide = 1;
+  // Jumps, flicks and slides snap up to the nearest tone of the key, whatever the chord root.
+  const inKey = (root, semi, pcs) => {
+    if (!style.scale || semi === 0) return semi;
+    let s = semi;
+    const ok = (pc) => style.scale.includes(pc) || pcs.includes(pc);
+    while (!ok((((root + s) % 12) + 12) % 12)) s += 1;
+    return s;
+  };
+  for (const bar of tl.bars) {
+    const sc = style.sections[bar.sec];
+    if (!sc) continue;
+    const T = (b) => at(bar, b);
+    const seq = (key, fallback) => {
+      const v = sc[key];
+      if (v == null) return fallback;
+      return Array.isArray(v) ? v[Math.min(bar.j, v.length - 1)] : v;
+    };
+    if (bar.j === 0) {
+      const hit = Math.max(sc.crash ?? 0, sc.boom ?? 0, sc.downlifter ?? 0, sc.stab ?? 0);
+      if (endedWithStop) mark(bar.start, "drop", 1);
+      else if (hit) mark(bar.start, "impact", hit);
+      endedWithStop = false;
+      for (const k of ["crash", "boom", "downlifter"]) if (sc[k]) list(k).push({ t: bar.start, v: sc[k], ...(k === "downlifter" ? { dur: style.downlifterDur ?? 1.6 } : {}) });
+      if (sc.stab) for (const m of voicing(bar.chords[0].chord)) list("stab").push({ t: bar.start, dur: (sc.stabBeats ?? 0.75) * bar.spb, m, v: sc.stab, dive: sc.stabDive });
+      if (sc.riser) {
+        const t0 = bar.secEnd - sc.riser * bar.spb;
+        list("riser").push({ t: t0, dur: bar.secEnd - t0, v: 1 });
+        if (sc.pitchRiser) list("pitchRiser").push({ t: t0, dur: bar.secEnd - t0, v: sc.pitchRiser });
+        mark(t0, "riser-start", 0.5);
+        mark(bar.secEnd, "riser-end", 0.9);
+      }
+      // Accelerating build over the last `build` beats: 8ths, then 16ths, then 32nds.
+      if (sc.build) {
+        const b0 = bar.secEnd - sc.build * bar.spb;
+        let x = 0;
+        while (x < sc.build - 1e-9) {
+          const step = x < sc.build / 2 ? 0.5 : x < (sc.build * 3) / 4 ? 0.25 : 0.125;
+          list("snare").push({ t: b0 + x * bar.spb, v: 0.22 + 0.75 * (x / sc.build) ** 1.4 });
+          x += step;
+        }
+        mark(b0, "riser-start", 0.6);
+      }
+    }
+    if (bar.gap) {
+      endedWithStop = true;
+      continue;
+    }
+    const fill = sc.fill || { type: "none" };
+    const fillBeats = bar.lastGrid && fill.type !== "none" ? Math.min(bar.beats, fill.beats ?? (bar.beats < 4 ? bar.beats : 2)) : 0;
+    const fillFrom = bar.beats - fillBeats;
+    const inFill = (b) => fillBeats > 0 && b >= fillFrom - 1e-9;
+    const stopped = (b) => inFill(b) && fill.type === "stop";
+    const hasGap = tl.bars[bar.i + 1]?.gap === true;
+
+    if (bar.lastGrid) {
+      const tFill = fillBeats ? T(fillFrom) : bar.end;
+      if (fill.type === "stop") {
+        mark(tFill, "stop", 0.8);
+        endedWithStop = true;
+      } else if (hasGap) mark(bar.end, "stop", 0.7);
+      if (fill.swell && bar.secEnd - tFill > 0.05) list("swell").push({ t: tFill, dur: bar.secEnd - tFill, v: 1 });
+      if (fill.rev) {
+        const t0 = fill.revBeats ? bar.secEnd - fill.revBeats * bar.spb : tFill;
+        list("revverb").push({ t: t0, dur: bar.secEnd - t0, ms: voicing(firstChordAfter(bar)), v: 1 });
+      }
+      if (fill.dive) for (const m of voicing(chordAt(bar, fillFrom).chord)) list("stab").push({ t: tFill, dur: fillBeats * bar.spb * 0.9, m, v: fill.dive, dive: 12, diveAt: 0.06, diveTime: fillBeats * bar.spb * 0.8 });
+      if (fill.type === "snare") {
+        for (let x = 0; x < fillBeats - 1e-9; ) {
+          const step = fill.accel && x >= fillBeats - 1 ? 0.125 : 0.25;
+          list("snare").push({ t: T(fillFrom + x), v: 0.25 + 0.72 * (x / fillBeats) ** 1.5 });
+          x += step;
+        }
+      }
+      if (fill.type === "tom") {
+        const toms = style.toms;
+        const count = Math.round(fillBeats / 0.25);
+        for (let k = 0; k < count; k += 1) list("tom").push({ t: T(fillFrom + k * 0.25), f: toms[Math.floor((k / count) * toms.length)], v: 0.55 + 0.4 * (k / count), pan: 0.4 - 0.8 * (k / count) });
+      }
+    }
+
+    // Harmony beds.
+    for (const seg of bar.chords) {
+      const t0 = bar.sec === "intro" && seg.b0 === 0 ? 0 : T(seg.b0);
+      const t1 = T(seg.b1);
+      const root = nearestPitch(seg.chord.root, style.droneRange[0] + 5, style.droneRange[0], style.droneRange[1]);
+      if (sc.drone) drone.chord(t0, t1 - t0, [root, root + 7, root + 12], sc.drone);
+      if (sc.brassPad && !stopped(seg.b0)) brassPad.chord(t0, t1 - t0, voicing(seg.chord), sc.brassPad);
+    }
+
+    // Bass.
+    const pattern = seq("bassSeq", sc.bass ? "roll" : "none");
+    for (let b = 0; b < Math.ceil(bar.beats - 1e-9); b += 1) {
+      for (const [off, len, semi, vel, slide] of CLUB_BASS[pattern](b)) {
+        const pos = b + off;
+        if (pos >= bar.beats - 1e-9 || stopped(pos) || (inFill(pos) && fill.bass === false)) continue;
+        const seg = chordAt(bar, pos);
+        const root = nearestPitch(seg.chord.bass, style.bassRoot, style.bassRange[0], style.bassRange[1]);
+        list("bass").push({
+          t: T(pos),
+          dur: len * bar.spb,
+          m: root + inKey(root, semi, seg.chord.pcs),
+          v: vary(vel * (sc.bassV ?? 1), 0.1),
+          ...(slide != null ? { from: root + inKey(root, slide, seg.chord.pcs) } : {}),
+          crush: sc.crushBars?.includes(bar.j) ? sc.crush ?? 0.4 : 0
+        });
+      }
+    }
+
+    // Drums: the kick is sample-identical; hats and percussion get jitter and velocity variation.
+    const kickOn = seq("kickSeq", sc.kick ? "on" : "off") === "on";
+    const clapOn = seq("clapSeq", sc.clap ? "on" : "off") === "on";
+    const hatTokens = (seq("hatSeq", "") || "").split(" ");
+    const has = (tok) => hatTokens.includes(tok);
+    for (let b = 0; b < bar.beats - 1e-9; b += 1) {
+      if (kickOn && !stopped(b) && !(inFill(b) && fill.kick !== true)) {
+        list("kick").push({ t: T(b), v: 1 });
+        if (b === 0) mark(T(b), "kick-accent", bar.j === 0 ? 0.8 : 0.5);
+      }
+      if (clapOn && (b === 1 || b === 3) && !inFill(b)) {
+        list("clap").push({ t: T(b) + jitter(1.5), v: vary(sc.clapV ?? 1, 0.06) });
+        if (style.clapLayer) list("clapmetal").push({ t: T(b), f: style.clapLayer.f, decay: style.clapLayer.decay, pan: 0, v: vary(style.clapLayer.v, 0.1) });
+        mark(T(b), "clap", 0.6);
+      }
+      if (stopped(b)) continue;
+      const hatFill = inFill(b) && fill.type !== "tom" && fill.type !== "snare" ? false : true;
+      if (has("16") && hatFill) {
+        style.hat16.forEach((v, k) => {
+          const pos = b + k * 0.25 + (k % 2 ? style.shuffle ?? 0 : 0);
+          if (k === 2 && has("o")) list("openhat").push({ t: T(b + 0.5) + jitter(3), v: vary(0.8) });
+          else {
+            hatSide = -hatSide;
+            list("hat").push({ t: T(pos) + jitter(4), v: vary(v, 0.2), pan: (k % 2 ? 0.3 : 0.1) * hatSide });
+          }
+        });
+      } else if (has("8") && hatFill) {
+        if (has("o")) list("openhat").push({ t: T(b + 0.5) + jitter(3), v: vary(0.8) });
+        else list("hat").push({ t: T(b + 0.5) + jitter(4), v: vary(0.85, 0.15), pan: 0.12 });
+      }
+      if (has("r") && hatFill) [0, 0.5].forEach((o, k) => list("ride").push({ t: T(b + o) + jitter(3), v: vary(k ? 0.5 : 0.75, 0.15), pan: -0.25 }));
+      if (has("rim") && (b === 3 || (bar.j % 2 === 1 && b === 1))) list("rim").push({ t: T(b + 0.75) + jitter(3), v: vary(0.7), pan: 0.2 });
+    }
+    if (has("p")) {
+      for (const [parity, beat, f, v, pan] of style.percPattern) {
+        if (bar.j % 2 !== parity || beat >= bar.beats - 1e-9 || inFill(beat)) continue;
+        list("perc").push({ t: T(beat) + jitter(4), f, v: vary(v, 0.2), pan });
+      }
+    }
+    if (has("m")) {
+      for (const [parity, beat, f, decay, pan, v] of style.metalPattern) {
+        if (bar.j % 2 !== parity || beat >= bar.beats - 1e-9 || inFill(beat)) continue;
+        list("metal").push({ t: T(beat) + jitter(3), f, decay, pan, v: vary(v, 0.15) });
+      }
+    }
+    const stabs = sc.stabs ? style.stabPatterns[sc.stabs] : null;
+    if (stabs) {
+      for (const [parity, beat, len, key, v, dive] of stabs) {
+        if (bar.j % 2 !== parity || beat >= bar.beats - 1e-9 || inFill(beat) || (bar.j === 0 && beat === 0 && sc.stab)) continue;
+        const ms = key ? style.voicings[key] : voicing(chordAt(bar, beat).chord);
+        for (const m of ms) list("stab").push({ t: T(beat), dur: len * bar.spb, m, v, dive });
+        mark(T(beat), "stab", v);
+      }
+    }
+    // Riff: a developing sequence of bars per chapter (calls answered by the bass).
+    const riffBar = sc.riff ? style.riffs[bar.sec]?.[bar.j] : null;
+    if (riffBar) {
+      riffBar.forEach(([beat, len, m, from], k) => {
+        if (beat >= bar.beats - 1e-9 || inFill(beat)) return;
+        list("lead").push({ t: T(beat), dur: len * bar.spb, m, from, v: vary(sc.riff, 0.08) });
+        if (k === 0) mark(T(beat), "lead-in", 0.7);
+      });
+      const last = riffBar[riffBar.length - 1];
+      mark(T(last[0] + last[1]), "lead-out", 0.5);
+    }
+  }
+  style.extras?.(tl, ctx, list, mark);
+  return bag;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Presets
 
 const byId = (tl, id) => tl.bars.filter((b) => b.sec === id);
@@ -2503,10 +3085,168 @@ const PRESET_E = {
   duck: { attack: 0.003, release: 0.22 }
 };
 
-for (const p of [PRESET_A, PRESET_B, PRESET_C]) p.status = "rejected by the owner (warm/pop palette); kept for reference";
-for (const p of [PRESET_D, PRESET_E]) p.status = "candidate";
+// Cold, dissonant brass voicings for D3 (F phrygian): b9, #11 and maj7 colours, a tritone
+// stack and F minor against G-flat minor.
+const D3_VOICINGS = {
+  Fm: [53, 60, 65, 68, 78],
+  Db: [49, 56, 61, 65, 72],
+  Eb: [51, 58, 63, 67, 69],
+  Gb: [54, 61, 66, 70, 72],
+  Bbm: [46, 53, 58, 61, 65],
+  C: [48, 55, 60, 64, 66],
+  Tri: [53, 59, 65, 71],
+  FmGbm: [53, 56, 60, 66, 69, 73]
+};
 
-export const PRESETS = { A: PRESET_A, B: PRESET_B, C: PRESET_C, D: PRESET_D, E: PRESET_E };
+// The riff develops over its repeats: calls (busy bars) alternate with answers (held notes
+// while the bass fills), and each repeat changes its ending, register or rhythm.
+const CLUB_RIFFS = {
+  ai: [
+    [[0, 0.5, 53], [0.75, 0.25, 53], [1.5, 0.5, 56], [2.5, 0.75, 54, 56]],
+    [[0, 1.5, 51, 54], [2, 0.5, 53]],
+    [[0, 0.5, 53], [0.75, 0.25, 53], [1.5, 0.5, 60], [2.5, 0.5, 58, 60], [3, 0.75, 54, 58]]
+  ],
+  scope: [
+    [[0, 0.5, 53], [0.75, 0.25, 53], [1.5, 0.5, 56], [2, 0.5, 65], [2.5, 0.75, 63, 65]],
+    [[0, 1, 60, 63], [1.5, 1.5, 54, 60]],
+    [[0, 0.5, 53], [0.75, 0.25, 56], [1.25, 0.25, 58], [1.5, 0.75, 60], [2.5, 1, 65, 60]]
+  ]
+};
+
+function clubStyle(drama) {
+  const stabs = drama ? "drama" : "club";
+  return {
+    droneRange: [36, 47],
+    bassRange: [29, 41],
+    bassRoot: 29,
+    // F phrygian; chord tones (such as the E natural of C) are allowed too.
+    scale: [5, 6, 8, 10, 0, 1, 3],
+    stabRange: [53, 72],
+    hat16: [0.34, 0.22, 0.9, 0.28],
+    shuffle: 0.035,
+    toms: [196, 165, 131, 110, 98],
+    percPattern: [[0, 1.75, 330, 0.7, 0.35], [0, 2.25, 220, 0.5, -0.3], [1, 0.75, 262, 0.6, -0.35], [1, 3.25, 196, 0.7, 0.3]],
+    metalPattern: [[0, 1.75, 620, 0.25, 0.4, 0.7], [1, 0.75, 910, 0.2, -0.4, 0.6], [1, 2.75, 470, 0.35, 0.3, 0.8]],
+    downlifterDur: 1.4,
+    ...(drama ? { voicings: D3_VOICINGS, clapLayer: { f: 2300, decay: 0.09, v: 0.7 } } : {}),
+    stabPatterns: {
+      club: [[0, 3.5, 0.4, null, 0.65], [1, 1.5, 0.4, null, 0.6], [1, 3.75, 0.25, null, 0.55]],
+      drama: [[0, 2.5, 0.35, null, 0.72], [1, 1.5, 0.35, "Tri", 0.7], [1, 3, 0.9, "FmGbm", 0.85, 7]],
+      breakdown: [[0, 2.5, 1.2, null, 0.8], [1, 0, 1.5, "Tri", 0.8], [1, 2.5, 1.2, "FmGbm", 0.85, 12]]
+    },
+    riffs: CLUB_RIFFS,
+    sections: {
+      intro: { energy: 0.3, drone: 0.75, droneCut: [200, 1200] },
+      find: { energy: 0.78, drone: 0.4, droneCut: [700, 1000], kick: 1, bassSeq: ["roll", "roll", "rollJump", "roll"], bassCut: [380, 800], hatSeq: ["8", "16", "16 rim", "16"], clap: 1, crash: 0.9, boom: 1, downlifter: 0.8, stab: 0.8, riser: 3, fill: { type: "snare", beats: 2, swell: true, bass: false, ...(drama ? { dive: 0.7 } : {}) } },
+      disk: { energy: 0.85, drone: 0.4, droneCut: [900, 1100], kick: 1, bassSeq: ["roll", "rollSlide", "roll"], bassCut: [700, 1100], hatSeq: ["16 o", "16 o m", "16 o m"], clap: 1, crash: 0.7, fill: { type: "tom", beats: 2, rev: true, bass: false } },
+      transfer: { energy: 1, drone: 0.45, droneCut: [1000, 1500], kick: 1, bassSeq: ["rollDrive", "roll", "rollJump", "rollDrive", "roll"], crush: 0.35, crushBars: [3], bassCut: [1000, 2000], hatSeq: ["16 o", "16 o p", "16 o r p", "16 o r p m", "16 o r"], clap: 1, stabs, ...(drama ? { brassPad: 0.5, brassCut: [700, 2600] } : {}), crash: 1, boom: 1, downlifter: 1, stab: 1, riser: 6, pitchRiser: 0.8, fill: { type: "snare", beats: 3, accel: true, swell: true, bass: false, ...(drama ? { dive: 0.85 } : {}) } },
+      safety: { energy: 0.5, drone: 1, droneCut: [400, 2600], kickSeq: ["off", "off", "on", "on"], bassSeq: ["none", "pulse8", "pulse8", "roll"], bassCut: [260, 2400], hatSeq: ["", "rim", "8", "16"], clapSeq: ["off", "off", "on", "on"], ...(drama ? { stabs: "breakdown" } : {}), stab: 0.9, stabBeats: 1.5, downlifter: 1, boom: 0.8, riser: 8, pitchRiser: 1, build: 8, fill: { type: "drop", beats: 2, bass: false } },
+      terminal: { energy: 1, drone: 0.45, droneCut: [1300, 1600], kick: 1, bassSeq: ["rollDrive", "rollJump", "roll", "rollDrive", "roll"], bassCut: [1400, 1900], hatSeq: ["16 o r", "16 o r p", "16 o r p m", "16 o r p m"], clap: 1, stabs, crash: 1, boom: 1, downlifter: 1, stab: 1, fill: { type: "stop", rev: true, ...(drama ? { dive: 0.9 } : {}) } },
+      ai: { energy: 0.95, drone: 0.4, droneCut: 1100, kick: 1, riff: 1, bassSeq: ["callSimple", "responseFill", "callSimple", "roll"], bassCut: [1000, 1500], hatSeq: ["16", "16 o", "16 o p"], clap: 1, crash: 0.9, boom: 0.8, stab: 0.8, fill: { type: "stop", rev: true } },
+      scope: { energy: 0.95, drone: 0.45, droneCut: [1100, 1600], kick: 1, riff: 0.95, bassSeq: ["callSimple", "responseFill", "rollDrive", "rollJump"], crush: 0.45, crushBars: [3], bassCut: [1200, 2600], hatSeq: ["16 o", "16 o r", "16 o r p m", "16 o r p m"], clap: 1, ...(drama ? { stabs: "drama", brassPad: 0.5, brassCut: [600, 3000] } : {}), crash: 0.9, boom: 0.8, downlifter: 0.8, stab: 0.9, riser: 8, pitchRiser: 0.8, fill: { type: "snare", beats: 2, accel: true, swell: true, bass: false, ...(drama ? { dive: 0.8 } : {}) } },
+      outro: { energy: 0.6, droneCut: [900, 250] }
+    },
+    extras(tl, ctx, list, mark) {
+      const first = tl.sections[0].start;
+      const intro = tl.bars[0];
+      const home = drama ? D3_VOICINGS.Fm : [53, 56, 60, 65];
+      list("hiss").push({ t: 0, dur: tl.cues.duration, v: 1 });
+      list("riser").push({ t: 0.3, dur: first - 0.3, v: 1 });
+      list("pitchRiser").push({ t: 0.8, dur: first - 0.8, v: 0.6 });
+      mark(0.3, "riser-start", 0.4);
+      mark(first, "riser-end", 0.9);
+      list("revverb").push({ t: first - 1.4, dur: 1.4, ms: drama ? D3_VOICINGS.FmGbm : home, v: 1 });
+      list("metal").push({ t: intro.start, f: 170, decay: 1.2, pan: 0, v: 0.8 });
+      if (drama) {
+        // One eerie held line: from the breakdown through the biggest drop, drifting flat.
+        const s = tl.sections.find((x) => x.id === "safety").start;
+        const e = tl.sections.find((x) => x.id === "terminal").end - 0.1;
+        list("eerie").push({ t: s, dur: e - s, m: 84, v: 1, bend: -60, a: 1.2 });
+        mark(s, "lead-in", 0.4);
+        mark(e, "lead-out", 0.3);
+      }
+      const end = tl.cues.endCard;
+      list("kick").push({ t: end, v: 1 });
+      list("crash").push({ t: end, v: 1 });
+      list("boom").push({ t: end, v: 1 });
+      list("downlifter").push({ t: end, v: 1, dur: 2.4 });
+      for (const m of home) list("stabEnd").push({ t: end, dur: 0.6, m, v: 1 });
+      list("metal").push({ t: end, f: 140, decay: 1.6, pan: 0, v: 0.8 });
+      list("bass").push({ t: end, dur: 0.5, m: 29, v: 1 });
+      for (const m of [41, 48, 53]) list("droneEnd").push({ t: end, dur: 1.2, m, v: 0.8 });
+      mark(end, "impact", 1);
+    }
+  };
+}
+
+function clubParts(drama) {
+  const hp = (f) => butter4("hp", f);
+  return {
+    kick: { synth: "kick2", level: -9.5, bus: "drums", params: { rootMidi: 29, f0: 180, pitchTau: 0.028, bodyTau: 0.075, bodyDrive: 2.6, asym: 0.1, tailTau: 0.2, tailGain: 0.7, click: 0.35, blip: 0.2, blipHz: 1900, glue: 1.4, length: 0.42 }, eq: hp(28) },
+    bass: { synth: "bass2", level: -12.5, cutoff: "bassCut", params: { voices: 6, detune: 14, width: 0.35, drift: 3, decay: 0.09, sustain: 0.5, release: 0.02, envAmt: 3, fdecay: 0.07, q: 1.7, lfoRate: 0.11, lfoDepth: 0.18, glide: 0.05, sub: 0.55 }, multiband: { subHz: 100, split: 2000, midDrive: 4, highDrive: 1.6, midLow: 150, midGain: 0, highGain: -5, subGain: 5 }, eq: [["lp", 9000, 0.7]], duck: 0.95 },
+    drone: { ...DARK_PARTS.drone, level: -24, eq: [...hp(120), ["peak", 400, 1, -3]], reverb: -10 },
+    droneEnd: { ...DARK_PARTS.droneEnd, eq: [...hp(100), ["peak", 400, 1, -3]] },
+    clap: { synth: "clap", level: -19, bus: "drums", params: { freq: 1400, tail: 0.12 }, eq: [...hp(150), ["peak", 3000, 1, -2]], room: -4, reverb: drama ? 0 : -8 },
+    clapmetal: { synth: "metal", level: -26, bus: "drums", params: { hp: 1200, ring: 0.6, drive: 2.5 }, reverb: -2 },
+    snare: { synth: "snare", level: -21, bus: "drums", params: { body: 210, tail: 0.1 }, eq: hp(150), room: -4, reverb: -10 },
+    tom: { synth: "tom", level: -22, bus: "drums", eq: hp(70), room: -3, reverb: -12 },
+    perc: { synth: "tom", level: -28, bus: "drums", params: { decay: 0.06, length: 0.15 }, eq: hp(150), room: -3 },
+    hat: { synth: "grittyHat", level: -25, bus: "drums", params: { freq: 8800, decay: 0.028, drive: 2.2, metal: 0.35 }, eq: [...hp(500), ["lp", 12500, 0.7]], room: -12 },
+    openhat: { synth: "grittyHat", level: -27, bus: "drums", params: { freq: 7800, decay: 0.16, drive: 2.2, metal: 0.4, open: true }, eq: [...hp(500), ["lp", 12000, 0.7]], room: -10 },
+    ride: { synth: "grittyHat", level: -29, bus: "drums", params: { freq: 6500, decay: 0.3, drive: 1.5, metal: 0.65, hp: 4000, open: true }, eq: [["lp", 12000, 0.7]], reverb: -12 },
+    rim: { synth: "rim", level: -27, bus: "drums", eq: hp(200), room: -3 },
+    metal: { synth: "metal", level: -25, bus: "drums", eq: hp(200), room: -4, reverb: -12, delay: -12 },
+    stab: drama
+      ? { synth: "brass", level: -16, bus: "synth", params: { voices: 6, detune: 22, attack: 0.003, decay: 0.22, sustain: 0.35, release: 0.18, cutoff: 1100, envAmt: 4.5, fdecay: 0.1, q: 1.3, drive: 3.5, sub: 0.3, drift: 4 }, eq: [...hp(150), ["peak", 3000, 1, -3]], reverb: -3, duck: 0.35 }
+      : { synth: "brass", level: -18, bus: "synth", params: { voices: 5, detune: 16, attack: 0.003, decay: 0.16, sustain: 0.05, release: 0.12, cutoff: 1000, envAmt: 4, fdecay: 0.08, q: 1.4, drive: 2.6, sub: 0.2, drift: 3 }, eq: [...hp(150), ["peak", 3000, 1, -3]], reverb: -6, delay: -14, duck: 0.35 },
+    brassPad: { synth: "brass", level: -22, bus: "synth", cutoff: "brassCut", params: { voices: 6, detune: 18, attack: 0.15, decay: 1, sustain: 0.9, release: 0.4, envAmt: 0.3, q: 1, drive: 2.5, sub: 0.1, drift: 4 }, eq: [...hp(150), ["peak", 400, 1, -3], ["peak", 3000, 1, -2]], duck: 0.6, reverb: -8 },
+    stabEnd: { ...DARK_PARTS.stabEnd, level: -17, eq: [...hp(140), ["peak", 3000, 1, -2]], reverb: 0 },
+    lead: { synth: "lead", level: -17.5, bus: "synth", params: { saw: 0.35, square: 0.65, cutoff: 1500, envAmt: 2.2, fdecay: 0.1, q: 3, attack: 0.004, decay: 0.15, sustain: 0.6, release: 0.08, vibCents: 0, glide: 0.07, drive: 3, drive2: 2, detune: 9, drift: 4 }, eq: [...hp(150), ["peak", 3000, 1, -3], ["lp", 8000, 0.7]], delay: -6, reverb: -10, duck: 0.35 },
+    eerie: { synth: "eerie", level: -25, bus: "synth", params: { detune: 9, vibCents: 14, cutoff: 4200, attack: 1.2, release: 1.2 }, eq: hp(600), reverb: -3, delay: -12 },
+    crash: { ...DARK_PARTS.crash, peak: -18, eq: [...hp(400), ["lp", 10000, 0.7]] },
+    boom: { synth: "boom", peak: -12, params: { f0: 80, f1: 43, decay: 0.45 } },
+    downlifter: { ...DARK_PARTS.downlifter, peak: -16, eq: hp(150) },
+    riser: { ...DARK_PARTS.riser, peak: -17, eq: hp(150) },
+    pitchRiser: { synth: "pitchRiser", peak: -20, params: { f0: 110, f1: 1400 }, eq: hp(150), reverb: -8 },
+    swell: { ...DARK_PARTS.swell, peak: -19, eq: [...hp(400), ["lp", 10000, 0.7]] },
+    revverb: { ...DARK_PARTS.revverb, peak: -15, eq: hp(150) },
+    hiss: { ...DARK_PARTS.hiss, level: -58 }
+  };
+}
+
+function makeClubPreset(id, drama) {
+  return {
+    id,
+    name: drama ? "Club techno + cinematic drama" : "Club techno (overhauled)",
+    seed: drama ? 0xd3 : 0xd2,
+    nominalBpm: 128,
+    key: "F minor (phrygian flat-2 inflections)",
+    feel: drama
+      ? "D2's club groove and rolling bass with Pursuit-style drama: cold saturated dissonant brass stabs with pitch dives into key cuts, huge hall claps with a metallic layer, sustained brass that opens on builds, and one eerie held line from the breakdown through the biggest drop."
+      : "Overhauled club techno: layered sample-identical kick, multiband-distorted unison rolling bass with accents, slides and octave jumps, evolving hats/ride/percussion, fills into every cut, convolution room and hall, a breakdown with an accelerating build into the biggest drop, and a riff that develops and trades bars with the bass.",
+    form: PRESET_D.form,
+    arranger: arrangeClub,
+    style: clubStyle(drama),
+    parts: clubParts(drama),
+    room: { ir: { seconds: 0.8, rt60: 0.55, predelay: 0.004, dampStart: 6000, dampEnd: 1800, early: 8, earlyMs: [3, 35], width: 0.8 }, level: -25, eq: [["hp", 200, 0.7], ["lp", 7000, 0.7]] },
+    reverb: { ir: { seconds: 3.4, rt60: drama ? 3 : 2.4, predelay: 0.025, dampStart: 7500, dampEnd: 1800, early: 12, earlyMs: [8, 80], width: 0.9 }, level: drama ? -19 : -21, eq: [["hp", 250, 0.7], ["lp", 8000, 0.7]], duck: 0.5 },
+    delay: { beats: 0.75, bpm: 127.7, feedback: 0.35, lp: 3000, hp: 500, level: -27 },
+    synthBus: { tape: { rate: 0.45, depthMs: 0.22, flutterMs: 0.03, drive: 1.4 }, ...(drama ? { drive: 4, mix: 0.3, hp: 150, lp: 9000 } : {}) },
+    drumBus: { threshold: -16, ratio: 3, attack: 0.004, release: 0.08, knee: 6 },
+    drumParallel: { threshold: -32, ratio: 8, attack: 0.002, release: 0.06, mix: -7 },
+    master: { targetLufs: -14, ceilingDbtp: -1.6, mp4TruePeakMax: -1.5, plr: 8.5, clipHeadroomDb: 1.5, saturation: 1.3, monoBelow: 120, eq: [["highshelf", 3200, 0.7, 1]], glue: { threshold: -18, ratio: 2, attack: 0.02, release: 0.15 } },
+    duck: { attack: 0.002, hold: 0.008, release: 0.15 }
+  };
+}
+
+const PRESET_D2 = makeClubPreset("D2", false);
+const PRESET_D3 = makeClubPreset("D3", true);
+
+for (const p of [PRESET_A, PRESET_B, PRESET_C]) p.status = "rejected by the owner (warm/pop palette); kept for reference";
+for (const p of [PRESET_D, PRESET_E]) p.status = "superseded (owner preferred D; see D2/D3)";
+for (const p of [PRESET_D2, PRESET_D3]) p.status = "candidate";
+
+export const PRESETS = { A: PRESET_A, B: PRESET_B, C: PRESET_C, D: PRESET_D, E: PRESET_E, D2: PRESET_D2, D3: PRESET_D3 };
 
 // ---------------------------------------------------------------------------------------------
 // Mixing and mastering
@@ -2579,6 +3319,7 @@ export function renderCandidate(id, cues, { log = () => {} } = {}) {
   const delaySend = new Track(n);
   const stems = {};
   let kickTrack = null;
+  let bassTrack = null;
 
   for (const [name, cfg] of Object.entries(preset.parts)) {
     const evs = events[name];
@@ -2593,6 +3334,16 @@ export function renderCandidate(id, cues, { log = () => {} } = {}) {
     // "cutoff" column, a string names another column such as "bassCut").
     if (cfg.cutoff) params.cutoffAt = sectionAutomation(tl, preset.style, cfg.cutoff === true ? "cutoff" : cfg.cutoff, 2000);
     SYNTHS[cfg.synth](track, evs, params, ctx);
+    if (track.sub) {
+      if (cfg.multiband) multibandDrive(track, cfg.multiband);
+      else {
+        for (let i = 0; i < n; i += 1) {
+          track.L[i] += track.sub[i];
+          track.R[i] += track.sub[i];
+        }
+        delete track.sub;
+      }
+    }
     if (cfg.eq) eqTrack(track, cfg.eq);
     if (cfg.chorus) chorus(track, cfg.chorus);
     if (cfg.duck && duck) applyDuck(track, duck, cfg.duck);
@@ -2619,6 +3370,7 @@ export function renderCandidate(id, cues, { log = () => {} } = {}) {
       mixInto(mix, wet);
     }
     if (name === "kick") kickTrack = track;
+    if (name === "bass") bassTrack = track;
     log(`  ${id}/${name}: ${evs.length} events`);
   }
 
@@ -2640,7 +3392,7 @@ export function renderCandidate(id, cues, { log = () => {} } = {}) {
   }
 
   // Synth bus with parallel distortion (dense, saturated brass without losing the transients).
-  if (preset.synthBus) {
+  if (preset.synthBus?.drive) {
     const sb = preset.synthBus;
     const dist = new Track(n);
     for (let i = 0; i < n; i += 1) {
@@ -2652,13 +3404,24 @@ export function renderCandidate(id, cues, { log = () => {} } = {}) {
     scaleTrack(dist, dbGain(dryLevel + toDb(sb.mix ?? 0.35) - activeLevel(dist)));
     mixInto(synthBus, dist);
   }
+  if (preset.synthBus?.tape) tapeWow(synthBus, preset.synthBus.tape);
   mixInto(mix, synthBus);
 
   const drumBus = compress(drums, preset.drumBus);
+  // Parallel (New York) compression: a crushed copy of the drum bus blended underneath.
+  if (preset.drumParallel) {
+    const dp = preset.drumParallel;
+    const crushed = new Track(n);
+    crushed.L.set(drums.L);
+    crushed.R.set(drums.R);
+    compress(crushed, { threshold: dp.threshold ?? -30, ratio: dp.ratio ?? 8, attack: dp.attack ?? 0.002, release: dp.release ?? 0.06, knee: 4, detectMs: 2 });
+    scaleTrack(crushed, dbGain(activeLevel(drums) + (dp.mix ?? -6) - activeLevel(crushed)));
+    mixInto(drums, crushed);
+  }
   mixInto(mix, drums);
 
   if (preset.delay) {
-    const spb = 60 / preset.nominalBpm;
+    const spb = 60 / (preset.delay.bpm ?? preset.nominalBpm);
     const wet = pingPong(delaySend, { time: preset.delay.beats * spb, feedback: preset.delay.feedback, lp: preset.delay.lp, hp: preset.delay.hp });
     scaleTrack(wet, dbGain(preset.delay.level - activeLevel(wet)));
     mixInto(mix, wet);
@@ -2666,13 +3429,15 @@ export function renderCandidate(id, cues, { log = () => {} } = {}) {
   }
   for (const [rv, send] of [[preset.room, roomSend], [preset.reverb, reverbSend]]) {
     if (!rv || activeLevel(send) === -Infinity) continue;
-    const wet = fdnReverb(send, rv);
+    // Convolution with a generated impulse response when the preset asks for it.
+    const wet = rv.ir ? convolveReverb(send, makeImpulse({ ...rv.ir, seed: preset.seed ^ Math.round(rv.ir.rt60 * 1000) })) : fdnReverb(send, rv);
     eqTrack(wet, rv.eq);
     if (rv.duck && duck) applyDuck(wet, duck, rv.duck);
     scaleTrack(wet, dbGain(rv.level - activeLevel(wet)));
     mixInto(mix, wet);
   }
 
+  const lowEnd = kickTrack && bassTrack ? lowEndReport(kickTrack, bassTrack, kickTimes) : null;
   const master = masterChain(mix, { targetLufs, ceilingDbtp, duration: cues.duration, eq: preset.masterEq ?? preset.master?.eq, ...preset.master });
   const pre = squaredPrefix(mix.L, mix.R);
   const sectionLoudness = [
@@ -2686,7 +3451,39 @@ export function renderCandidate(id, cues, { log = () => {} } = {}) {
     L: mix.L,
     R: mix.R,
     beatmap: buildBeatMap(preset, tl, events, cues),
-    info: describe(preset, tl, cues, { master, drumBus, stems, sectionLoudness, tailLufs: +tail.toFixed(1) })
+    info: describe(preset, tl, cues, { master, drumBus, stems, sectionLoudness, tailLufs: +tail.toFixed(1), ...(lowEnd ? { lowEnd } : {}) })
+  };
+}
+
+// Low-end check (40-120 Hz): kick vs bass level overall, and how much bass energy remains in the
+// first 70 ms after each kick (the ducking window), relative to the kick itself.
+function lowEndReport(kick, bass, kickTimes) {
+  const band = (tr) => {
+    const x = new Float32Array(tr.n);
+    for (let i = 0; i < tr.n; i += 1) x[i] = (tr.L[i] + tr.R[i]) * 0.5;
+    for (const [type, f, q] of [...lr4("hp", 40), ...lr4("lp", 120)]) runBiquad(x, biquad(type, f, q));
+    return x;
+  };
+  const k = band(kick);
+  const b = band(bass);
+  const ms = (x, from = 0, to = x.length) => {
+    let sum = 0;
+    for (let i = from; i < to; i += 1) sum += x[i] * x[i];
+    return sum / Math.max(1, to - from);
+  };
+  let kw = 0;
+  let bw = 0;
+  const w = Math.round(0.07 * SR);
+  for (const t of kickTimes) {
+    const s0 = Math.round(t * SR);
+    kw += ms(k, s0, Math.min(k.length, s0 + w));
+    bw += ms(b, s0, Math.min(b.length, s0 + w));
+  }
+  return {
+    band: "40-120 Hz",
+    kickDb: +toDb(Math.sqrt(ms(k))).toFixed(1),
+    bassDb: +toDb(Math.sqrt(ms(b))).toFixed(1),
+    bassRelativeToKickInKickWindowsDb: +(10 * Math.log10((bw + 1e-20) / (kw + 1e-20))).toFixed(1)
   };
 }
 
@@ -2709,7 +3506,7 @@ function monoBelow(track, f) {
   }
 }
 
-function masterChain(mix, { targetLufs, ceilingDbtp, duration, eq = [], saturation = 0, monoBelow: monoHz = 0, glue: glueCfg = {} }) {
+function masterChain(mix, { targetLufs, ceilingDbtp, duration, eq = [], saturation = 0, monoBelow: monoHz = 0, glue: glueCfg = {}, plr = null, clipHeadroomDb = 1.5 }) {
   eqTrack(mix, [...butter4("hp", 30), ...eq, ["highshelf", 11000, 0.7, -1.5]]);
   // Fades: 3 ms in, and a raised-cosine out over the last 0.7 s so the tail reaches digital
   // silence exactly on the final frame (sources are already decaying by then).
@@ -2735,18 +3532,39 @@ function masterChain(mix, { targetLufs, ceilingDbtp, duration, eq = [], saturati
   const dry = { L: Float32Array.from(mix.L), R: Float32Array.from(mix.R) };
   let gain = dbGain(targetLufs - integratedLoudness(mix.L, mix.R));
   let limiterGr = 0;
-  for (let pass = 0; pass < 6; pass += 1) {
+  // With a PLR target the peaks are held at target + PLR: a soft clipper shaves the tallest
+  // transients first, then the true-peak limiter catches the rest.
+  const ceiling = plr != null ? Math.min(ceilingDbtp, targetLufs + plr) : ceilingDbtp;
+  for (let pass = 0; pass < 8; pass += 1) {
     for (let i = 0; i < n; i += 1) {
       mix.L[i] = dry.L[i] * gain;
       mix.R[i] = dry.R[i] * gain;
     }
-    limiterGr = truePeakLimit(mix.L, mix.R, ceilingDbtp);
+    if (plr != null) softClip(mix, ceiling + clipHeadroomDb);
+    limiterGr = truePeakLimit(mix.L, mix.R, ceiling);
     lufs = integratedLoudness(mix.L, mix.R);
     if (Math.abs(lufs - targetLufs) < 0.05) break;
     gain *= dbGain(targetLufs - lufs);
   }
   const tp = truePeakEnvelope(mix.L, mix.R).reduce((a, b) => (b > a ? b : a), 0);
-  return { integratedLufs: +lufs.toFixed(2), truePeakDbtp: +toDb(tp).toFixed(2), glueCompressor: glue, limiterMaxGainReductionDb: +limiterGr.toFixed(2), saturation, monoBelowHz: monoHz || null, durationSeconds: duration };
+  let peak = 0;
+  let sq = 0;
+  for (let i = 0; i < n; i += 1) {
+    peak = Math.max(peak, Math.abs(mix.L[i]), Math.abs(mix.R[i]));
+    sq += mix.L[i] * mix.L[i] + mix.R[i] * mix.R[i];
+  }
+  const rmsDb = 10 * Math.log10(sq / (2 * n));
+  return {
+    integratedLufs: +lufs.toFixed(2),
+    truePeakDbtp: +toDb(tp).toFixed(2),
+    plrDb: +(toDb(tp) - lufs).toFixed(2),
+    crestFactorDb: +(toDb(peak) - rmsDb).toFixed(2),
+    glueCompressor: glue,
+    limiterMaxGainReductionDb: +limiterGr.toFixed(2),
+    saturation,
+    monoBelowHz: monoHz || null,
+    durationSeconds: duration
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
