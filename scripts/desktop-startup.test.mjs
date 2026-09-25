@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { EventEmitter } from "node:events";
 import http from "node:http";
+import path from "node:path";
 
 const main = await readFile(process.env.EB_DESKTOP_MAIN_SOURCE || new URL("../electron-main.mjs", import.meta.url), "utf8");
 const section = (from, to) => main.slice(main.indexOf(from), main.indexOf(to, main.indexOf(from)));
@@ -139,6 +140,75 @@ test("failed child exit still allows embedded cleanup but rejects shutdown", asy
   child.child.emit("close", 1);
   await rejected;
   assert.deepEqual(h.events, ["http-close"]);
+});
+
+function recoveryHarness({ stopChild, sendEvent }) {
+  const sent = [];
+  return harness({
+    serverIsReady: async () => true, backendRestartCount: 0, backendConsecutiveHealthMisses: 0, baseUrl: "http://fixture",
+    stopChildBackendProcess: stopChild, backendStatus: async () => ({ ready: true }), listerUrl: () => "fixture-url",
+    mainWindow: { isDestroyed: () => false, webContents: { isCrashed: () => false } },
+    desktopEvents: { send: (...args) => { sent.push(args[0]); return sendEvent(); } }, sent
+  });
+}
+
+test("backend recovery proceeds when the previous child had to be force-killed", async () => {
+  const h = recoveryHarness({
+    stopChild: async () => { throw new Error("The backend did not finish shutdown in time."); },
+    sendEvent: async () => true
+  });
+  assert.deepEqual(await h.context.recoverBackend("fixture"), { ready: true });
+  assert.deepEqual(h.context.sent, ["backend-recovered"]);
+});
+
+test("a renderer that fails to acknowledge recovery does not fail a healthy recovery", async () => {
+  const h = recoveryHarness({ stopChild: async () => {}, sendEvent: () => Promise.reject(new Error("renderer gone")) });
+  assert.deepEqual(await h.context.recoverBackend("fixture"), { ready: true });
+  await tick();
+});
+
+function argvHarness() {
+  const context = vm.createContext({ path: path.win32, __dirname: "C:\\Apps\\Explore Better\\resources\\app.asar", process: { argv: [] } });
+  vm.runInContext(section("function isLikelyPathArgument(", "function shellModeFromArgv("), context);
+  return (argv, cwd) => context.shellTargetFromArgv(["C:\\Apps\\Explore Better\\Explore Better.exe", ...argv], cwd);
+}
+
+test("shell targets map Explorer's quoted drive roots to the drive root", () => {
+  const target = argvHarness();
+  assert.equal(target(['C:"']), "C:\\");
+  assert.equal(target(["D:"]), "D:\\");
+  assert.equal(target(['E:\\Some Folder"', "--shell-mode=activeNewTab"]), "E:\\Some Folder");
+  assert.equal(target(["C:\\Users\\fixture"]), "C:\\Users\\fixture");
+  assert.equal(target(['"', "C:\\Later"]), "C:\\Later");
+  assert.equal(target(["--no-updates"]), null);
+});
+
+test("second-instance shell targets resolve relative paths against the launching directory", () => {
+  const target = argvHarness();
+  assert.equal(target(["child"], "D:\\Work"), "D:\\Work\\child");
+  assert.equal(target(["..\\sibling"], "D:\\Work\\project"), "D:\\Work\\sibling");
+  assert.equal(target(["C:\\Absolute"], "D:\\Work"), "C:\\Absolute");
+});
+
+test("native drag bounds existence checks before touching the filesystem", () => {
+  let checks = 0;
+  const context = vm.createContext({ path: path.win32, existsSync: () => { checks++; return true; } });
+  vm.runInContext(section("function nativeDragPaths(", "function redactedUpdateFeedUrl("), context);
+  const paths = Array.from({ length: 100_000 }, (_, index) => `C:\\fixture\\${index}.txt`);
+  assert.equal(context.nativeDragPaths(paths).length, 500);
+  assert.equal(checks, 500);
+  assert.deepEqual(context.nativeDragPaths(["C:\\a", "c:\\A", ""]), ["C:\\a"]);
+});
+
+test("renderer crash reloads are capped within the reload window", () => {
+  const context = vm.createContext({});
+  vm.runInContext(section("const rendererCrashReloadLimit", "// A crashed renderer"), context);
+  const history = [];
+  assert.equal(context.rendererCrashReloadAllowed(history, 0), true);
+  assert.equal(context.rendererCrashReloadAllowed(history, 1_000), true);
+  assert.equal(context.rendererCrashReloadAllowed(history, 2_000), true);
+  assert.equal(context.rendererCrashReloadAllowed(history, 3_000), false);
+  assert.equal(context.rendererCrashReloadAllowed(history, 61_500), true, "reloads older than the window expire");
 });
 
 async function withHealthServer(handler, callback) {

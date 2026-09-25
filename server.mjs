@@ -21617,14 +21617,20 @@ const modulePath = path.resolve(fileURLToPath(import.meta.url));
 if (invokedPath === modulePath) {
   if (typeof process.send === "function") {
     let shutdownRequested = false;
-    process.on("message", (message) => {
-      if (message?.type !== "explore-better:shutdown" || shutdownRequested) return;
+    const shutdown = () => {
+      if (shutdownRequested) return;
       shutdownRequested = true;
       stopServer().then(() => process.exit(0), (error) => {
         console.error(error);
         process.exit(1);
       });
+    };
+    process.on("message", (message) => {
+      if (message?.type === "explore-better:shutdown") shutdown();
     });
+    // The desktop parent owns this child through the IPC channel. If the parent
+    // dies without asking for shutdown, stop instead of lingering as an orphan.
+    process.on("disconnect", shutdown);
   }
   startServer().catch((error) => {
     console.error(error);
