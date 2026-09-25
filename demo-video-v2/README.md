@@ -53,6 +53,43 @@ The score comes from `src/audio/industrial-score.mjs` (see below). It is re-time
 
 Generated media (`capture/`, `output/`, `public/live.mp4`) is gitignored. Older cuts (v2–v5) were edited against earlier captures and are kept for reference. Their scripts expect the capture from their own era, which is in git history.
 
+## Feature clips (website feature grid)
+
+```powershell
+cd path\to\explore-better
+npm run build:renderer
+cd demo-video-v2
+npm install
+npm run capture:features        # 13 real app recordings, about eight minutes
+npm run render:features         # web clips, posters, features.json, contact sheets
+```
+
+One short, silent, looping clip per feature, each its own real recording of the Electron app. `site/assets/features/features.json` is the contract the website builds against: `{ version, clips: [{ id, title, summary, src, poster, width, height, durationSeconds, alt }] }`, in this order:
+
+| Clip | What the real app does |
+| --- | --- |
+| `dual-pane` | New tab, drill into two folders, tiles view, breadcrumb back, switch tabs, focus the other pane |
+| `terminal` | Ctrl+\` opens the tab's PowerShell; opening a folder sends `Set-Location`; `Get-ChildItem \| Select -First 5` |
+| `disk-map` | Scan, hover blocks, focus `02 Product` in the treemap, Top Files table |
+| `transfer` | Ctrl+A, F5: preview with rename, overwrite and skip conflicts; Apply; live progress; Undo restores all 360 photos |
+| `large-folder` | A 100,000-file folder (generated for the clip, then deleted) opens, scrolls, End jumps to the last entry |
+| `search` | Files larger than 5 MB modified in the last 7 days; results land in the pane |
+| `compare-sync` | Compare two Website folders, then Plan L->R (never applied) |
+| `previews` | Preview panel: Markdown, PNG, PDF, then a STEP assembly orbited in 3D |
+| `command-palette` | Ctrl+P fuzzy search runs "Horizontal split panes", then "Vertical split panes" |
+| `safe-rename` | F2 onto `README.md` is refused; a real rename is undone from Operations |
+| `keyboard` | Arrow keys with a visible focus ring, Shift+F10 menu, arrows to Create Checksums, Enter, Esc |
+| `ai-handoff` | A real Codex CLI run (`codex exec`) through the read-only MCP profile: `get_context`, `search_files`, `show_in_explore_better` |
+| `ai-profile` | AI Bridge preferences: authorized folder, tool permissions, then the audit log of those calls |
+
+Spec: 1280×800, 30 fps, H.264 High, yuv420p, `+faststart`, no audio track, 6–12 s, a 12-frame dissolve into the frames just before the first one so the clip loops, and each file at the lowest CRF that fits 1.5 MB (hard cap 2.5 MB). Posters are WebP under 60 KB, taken from a representative frame. `render-features.mjs` checks all of this with ffprobe (including that the `moov` atom precedes `mdat`) and fails the clip otherwise.
+
+The capture reuses the v6 safety model: a disposable `C:\Demo` (or `EB_DEMO_ROOT`) with its own profile, app data and Electron user data, refused if the folder exists without the marker file, deleted afterwards; nothing touches the registry and Explorer integration is never opened. A watchdog also discards any clip in which a pane leaves the demo root or visible text contains the account name or the repository path (the unpackaged build's AI client snippet does, so the `ai-profile` clip uses settings search to keep it off screen). The UI renders at 1440×900 CSS pixels at the display's own scale factor (the WebGL terminal only paints correctly when the emulated and real scale factors match), so on a 150% display the source is 2160×1350 and the edit can push in about 1.6× without upscaling.
+
+The AI clip is a real `codex exec` run when Codex is installed (otherwise the scripted stdio client, labelled "MCP client"). Model thinking time between the calls is cut, and a small mono label on screen states how many seconds were trimmed.
+
+`src/features-edit.mjs` holds each clip's segments, camera moves, poster frame, title, summary and alt text, all relative to the capture's markers. `src/Features.jsx` is the Remotion composition (camera, keycaps, AI trace panel, loop dissolve). Useful flags: `npm run capture:features -- --only terminal,search` re-records some clips into the existing manifest, `npm run render:features -- --only terminal` re-renders some, and `npm run render:features -- --stills terminal:0,120` renders review stills to `output/features/`. Masters, props and contact sheets (`output/features/<id>-contact-sheet.jpg`) stay in the gitignored `output/`; raw recordings stay in `capture/features/`.
+
 ## v2 (original hype cut)
 
 `npm run render` renders the first continuous-recording cut to `output/explore-better-hype-demo-v2-1080p.mp4`, with a poster, contact sheet, source score and JSON manifest.

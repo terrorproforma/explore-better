@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "clips": [
+    {
+      "id": "dual-pane",
+      "title": "Dual panes and tabs",
+      "summary": "Two independent panes, each with its own tabs, breadcrumbs and view mode.",
+      "src": "assets/features/dual-pane.mp4",
+      "poster": "assets/features/dual-pane.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 10.43,
+      "alt": "A new tab opens in the left pane and drills into 02 Product and Renders, switches to a thumbnail tiles view, steps back with the breadcrumb, returns to the first tab, then focus moves to the right pane."
+    },
+    {
+      "id": "terminal",
+      "title": "A terminal in every tab",
+      "summary": "Each tab's PowerShell follows the folder you open in the pane.",
+      "src": "assets/features/terminal.mp4",
+      "poster": "assets/features/terminal.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 8.1,
+      "alt": "Ctrl+` opens a PowerShell drawer under the Project files pane. Opening the 04 Launch folder sends a Set-Location to the prompt, and Get-ChildItem | Select -First 5 lists the folder's files."
+    },
+    {
+      "id": "disk-map",
+      "title": "Disk Map",
+      "summary": "A nested treemap of exact disk allocation, with the largest files beside it.",
+      "src": "assets/features/disk-map.mp4",
+      "poster": "assets/features/disk-map.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 10.83,
+      "alt": "Disk Map scans C:\\Demo\\Project files and draws a nested treemap coloured by file type. Hovering names each block, focusing 02 Product zooms the map into that folder, and the Top Files table lists the biggest files."
+    },
+    {
+      "id": "transfer",
+      "title": "Transfer preview and undo",
+      "summary": "See every copy, rename, overwrite and skip before a byte moves, then undo the whole batch.",
+      "src": "assets/features/transfer.mp4",
+      "poster": "assets/features/transfer.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 11.43,
+      "alt": "360 photos are copied to the other pane with F5. The transfer preview lists each destination with three conflicts set to rename, overwrite and skip. Apply starts a journaled copy with live progress in Operations, and Undo restores all 360 items."
+    },
+    {
+      "id": "large-folder",
+      "title": "100,000 files, no waiting",
+      "summary": "A folder with 100,000 entries opens instantly and scrolls without stutter.",
+      "src": "assets/features/large-folder.mp4",
+      "poster": "assets/features/large-folder.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 6.67,
+      "alt": "Opening Sensor logs, a folder of 100,000 CSV files, shows rows immediately while the full list loads; the pane scrolls smoothly through the listing and End jumps to reading-100000.csv."
+    },
+    {
+      "id": "search",
+      "title": "Filtered search",
+      "summary": "Combine name, size, date and type filters, and get the results in the pane.",
+      "src": "assets/features/search.mp4",
+      "poster": "assets/features/search.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 9.83,
+      "alt": "The Search dialog is set to files larger than 5 MB modified in the last 7 days under C:\\Demo\\Project files. Six matches appear with their sizes and dates, and closing the dialog leaves them listed in the left pane."
+    },
+    {
+      "id": "compare-sync",
+      "title": "Compare and sync",
+      "summary": "Compare two folders and preview the sync plan before anything changes.",
+      "src": "assets/features/compare-sync.mp4",
+      "poster": "assets/features/compare-sync.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 7.57,
+      "alt": "Compare runs on the Website folders in both panes and marks files only on the left, only on the right and newer on the left. Plan L->R then previews a sync that copies two files and replaces one; nothing is applied."
+    },
+    {
+      "id": "previews",
+      "title": "Previews, including 3D",
+      "summary": "Text, images, PDFs and STEP or STL models preview in the side panel.",
+      "src": "assets/features/previews.mp4",
+      "poster": "assets/features/previews.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 11.87,
+      "alt": "Selecting files in the left pane updates the preview panel: a README as text, a landscape PNG, a one-page PDF brief, then a STEP bracket assembly rendered in 3D and orbited by dragging."
+    },
+    {
+      "id": "command-palette",
+      "title": "Command palette",
+      "summary": "Ctrl+P finds any of 100+ commands by fuzzy search.",
+      "src": "assets/features/command-palette.mp4",
+      "poster": "assets/features/command-palette.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 9.7,
+      "alt": "Ctrl+P opens the Command Center; typing split horizontal filters the command list, and Enter stacks the panes top and bottom. A second search, split vertical, puts them back side by side."
+    },
+    {
+      "id": "safe-rename",
+      "title": "Safe rename",
+      "summary": "Rename refuses to overwrite an existing file, and every rename can be undone.",
+      "src": "assets/features/safe-rename.mp4",
+      "poster": "assets/features/safe-rename.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 11.37,
+      "alt": "F2 on launch-plan.md and typing README.md is refused with the message that an item named README.md already exists. Renaming to launch-plan-final.md succeeds, and Undo in Operations restores launch-plan.md."
+    },
+    {
+      "id": "keyboard",
+      "title": "Keyboard-first",
+      "summary": "Arrow keys, Shift+F10 menus and every dialog work without a mouse, with visible focus.",
+      "src": "assets/features/keyboard.mp4",
+      "poster": "assets/features/keyboard.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 8.03,
+      "alt": "Arrow keys move a visible focus ring down the file list to budget-2026.xlsx; Shift+F10 opens its context menu, arrows walk the menu to Create Checksums, Enter opens the checksum dialog, and Esc closes it."
+    },
+    {
+      "id": "ai-handoff",
+      "title": "Live AI context over MCP",
+      "summary": "An AI client sees your active pane and can reveal files in it, through a local read-only MCP profile.",
+      "src": "assets/features/ai-handoff.mp4",
+      "poster": "assets/features/ai-handoff.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 7.9,
+      "alt": "A real Codex CLI run through Explore Better's local MCP server with a read-only profile: get_context reads the active pane, search_files finds release-checklist.md, and show_in_explore_better opens 04 Launch in the left pane with the file selected. Model thinking time is trimmed and labelled."
+    },
+    {
+      "id": "ai-profile",
+      "title": "Scoped AI access",
+      "summary": "Each AI client gets a profile: its folders, its tools, and an audit log of every call.",
+      "src": "assets/features/ai-profile.mp4",
+      "poster": "assets/features/ai-profile.webp",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 9.73,
+      "alt": "In Preferences, the AI Bridge profile Project files - read only is authorized for C:\\Demo\\Project files only, its tool permissions show read tools enabled and write tools off, and the audit history lists the get_context, search_files and show_in_explore_better calls."
+    }
+  ]
+}
