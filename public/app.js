@@ -2855,40 +2855,124 @@ async function loadIntegrationStatus() {
   return app.integrationStatus;
 }
 
+const stateSyncFields = [
+  "layout",
+  "favorites",
+  "aliases",
+  "recentLocations",
+  "fileBasket",
+  "layouts",
+  "tabGroups",
+  "collections",
+  "paneSnapshots",
+  "selectionSets",
+  "labels",
+  "folderFormats",
+  "displayPresets",
+  "filterPresets",
+  "syncProfiles",
+  "openWithPresets",
+  "searchPresets",
+  "selectPresets",
+  "bulkRenamePresets",
+  "scripts",
+  "commands",
+  "settings"
+];
+const stateSyncFieldSet = new Set(stateSyncFields);
+// Per-field JSON of what the server last confirmed, so saves send only renderer-side changes
+// and never revert fields the server changed on its own (labels moved with files, MCP edits).
+const stateSync = { snapshot: new Map(), saveSeq: 0, appliedSeq: 0 };
+let syncedAppState = app.state;
+
+function stateFieldText(state, field) {
+  const value = state?.[field];
+  return value === undefined ? undefined : JSON.stringify(value);
+}
+
+function recordSyncedState(state) {
+  stateSync.snapshot.clear();
+  for (const field of stateSyncFields) {
+    stateSync.snapshot.set(field, stateFieldText(state, field));
+  }
+  // A whole-state replacement is newer than any save still in flight.
+  stateSync.appliedSeq = stateSync.saveSeq;
+}
+
+Object.defineProperty(app, "state", {
+  configurable: true,
+  enumerable: true,
+  get: () => syncedAppState,
+  set(value) {
+    syncedAppState = value;
+    recordSyncedState(value);
+  }
+});
+
+// Adopt server values only for fields the renderer has not changed since `baseline` was taken.
+function mergeServerState(serverState, baseline = stateSync.snapshot, sent = {}) {
+  const state = syncedAppState;
+  if (!state || !serverState || typeof serverState !== "object") {
+    return;
+  }
+  for (const [field, value] of Object.entries(serverState)) {
+    if (!stateSyncFieldSet.has(field)) {
+      state[field] = value;
+      continue;
+    }
+    const base = baseline.get(field);
+    const wasSent = Object.hasOwn(sent, field);
+    if (stateFieldText(state, field) === base) {
+      state[field] = value;
+      if (field !== "layout") {
+        stateSync.snapshot.set(field, stateFieldText(serverState, field));
+      } else if (wasSent) {
+        stateSync.snapshot.set(field, base);
+      }
+    } else if (wasSent) {
+      stateSync.snapshot.set(field, base);
+    }
+  }
+}
+
 async function saveStateNow() {
   if (!app.state) {
     return null;
   }
   app.state.layout = serializeLayout();
-  app.state = await request("/api/state", {
+  const baseline = new Map();
+  const body = {};
+  for (const field of stateSyncFields) {
+    const text = stateFieldText(app.state, field);
+    baseline.set(field, text);
+    if (text !== undefined && text !== stateSync.snapshot.get(field)) {
+      body[field] = app.state[field];
+    }
+  }
+  if (!Object.keys(body).length) {
+    updateOperationReadout();
+    return app.state;
+  }
+  const seq = ++stateSync.saveSeq;
+  const saved = await request("/api/state", {
     method: "POST",
-    body: JSON.stringify({
-      layout: app.state.layout,
-      favorites: app.state.favorites || [],
-      aliases: app.state.aliases || [],
-      recentLocations: app.state.recentLocations || [],
-      fileBasket: app.state.fileBasket || [],
-      layouts: app.state.layouts || [],
-      tabGroups: app.state.tabGroups || [],
-      collections: app.state.collections || [],
-      paneSnapshots: app.state.paneSnapshots || [],
-      selectionSets: app.state.selectionSets || [],
-      labels: app.state.labels || [],
-      folderFormats: app.state.folderFormats || [],
-      displayPresets: app.state.displayPresets || [],
-      filterPresets: app.state.filterPresets || [],
-      syncProfiles: app.state.syncProfiles || [],
-      openWithPresets: app.state.openWithPresets || [],
-      searchPresets: app.state.searchPresets || [],
-      selectPresets: app.state.selectPresets || [],
-      bulkRenamePresets: app.state.bulkRenamePresets || [],
-      scripts: app.state.scripts || [],
-      commands: app.state.commands || [],
-      settings: app.state.settings || {}
-    })
+    body: JSON.stringify(body)
   });
+  if (seq > stateSync.appliedSeq) {
+    stateSync.appliedSeq = seq;
+    mergeServerState(saved, baseline, body);
+  }
   updateOperationReadout();
   return app.state;
+}
+
+async function refreshServerOwnedState() {
+  const seq = stateSync.saveSeq;
+  const state = await request("/api/state");
+  // A save started meanwhile returns fresher server state itself.
+  if (seq === stateSync.saveSeq) {
+    mergeServerState(state);
+  }
 }
 
 function scheduleStateSave() {
@@ -19129,12 +19213,17 @@ async function pollOperationState({ silent = false } = {}) {
   app.operationPollBusy = true;
   const previousActive = activeOperations().map((operation) => operation.id);
   try {
-    const state = await request("/api/state");
-    const nextOperations = Array.isArray(state.operations) ? state.operations : [];
+    const { operations } = await request("/api/operations");
+    const nextOperations = Array.isArray(operations) ? operations : [];
     app.state.operations = nextOperations;
     const finished = previousActive
       .map((operationId) => nextOperations.find((operation) => operation.id === operationId))
       .filter((operation) => operation && !operationIsActive(operation));
+    if (finished.length) {
+      // Finished operations may have moved labels, collections or basket items server-side.
+      clearListingCache();
+      await refreshServerOwnedState().catch(() => {});
+    }
     renderOperations();
     if (finished.length && !silent) {
       setStatus(`${finished.length} operation${finished.length === 1 ? "" : "s"} finished`);

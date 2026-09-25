@@ -194,7 +194,7 @@ try {
   });
   await test("operation-poll-keeps-keyboard-focus", async page => {
     let completed = 0;
-    await page.route("**/api/state", async route => {
+    await page.route(/\/api\/(state|operations)$/, async route => {
       const response = await route.fetch(), state = await response.json();
       state.operations = [{ id: "fixture-operation", type: "copy", label: "Fixture operation", status: "running", progress: { total: 10, completed }, undo: {} }];
       await route.fulfill({ json: state });
