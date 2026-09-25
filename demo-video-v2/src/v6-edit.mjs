@@ -6,7 +6,7 @@ export const FPS = 30;
 export const WIDTH = 1920;
 export const HEIGHT = 1080;
 
-const CHAPTERS = [
+export const CHAPTERS = [
   { id: "open", title: "Overview" },
   { id: "find", title: "Filtered Search" },
   { id: "disk", title: "Exact Disk Map" },
@@ -51,7 +51,7 @@ function clipPlan() {
   ];
 }
 
-function captionPlan(texts, aiClient) {
+export function captionPlan(texts, aiClient) {
   const copied = /(\d+)\s*copied/i.exec(texts.opsDoneMeta || "")?.[1];
   const took = /(\d+(?:\.\d+)?\s*s)\s*total/i.exec(texts.opsDoneMeta || "")?.[1]?.replace(/\s+/g, "");
   const matches = /(\d+)\s*match/i.exec(texts.searchSummary || "")?.[1];

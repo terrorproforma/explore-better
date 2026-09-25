@@ -13,6 +13,7 @@ import {
   useVideoConfig
 } from "remotion";
 import { ExploreBetterV6 } from "./V6.jsx";
+import { ExploreBetterV7 } from "./V7.jsx";
 import { FeatureClip } from "./Features.jsx";
 
 const ink = "#111715";
@@ -573,6 +574,16 @@ export function Root() {
       <Composition
         id="ExploreBetterV6"
         component={ExploreBetterV6}
+        durationInFrames={300}
+        fps={30}
+        width={1920}
+        height={1080}
+        defaultProps={{ edit: null }}
+        calculateMetadata={({ props }) => ({ durationInFrames: props.edit?.durationInFrames || 300 })}
+      />
+      <Composition
+        id="ExploreBetterV7"
+        component={ExploreBetterV7}
         durationInFrames={300}
         fps={30}
         width={1920}

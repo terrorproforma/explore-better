@@ -1,4 +1,4 @@
-// Records one continuous, real Explore Better session for the v6 demo cut.
+// Records one continuous, real Explore Better session for the v6 and v7 demo cuts.
 //
 // Safety: everything runs inside a disposable demo root (default C:\Demo, override with
 // EB_DEMO_ROOT). The root must not exist yet, or must carry the marker this script writes,
@@ -352,6 +352,8 @@ let firstFrameStamp = 0;
 let captureStart = 0;
 const markers = [];
 const keys = [];
+// Every pointer click, so the v7 edit can retime footage to land clicks on the beat.
+const clicks = [];
 const rects = {};
 const texts = {};
 const clock = () => Number(((Date.now() - (firstFrameWall || captureStart)) / 1000).toFixed(3));
@@ -460,6 +462,7 @@ try {
       void node?.offsetWidth;
       node?.classList.add("click");
     });
+    clicks.push({ seconds: clock(), label: typeof target === "string" ? target : "row", double: Boolean(options.double) });
     if (options.double) await locator.dblclick(); else await locator.click({ modifiers: options.modifiers });
     await page.waitForTimeout(options.settle ?? 380);
   };
@@ -474,6 +477,7 @@ try {
       void node?.offsetWidth;
       node?.classList.add("click");
     });
+    clicks.push({ seconds: clock(), label: selector, double: false });
     await locator.selectOption(value);
     await page.waitForTimeout(420);
   };
@@ -555,6 +559,7 @@ try {
     const text = document.querySelector("#size-analysis-summary")?.textContent || "";
     return !/Scanning/i.test(text) && document.querySelectorAll("#size-analysis-files .size-analysis-row").length > 0;
   }, null, { timeout: 30_000 });
+  mark("disk-scanned");
   await page.waitForTimeout(900);
   await click('[data-size-analysis-action="view-map"]');
   mark("disk-map");
@@ -652,13 +657,18 @@ try {
   await cursor(false);
   await page.waitForTimeout(300);
   await page.keyboard.type("Get-Location", { delay: 70 });
+  mark("terminal-enter");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(1_300);
   mark("terminal-follow");
-  await click(leftRow("04 Launch"), { double: true, settle: 1_100 });
+  await click(leftRow("04 Launch"), { double: true, settle: 0 });
+  await page.waitForFunction(() => document.querySelector('[data-path-input="left"]')?.value?.endsWith("04 Launch"), null, { timeout: 10_000 }).catch(() => {});
+  mark("terminal-cd");
+  await page.waitForTimeout(1_100);
   await textarea.focus();
   await cursor(false);
   await page.keyboard.type("Get-Content .\\release-checklist.md", { delay: 55 });
+  mark("terminal-cat");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(2_300);
   await recordRect("terminalDrawerEnd", '[data-terminal-drawer="left"]');
@@ -724,6 +734,10 @@ try {
   await page.waitForTimeout(500);
   const audit = page.locator(".ai-bridge-audit summary");
   await audit.waitFor({ state: "visible", timeout: 10_000 });
+  // While "audit" is half typed the filter still shows the dev-build client snippet, which
+  // contains repository paths. Edits must start after this marker.
+  await page.locator("#preference-ai-snippet").waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
+  mark("preferences-filtered");
   await click(audit, { settle: 500 });
   const snippetVisible = await page.locator("#preference-ai-snippet").isVisible().catch(() => false);
   if (snippetVisible) throw new Error("The AI Bridge client snippet is still visible; it would show repository paths.");
@@ -773,6 +787,7 @@ try {
     aiClient: handoff.client,
     markers,
     keys,
+    clicks,
     rects,
     texts,
     aiEvents: toolEvents,

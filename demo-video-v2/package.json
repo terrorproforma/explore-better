@@ -11,6 +11,7 @@
     "render:tight": "node render-tight.mjs",
     "render:value": "node render-value.mjs",
     "render:v6": "node render-v6.mjs",
+    "render:v7": "node render-v7.mjs",
     "render:features": "node render-features.mjs",
     "render:music": "node render-music.mjs"
   },
