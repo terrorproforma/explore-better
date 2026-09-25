@@ -36,4 +36,5 @@ demo-video/output/
 demo-video-v2/output/
 demo-video-v2/capture/
 demo-video-v2/public/live.mp4
+demo-video-v2/public/features/
 demo-video*/node_modules/

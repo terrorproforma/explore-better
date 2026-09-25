@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "capture": "node capture-app-footage.mjs",
+    "capture:features": "node capture-features.mjs",
     "render": "node render.mjs",
     "render:industrial": "node render-industrial.mjs",
     "render:tight": "node render-tight.mjs",
     "render:value": "node render-value.mjs",
-    "render:v6": "node render-v6.mjs"
+    "render:v6": "node render-v6.mjs",
+    "render:features": "node render-features.mjs"
   },
   "dependencies": {
     "@remotion/cli": "4.0.489",
